@@ -701,7 +701,7 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 **From M0**
 
-- [ ] herdr-core requests (`docs/herdr-core-requests.md`): the saved cursor in the first paint, and a resync signal. When they land, drop the saved-cursor limitation and emit `Resynced`.
+- [ ] herdr-core requests (`docs/herdr-core-requests.md`): the saved cursor in the first paint (herdrdev/herdr-core#354), and a resync signal (#355). When they land, drop the saved-cursor limitation and emit `Resynced`.
 - [ ] If herdr-core grants ordered resizes to active viewers, should the adapter drop back to one viewer per attachment?
 
 **New in rev 4**
