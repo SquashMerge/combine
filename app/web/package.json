@@ -1,5 +1,6 @@
 {
   "name": "combine-web",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "license": "BUSL-1.1"
 }

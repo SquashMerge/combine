@@ -2,6 +2,7 @@
   "name": "m0-client",
   "private": true,
   "type": "module",
+  "license": "BUSL-1.1",
   "description": "M0 spike: headless xterm.js client and verifiers. Disposable.",
   "dependencies": {
     "@xterm/addon-unicode11": "0.9.0",

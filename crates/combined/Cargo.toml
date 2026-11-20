@@ -3,6 +3,8 @@ name = "combined"
 description = "Combine daemon: one per agent host"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 # Compiles the in-memory fake TerminalBackend (src/testing/) for tests.

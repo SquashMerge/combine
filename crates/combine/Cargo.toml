@@ -3,6 +3,8 @@ name = "combine"
 description = "Combine CLI: the `combine mcp` shim"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 combine-protocol = { path = "../combine-protocol" }

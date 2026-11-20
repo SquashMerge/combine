@@ -7,3 +7,5 @@ exclude = ["spike"]
 [workspace.package]
 edition = "2021"
 version = "0.0.0"
+license = "BUSL-1.1"
+repository = "https://github.com/SquashMerge/combine"
