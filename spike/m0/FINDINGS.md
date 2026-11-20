@@ -6,7 +6,7 @@ Note on the result files: each `gonogo-*.json` case records `pass: false` whenev
 
 ## Verdict
 
-**Go, with recorded losses and two design changes.**
+**Go for the opaque-relay architecture. The fidelity gate is conditional on the owner's decisions in section 7, and M0 is not complete.** (Amended after opencode's review 4, `.reviews/opencode-4.md`; see section 0 for what changed.)
 
 - **Go/no-go (SPEC's criteria): pass in all three cases.** A fresh `terminal.attach` restores:
   - screen text and colours;
@@ -30,6 +30,39 @@ Note on the result files: each `gonogo-*.json` case records `pass: false` whenev
 - **50 MB burst:**
   - A byte-counting client got everything at 75 MB/s.
   - A client applying to `@xterm/headless` could not keep up, and herdr-core skipped ahead with in-band repaints (history lost, state correct).
+
+## 0. Corrections after review 4
+
+Opencode reviewed this spike against the code and raw results (`.reviews/opencode-4.md`, evidence in `/private/tmp/opencode/combine-review4-t2h/`). It confirmed the go/no-go audit (every recorded diff maps to section 2) and both backend corrections (resize notifications, credit). It also found that some conclusions here were stronger than the evidence:
+
+1. **Active-viewer resize ordering is wrong, not just unproven** (P1, reproduced against a real core). m0d logs `resized` when it *sends* RESIZE, but output the core already produced at the old size can still be in flight and lands after it in the log. A fresh attach and the live client then disagree. The only correct ordering boundary is the observer's RESIZE plus replacement paint. Section 7.7's recommendation is withdrawn, and decision 1 is no longer optional: Combine needs (a) paired viewers or (b) a herdr-core change.
+2. **A reconnected pair restores its original size.** `viewer_params` rebuilds both viewers from the attach-time parameters, so after a reconnect the input viewer reapplies the old size on focus (reproduced: 100x30, then 80x24). M1 must keep the panel's latest requested size and display facts as mutable state, separate from the observed PTY size, and supervise both halves of a pair together.
+3. **The fidelity gate passes only once the losses are accepted or fixed.** The saved-cursor loss visibly overwrites the screen, and 7 unanswered queries fail a named M0 item. `Terminal.screen: "exact"` is herdr-core's recovery status, not proof that the paint is lossless.
+4. **The comparator doesn't compare everything the table in section 2 claims.** It flattens underline to a boolean and ignores underline style and colour, hyperlink identity, and `?12` blink. Those rows are backed by the paint bytes (`4:3m`, `58;2;...m`, `?12h`, OSC 8), not by compared state. xterm.js *does* represent OSC 8 (`urlId`). The `modes2` row-9 diff is the OSC 8 loss: those cells were written under the open link, before any SGR underline.
+5. **The relay tests are positive examples, not proofs.**
+   - The loss check verifies line numbers, not bytes: a deleted or duplicated filler byte still passes.
+   - The resize test doesn't assert that the resize happened or where it falls.
+   - Later drops in the replay runs happened after output had finished.
+   - `two` has no pass predicate.
+   - The scripts exit 0 even on failure.
+   - Older result files from earlier comparator versions are superseded: `relay-all-ssh.json` (its `replay` result) and the combined overflow result. The standalone `relay-replay*.json` and `relay-overflow*.json` are current.
+6. **Memory is bounded only for DATA.** In `ack` mode the log cap stops credit, but JSON events (repeated resizes) still append without a hard cap, and the per-connection control and input channels are unbounded. The RSS numbers hold for the single-stream bursts measured.
+7. **Measurement endpoints:**
+   - Latency stops when the echo's DATA is received, before xterm applies it, and excludes rendering.
+   - Timed-out samples would be dropped silently (none were in these runs: n = 2000 each).
+   - Burst time is "DONE received", not "program done".
+   - The burst never compared the final screen with a reference.
+8. **`CAN ESC [ ! p` is a heuristic, not an overflow signal.** Program output can contain those bytes, and frames can split them. A reliable resync indication has to come from herdr-core.
+
+**Requirements for M1's contract tests**, from the above:
+- byte-exact payload checks (expected length plus hash), including the end of the first paint;
+- barriers with unique old-size and new-size markers around every resize;
+- drops on both sides of the applied-event boundary;
+- a test that fails if a resize is dropped or moved;
+- an explicit pass or fail exit status;
+- run IDs and the tested revision in every result;
+- the delayed-old-output resize case from item 1;
+- a comparator that covers underline style and colour, link identity and blink.
 
 ## 1. herdr-core's framed protocol (observed)
 
@@ -142,12 +175,12 @@ Each `x` means the reference and the fresh attach matched for that state in that
 | Mouse 1000/1002/1003, SGR 1006 encoding | x | x | x | x |
 | Bracketed paste 2004, focus 1004 | x | x | x | x |
 | DECCKM, application keypad (sent as `?66`; DECKPAM in the source) | x | x | x | x |
-| IRM, DECOM, DECAWM off, reverse wrap `?45`, cursor blink `?12` | x | x | x | x |
+| IRM, DECOM, DECAWM off, reverse wrap `?45` (cursor blink `?12`: in the paint bytes, not compared) | x | x | x | x |
 | Scroll region (DECSTBM) | x | x | x | x |
-| SGR pen left active (incl. curly underline, underline colour) | x | x | x | x |
+| SGR pen left active (curly underline and underline colour: in the paint bytes, not compared; section 0, item 4) | x | x | x | x |
 | G0 charset (DEC graphics) | x | x | x | x |
 | Title (OSC 2) | x | x | x | x |
-| Kitty keyboard flags, modifyOtherKeys 2, OSC 8 link left open | in the paint bytes (`=1;1u`, `>4;2m`, OSC 8); xterm.js can't represent them | same | same | same |
+| Kitty keyboard flags, modifyOtherKeys 2, OSC 8 link left open | in the paint bytes (`=1;1u`, `>4;2m`, OSC 8). xterm.js can't represent the first two; the open link survives in the pen (`urlId`). Not compared by the snapshot (section 0, item 4) | same | same | same |
 | **DECSC saved cursor** | lost | lost | lost | lost |
 | **DECSCUSR cursor shape** | lost | lost | lost | lost |
 | **Soft-wrap flag on wrapped rows** (vim, less) | lost | lost | lost | lost |
@@ -260,14 +293,14 @@ Fed to `@xterm/headless`, only DECXCPR gets a reply (`CSI ? 1 ; 1 R`). So with S
 | Client | Time | Received | Loss | Daemon RSS before → peak | Core RSS peak |
 | --- | --- | --- | --- | --- | --- |
 | byte counter, local pipe | 0.66 s (75 MB/s) | 52,428,813 B (all) | none: 819,200 lines, 0 jumps, 0 duplicates, 0 in-band repaints | 3.4 → 4.9 MB | 16.8 MB |
-| `@xterm/headless` applying every event, local pipe | program done in 0.73 s | 6,302,404 B | output history lost: 11 in-band repaints, 11 jumps, 0 duplicates; last line received | 3.3 → 10.1 MB | 23.0 MB |
+| `@xterm/headless` applying every event, local pipe | DONE received in 0.73 s | 6,302,404 B | output history lost: 11 in-band repaints, 11 jumps, 0 duplicates; last line received | 3.3 → 10.1 MB | 23.0 MB |
 | `@xterm/headless`, real ssh to localhost | 0.70 s | 6,302,404 B | same: 11 repaints | 3.3 → 9.5 MB | 23.0 MB |
 
 How to read it:
 - The program writes 50 MB in about 0.7 s and herdr-core never slows it down.
 - A client that only counts bytes keeps up.
 - A client that parses into xterm.js doesn't. The daemon withholds credit at its 4 MiB cap, herdr-core's own queue overflows, and it repaints in-band.
-- Memory stays bounded on both sides, and the client ends on the right screen (same mechanism as the "overflow" test). The bytes in between are never delivered.
+- Memory stays bounded for this single-stream workload. The client received the last line, but this test didn't compare its final screen with a reference (section 0, item 7). The bytes in between are never delivered.
 
 ### Network listeners
 
@@ -364,13 +397,13 @@ How to read it:
 
    OSC 52 reads should stay unanswered for safety.
 4. **Slow clients and bursts.** Pick one:
-   - Accept herdr-core's in-band resync as the slow-client path. It's simple, bounded and keeps state correct, but loses history without the daemon knowing. The daemon could detect `CAN ESC[!p` and log a `resynced` event so the UI can show "output skipped".
+   - Accept herdr-core's in-band resync as the slow-client path. It's simple and bounded, but loses history without the daemon knowing. Detecting `CAN ESC[!p` to log a `resynced` event is only a heuristic (program output can contain it, and frames can split it).
    - Ask herdr-core for an overflow signal (a frame kind) per viewer.
 
    Also decide whether bursts must keep full scrollback. With an xterm.js client they don't today.
 5. **Paint end marker.** Ask herdr-core for an explicit end-of-paint frame or flag. Combine needs one to show "attaching…" until the screen is whole, and to wrap the paint in synchronized output.
 6. **Width tables.** Fix Combine's xterm.js Unicode version (11, or graphemes) to match herdr-core's Ghostty, and add a contract test for it.
-7. **Resize ordering for active viewers.** In m0d the client applies its own resize when the `resized` event comes back through the log, so replay puts it exactly where the live client applied it. SPEC should say so. Resizing xterm.js locally ahead of the log would make replay differ from live.
+7. **Resize ordering for active viewers.** *Withdrawn after review 4.* m0d logs an active viewer's resize when it sends the request, so old-size output still in flight lands after it and replay shows a wrong screen (section 0, item 1). Only the observer's RESIZE plus replacement paint is a correct boundary, which makes decision 1 (a) or (b) required.
 
 ## 8. The SSH bridge
 
