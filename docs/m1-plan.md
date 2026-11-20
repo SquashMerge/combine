@@ -26,6 +26,6 @@ Every slice ends with a clean `trellis rules check`, a clean `python3 -I tools/a
 - Tests against a real herdr-core always use an isolated core (`HC_SESSION`, scratch XDG paths under a short `/tmp` path), never the default core. The contract suite refuses the default socket.
 - herdr-core requests (`docs/herdr-core-requests.md`) don't block M1. When they land, the saved-cursor limitation is dropped and the adapter emits `Resynced`.
 
-## Decisions needed before S5
+## Decisions
 
-- **Frontend framework:** SPEC leaves React or Svelte open.
+- **Frontend framework:** React, as mimir and trellis use (decided 2026-11-20).

@@ -13,7 +13,8 @@ Combine is one desktop window over the herdr-core agent terminals on each of you
 - **Retiring guard rules:** when a trellis issue from `docs/trellis-feature-request.md` lands, delete the guard rule it replaces in the same change that adds the `rules.toml` check, and move the fixture over.
 - **Package names:** `combined`, `combine`, `combine-app` and `combine-web` are the app names `rules.toml` uses; `combine-protocol` is a library, mapped as a shared layer. Don't rename any of them without updating `rules.toml`.
 - **Test support:** `test_features = ["test-support"]` marks reference sites as test only where the `cfg(feature = "test-support")` gate is on the code itself. A gate on `mod testing;` doesn't carry into `testing.rs`, so start each support file with `#![cfg(feature = "test-support")]` as well (trellis `docs/rules.md`, Amendment #988).
-- **M0** lives in `spike/`, outside the Cargo workspace. Nothing may depend on it.
+- **M0** lives in `spike/`, outside the Cargo workspace. Nothing may depend on it. Its findings are in `spike/m0/FINDINGS.md`; SPEC.md rev 9 records the decisions taken from them.
+- **Never touch the default herdr-core.** It runs the agents working on this repo, including you. Every test, probe or tool that talks to a real herdr-core uses an isolated core: its own `HC_SESSION` and scratch XDG paths under a short `/tmp` path (macOS caps socket paths at 103 bytes). `spike/m0/env.sh` shows the setup. Before any restart, stop, kill or rm, check that `hc server status --json` reports a core id other than the default's. Code that connects to herdr-core takes the socket path explicitly, and tests refuse the default socket. herdr-core's own CONTRIBUTING.md asks the same: "Tests use isolated sessions; don't point them at a running core."
 
 ## Shared heavy-run lock
 

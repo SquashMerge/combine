@@ -4,6 +4,8 @@ Drafted 2026-11-20 from Combine's M0 terminal-fidelity spike (`spike/m0/FINDINGS
 
 Combine works without either change and records both gaps as known limitations (SPEC.md, "Where the first paint comes from"). Neither request changes behavior for viewers that don't ask for it.
 
+Target: [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) issues, as its CONTRIBUTING.md asks. Neither request was filed or fixed as of 2026-11-20 (0.1.21, plus the Unreleased changelog). Related open issues: #233 (attach has no resume position), #232 (the paint isn't one synchronized update), #91 (a new viewer's repaint drops OSC 4/10/11/12 colours), #69 (two viewers take the size from each other). The framed protocol M0 relied on is documented in herdr-core's `schema/README.md`, "Framed mode"; the second request extends what it says about falling 4 MiB behind.
+
 ## 1. Include the DECSC saved cursor in the first paint
 
 **Today.** A program saves the cursor with DECSC (`ESC 7`, or `CSI s`), draws elsewhere (a status line, a progress bar), then restores it with DECRC (`ESC 8`). After a fresh attach, the viewer's emulator has no saved cursor, so the next DECRC moves to (0,0). The program's following output overwrites the top-left of the screen until it next redraws everything.

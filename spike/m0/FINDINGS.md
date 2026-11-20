@@ -52,6 +52,7 @@ Opencode reviewed this spike against the code and raw results (`.reviews/opencod
    - Timed-out samples would be dropped silently (none were in these runs: n = 2000 each).
    - Burst time is "DONE received", not "program done".
    - The burst never compared the final screen with a reference.
+8a. **The framed protocol is documented upstream**, in herdr-core's `schema/README.md` ("Framed mode"), not in `hc schema`. It matches section 1. It also explains `CSI ? 9001 h/l` at the end of each paint: that is win32-input-mode state, part of the paint, not an end marker. And it defines AUTOMATIC_INPUT (kind 6) as the way viewers return automatic query replies.
 8. **`CAN ESC [ ! p` is a heuristic, not an overflow signal.** Program output can contain those bytes, and frames can split them. A reliable resync indication has to come from herdr-core.
 
 **Requirements for M1's contract tests**, from the above:

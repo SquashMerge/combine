@@ -281,7 +281,7 @@ pub trait Attachment: Send {
 | Caller identity | `HC_TERMINAL_ID` in each terminal's environment; `caller` param on calls |
 | Remote | `hc connect` speaks the API over stdio (`ssh box <absolute path>/hc connect`); a core can add other machines (`machine.add`, addresses like `mini/t7`) |
 
-**Framed protocol** (observed in M0, not in the schema; `spike/m0/FINDINGS.md` section 1 has the evidence): `hello` and its reply are newline-terminated JSON, and framing starts with the next byte. Each frame is `u32 LE channel | u8 kind | u32 LE length | payload`; channel 0 carries JSON-RPC. Kinds: 0 DATA, 1 CREDIT (u32 LE bytes), 2 CLOSE (JSON exit detail from the core), 3 RESIZE (u16 LE cols, rows), 4 FOCUS (u8), 5 FACTS (JSON display), 6 AUTOMATIC_INPUT. Core-to-viewer DATA frames are at most 16 KiB. These are observations of 0.1.21; the adapter checks the protocol generation in `hello` and refuses one it doesn't know.
+**Framed protocol** (documented in herdr-core's `schema/README.md`, "Framed mode", not in `hc schema`; M0 confirmed it, evidence in `spike/m0/FINDINGS.md` section 1): `hello` and its reply are newline-terminated JSON, and framing starts with the next byte. Each frame is `u32 LE channel | u8 kind | u32 LE length | payload`; channel 0 carries JSON-RPC. Kinds: 0 DATA, 1 CREDIT (u32 LE bytes), 2 CLOSE (JSON exit detail from the core), 3 RESIZE (u16 LE cols, rows), 4 FOCUS (u8), 5 FACTS (JSON display), 6 AUTOMATIC_INPUT. Core-to-viewer DATA frames are at most 16 KiB. These are observations of 0.1.21; the adapter checks the protocol generation in `hello` and refuses one it doesn't know.
 
 **How the herdr-core adapter builds an attachment: a pair of viewers.**
 
@@ -338,7 +338,7 @@ herdr-core already arbitrates between viewers: the last active viewer to attach,
 - The daemon decides ownership per terminal and keeps an ownership generation. A keystroke from a non-owner first asks for ownership; the daemon grants it, bumps the generation, notifies all attachments, and only then forwards the input.
 - `resize` messages carry the sender's generation; the daemon rejects any from an older generation, so stale resizes can't fight the owner.
 - When the owner detaches or its connection drops, ownership passes to the attachment that most recently had focus, or none. With no active viewer left, herdr-core returns the PTY to its headless size (default 200x120), and the program redraws for it; the next owner's size applies when it becomes active.
-- **Terminal query replies:** herdr-core answers most queries itself, using the display of the most recently active viewer. Clients report their xterm.js colours and cell size through `set_display` and don't forward xterm.js's own replies, with one exception: DECXCPR (`CSI ? 6 n`), which herdr-core leaves unanswered and xterm.js can answer. The other six unanswered queries are a known limitation: a program that waits for one stalls until its own timeout. OSC 52 clipboard reads stay unanswered on purpose.
+- **Terminal query replies:** herdr-core answers most queries itself, using the display of the most recently active viewer, and strips them from the stream. Clients report their xterm.js colours and cell size through `set_display`. For the queries herdr-core leaves to viewers, its protocol has AUTOMATIC_INPUT (kind 6): reply bytes that reach the program without taking size or ownership. Only the **owner's** client forwards xterm.js's automatic replies, as AUTOMATIC_INPUT through its input viewer, and only when both `hello.features` and the attach reply confirm `automatic_input`. Other attachments drop theirs, since herdr-core passes duplicates from several viewers straight to the program. In practice that covers DECXCPR (`CSI ? 6 n`); xterm.js doesn't answer the other six, which stay a known limitation: a program that waits for one stalls until its own timeout. OSC 52 clipboard reads stay unanswered on purpose.
 - `hc attach` from an ordinary terminal is another herdr-core viewer, outside Combine; herdr-core arbitrates between it and Combine's attachments. M0 tested both working together.
 
 **Rules for adapters**
@@ -563,7 +563,7 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
 
-**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React or Svelte, xterm.js (WebGL addon), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
 
 ## Security model
 
