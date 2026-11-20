@@ -617,15 +617,22 @@ Each rule says what checks it today. `rules.toml` checks layer direction between
 | Adapters don't call each other | `rules.toml`: each adapter is its own layer at the same order; peers are forbidden |
 | Ports and model never reach into core or adapters | `rules.toml`: shared layer; shared to ordered deviates |
 | Renderers never import `ipc/` or a Tauri package | `rules.toml`: renderers and `ipc/` are peers, and the Tauri packages (TypeScript and JavaScript) are assigned to `ipc/` |
-| Core, ports and model do no I/O (`std::fs`, `std::process`, `std::net`, their tokio versions) | Architecture guard: not yet built |
-| Only the loader adapter uses a JS engine; only `ipc/` imports Tauri packages | Architecture guard: not yet built (`rules.toml` alone allows higher layers too) |
-| No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. Rust crate bans and listener or PTY calls need the architecture guard: not yet built |
-| No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the architecture guard: not yet built |
-| Frontend sources are TypeScript | Architecture guard: not yet built |
+| Core, ports and model do no I/O (`std::fs`, `std::process`, `std::net`, their tokio versions) | `tools/arch-guard` |
+| Only the loader adapter uses a JS engine; only `ipc/` imports Tauri packages | `tools/arch-guard` (`rules.toml` alone allows higher layers too) |
+| No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. Rust crate bans and listener or PTY calls need the `tools/arch-guard` |
+| No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the `tools/arch-guard` |
+| Frontend sources are TypeScript | `tools/arch-guard` |
 
-The **architecture guard** is a supplemental check for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, and cross-app path imports. Until it exists, those rows are reviewed by hand. Whether it is a script in this repo or new trellis features is an open question.
+**`tools/arch-guard`** is a supplemental checker for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, cross-app path imports and the frontend's source language. Its rules are in `tools/arch-guard/guard.toml`, and its tests cover every case the review found trellis letting through. It is lexical, not a compiler: it removes comments, strings and test-gated items, expands `use` trees, and reads manifests, but doesn't expand macros or follow re-exports (limits are listed in `check.py`). It is a stopgap: each rule retires once trellis can express it (`docs/trellis-feature-request.md`).
 
-Run `trellis rules check` and review new `unknown` and unassigned references on these boundaries, not only new deviations.
+Before finishing a change, run both checks:
+
+```sh
+trellis rules check
+python3 -I tools/arch-guard/check.py
+```
+
+Review new `unknown` and unassigned references from trellis on these boundaries, not only new deviations.
 
 The app names in `rules.toml` (`combined`, `combine`, `combine-app`, `combine-web`) are the package names the manifests must use; `combine-protocol` is a library, mapped as a shared layer.
 
@@ -647,7 +654,7 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 - [x] Does herdr-core answer terminal queries itself? Yes, from each viewer's `display`. M0 confirms nothing reaches xterm.js unanswered.
 - [ ] herdr-core arbitrates size between viewers (attach size, FOCUS, `observe`, `resumed`). Does that behave with two Combine clients and an `hc attach` open? M0 answers this.
-- [ ] The architecture guard: a small checker in this repo (`tools/arch-guard`), or new trellis features (member-crate dependency mapping, source-scoped package rules, cross-app path bans)? See Repository layout and architecture rules.
+- [x] The architecture guard. Decided: `tools/arch-guard` now; new trellis features (`docs/trellis-feature-request.md`) replace it rule by rule as they land.
 - [ ] Should remote terminals use herdr-core's own machine links (`machine.add`, `mini/t7`) instead of Combine's SSH bridge? A daemon is still needed on each host for loaders and panel files, so v1 keeps one bridge for everything.
 - [x] Work MBP access. Decided: the work MBP is usually its own client. A personal MBP can reach it over SSH but rarely does. Commands and credential storage stay on the work MBP. A remote client receives terminal output and panel results, which may contain source code, file contents, secrets or other work data, so remote access to the work MBP must comply with work policy. Keeping computation remote is not a data-loss boundary.
 

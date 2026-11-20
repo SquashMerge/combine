@@ -1,0 +1,109 @@
+# Architecture guard rules: what .trellis/rules.toml can't express (SPEC.md, "Repository
+# layout and architecture rules"). Checked by tools/arch-guard/check.py.
+#
+# Globs are checkout-relative: `*` and `?` stay within one path segment, `**` spans
+# segments, and `dir/**` selects what is under dir, not dir.rs itself.
+version = 1
+
+# Never production. Every rule skips these files (and Cargo packages whose manifest is
+# under them), and `path_ban` forbids production code from reaching them.
+non_production = [
+  "spike/**",
+  "tools/**",
+  "crates/*/tests/**",
+  "crates/combined/src/testing.rs",
+  "crates/combined/src/testing/**",
+  "app/web/test/**",
+]
+
+# --- Cargo dependencies, read from every workspace member's Cargo.toml.
+# trellis maps Rust packages only from the root manifest; these rules cover the members.
+# Normal and build dependencies count; dev-dependencies are test-only and skipped.
+
+[[crate_ban]]
+id = "no-listener-crates"
+crates = ["axum", "actix-web", "warp", "tiny_http", "hyper-server", "tokio-tungstenite", "tungstenite"]
+reason = "The daemon opens no network port; remote access is SSH only (SPEC.md, Security model)."
+
+[[crate_ban]]
+id = "no-pty-crates"
+crates = ["portable-pty", "pty-process", "pty"]
+reason = "herdr-core owns PTYs; Combine never opens one."
+
+[[crate_ban]]
+id = "no-webview-shell-or-fs"
+crates = ["tauri-plugin-shell", "tauri-plugin-fs"]
+reason = "The webview gets no shell or filesystem plugin."
+
+[[crate_scope]]
+id = "js-engine-only-in-daemon"
+crates = ["rquickjs", "deno_core"]
+packages = ["combined"]
+reason = "Loaders run in the daemon's loader adapter only."
+
+# --- Rust paths and identifiers in production source.
+# A path rule matches `use` trees (braces expanded, aliases included) and qualified paths
+# in code, after comments, string literals and `#[cfg(test)]` / test-support items are
+# removed. It does not follow re-exports or `use` of a parent module (`use std as s;`).
+
+[[rust_path]]
+id = "core-does-no-io"
+in = [
+  "crates/combined/src/core.rs", "crates/combined/src/core/**",
+  "crates/combined/src/ports.rs", "crates/combined/src/ports/**",
+  "crates/combined/src/model.rs", "crates/combined/src/model/**",
+]
+forbid = [
+  "std::fs", "std::process", "std::net", "std::os::unix::net",
+  "tokio::fs", "tokio::process", "tokio::net",
+]
+reason = "Core, ports and model reach the world only through ports; adapters do the I/O."
+
+[[rust_path]]
+id = "js-engine-only-in-loader"
+in = ["**"]
+except = ["crates/combined/src/adapters/loader.rs", "crates/combined/src/adapters/loader/**"]
+forbid = ["rquickjs", "deno_core"]
+reason = "Only the loader adapter may use a JS engine."
+
+[[rust_ident]]
+id = "no-listener-no-pty"
+in = ["**"]
+forbid = ["TcpListener", "UdpSocket", "openpty", "forkpty", "posix_openpt"]
+reason = "No network listener (Unix sockets only) and no PTY in any production code."
+
+# --- Frontend imports: `import`, `export ... from`, `import()` and `require()`.
+
+[[js_import]]
+id = "tauri-only-in-ipc"
+in = ["app/web/src/**"]
+except = ["app/web/src/ipc/**"]
+packages = ["@tauri-apps/*"]
+reason = "Only app/web/src/ipc/ calls Tauri; everything else goes through it."
+
+[[js_import]]
+id = "no-webview-shell-or-fs-plugin"
+in = ["**"]
+packages = ["@tauri-apps/plugin-shell", "@tauri-apps/plugin-fs"]
+reason = "The webview gets no shell or filesystem plugin."
+
+[[source_language]]
+id = "frontend-is-typescript"
+in = ["app/web/src/**"]
+forbid_extensions = [".js", ".jsx", ".mjs", ".cjs"]
+reason = "Frontend sources are TypeScript, so trellis's TypeScript selectors see every import."
+
+# --- Production code never reaches spike, test or test-support paths, in any app.
+# Checks Cargo path dependencies, Rust `#[path]` and `include!`-family macros, and
+# relative frontend imports.
+
+[[path_ban]]
+id = "no-production-dependency-on-non-production"
+to = [
+  "spike/**",
+  "crates/*/tests/**",
+  "crates/combined/src/testing.rs",
+  "crates/combined/src/testing/**",
+  "app/web/test/**",
+]
+reason = "The spike is disposable and tests are not product code."

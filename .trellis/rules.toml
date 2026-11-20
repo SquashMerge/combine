@@ -32,8 +32,8 @@ deny = [
 ]
 # Known gap (review 2026-11-20): trellis maps Rust packages only from the root manifest,
 # and the root here is a virtual workspace, so the Rust bans above and the Rust `external`
-# selectors below come back `unknown` for member crates. SPEC.md's architecture table
-# lists what the architecture guard must cover instead.
+# selectors below come back `unknown` for member crates. tools/arch-guard checks them
+# (and the other gaps in SPEC.md's architecture table) until trellis can.
 
 # --- app "combined" (crates/combined/Cargo.toml): the daemon.
 # Entry wires adapters into core. Adapters sit ABOVE core and implement its ports, so
