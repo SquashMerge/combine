@@ -45,7 +45,7 @@ Combine's `tools/arch-guard/test_check.py` encodes each probe as a fixture. Thos
 - **Ownership:** the existing proved crate-ownership rules (`docs/rules.md`, conventional crate roots and module chains, around lines 950–969 and 1626–1637). Directory containment alone doesn't prove a file is compiled by a crate. Custom target paths and ambiguous ownership stay `unknown`, as today.
 - **Bindings:** every dependency table, each also under `[target.'<cfg>'.*]`: `[dependencies]`; `[build-dependencies]` and its edition-2021 spelling `[build_dependencies]`; `[dev-dependencies]` and `[dev_dependencies]`. The Cargo key is the binding name, with hyphen normalization; `package = "<name>"` gives the upstream identity, so `web = { package = "warp" }` binds `web` to `warp`.
 - **Roles are unchanged.** The table a binding comes from doesn't change the role of a site that uses it: build and dev bindings are retained evidence like normal ones, and section or target qualifiers don't prove activation. Test roles still come only from test classification (`cfg(test)`, `test_features`, test targets).
-- **Inheritance:** `foo = { workspace = true }` resolves through the root's `[workspace.dependencies]` entry, including that entry's `package` rename. A member entry that combines `workspace = true` with its own `package` is invalid in Cargo and stays `unknown`.
+- **Inheritance:** `foo = { workspace = true }` resolves through the root's `[workspace.dependencies]` entry, including that entry's `package` rename. Cargo accepts a member entry that adds its own `package` to `workspace = true` but ignores it; the inherited identity wins, and Trellis should mirror that.
 - **Conflicts:** a key bound to two different identities across one member's tables (for example a normal and a target table) stays `unknown`, with a named reason.
 - **Path dependencies** are in-repo modules, never external packages.
 - **Evidence:** captured from the same admitted snapshot as source (no live reads, no Cargo invocation), within the existing manifest byte and work bounds.
@@ -57,7 +57,7 @@ Combine's `tools/arch-guard/test_check.py` encodes each probe as a fixture. Thos
 2. **Unused banned dependency:** `axum` declared in `crates/combined/Cargo.toml` and imported nowhere produces no `$external` instance (F1b covers it).
 3. **Build dependency:** a crate declared under `[build-dependencies]` and used from `build.rs` resolves to its identity, with the role `build.rs` has today.
 4. **Dev dependency behind a test gate:** a `[dev-dependencies]` crate used inside `#[cfg(test)] mod tests` resolves and is reported in `testOnly`.
-5. **Rename and inheritance:** `rquickjs` used from `crates/combined/src/adapters/loader/` through `js = { package = "rquickjs" }` resolves and conforms against the loader layer's `external` selector. A `tauri-plugin-shell = { workspace = true }` imported in `app/src-tauri/src/main.rs` deviates against the ban.
+5. **Rename and inheritance:** `rquickjs` used from `crates/combined/src/adapters/loader/` through `js = { package = "rquickjs" }` resolves and conforms against the loader layer's `external` selector. A `tauri-plugin-shell = { workspace = true }` imported in `app/src-tauri/src/main.rs` deviates against the ban. `js = { workspace = true, package = "plain" }`, with the workspace entry renaming `rquickjs`, binds `js` to `rquickjs`.
 
 ## F1b. Manifest dependency-declaration policy
 
@@ -77,8 +77,8 @@ select = [{ language = "rust", package = "rquickjs", stdlib = false }]
 declare_only_in = ["crates/combined/Cargo.toml"]
 ```
 
-- **`declarations = true`** on a `deny` entry: any workspace member that declares the package in a normal or build table (either spelling, target tables, inherited, renamed) deviates under `$external_declaration`. A dev-table declaration has the test role.
-- **`declare_only_in`** on an external rule: a declaration in a manifest outside the listed paths deviates.
+- **`declarations = true`** on a `deny` entry **adds** declaration checking to the ordinary source ban; it doesn't replace it. Source references still deviate under `$external`, and any workspace member that declares the package in a normal or build table (either spelling, target tables, inherited, renamed) deviates under `$external_declaration`. A dev-table declaration has the test role.
+- **`declare_only_in`** on an external rule is a third mode, beside F2's `allow_only_in` and `forbid_in` (see F2's validation): its sites are manifest declarations, not source references, and a declaration in a manifest outside the listed paths deviates.
 - **Evidence:** the site is a manifest entry, not a native source module, so this needs F4b's manifest site representation.
 
 **Acceptance:** an unused `axum` in `[dependencies]` deviates; the same under `[dev-dependencies]` is `testOnly`; `rquickjs` declared by `app/src-tauri/Cargo.toml` deviates against `js-engine-only-in-daemon`.
@@ -109,10 +109,10 @@ allow_only_in = ["crates/combined/src/adapters/loader.rs", "crates/combined/src/
 ```
 
 - **`select`** uses the existing external selector shape. `npm_scope` is an optional alternative to `package` that matches every package in one npm scope. It is a literal scope, not a glob.
-- **`allow_only_in`** or **`forbid_in`** (exactly one) takes source path globs with the existing pattern rules.
+- **Mode:** exactly one of **`allow_only_in`** and **`forbid_in`** (source path globs, with the existing pattern rules), or F1b's **`declare_only_in`** (manifest paths). One rule has one mode, so its instances are all source references or all declarations.
 - **Semantics:** each observed production edge from a source to a selected identity is one instance of the rule. It deviates when its source falls outside `allow_only_in`, or inside `forbid_in`, and conforms otherwise. An edge whose identity isn't proved stays `unknown`. Test-only sites are reported in `testOnly` and never fail the production check, as `$external` does today.
 - **No exceptions in the first version.** Module-to-module and declaration exceptions don't apply to external rules, matching `$external` today. A reviewed exception shape can come later if a user needs one.
-- **Validation** (each a located `invalid_rules` error): `select` is nonempty; each selector has exactly one of `package` and `npm_scope`; `npm_scope` is only valid with `language` `typescript` or `javascript` and `stdlib = false`; exactly one of `allow_only_in` and `forbid_in`, nonempty; `id` is unique across `[[external_rules]]` and doesn't start with `$`.
+- **Validation** (each a located `invalid_rules` error): `select` is nonempty; each selector has exactly one of `package` and `npm_scope`; `npm_scope` is only valid with `language` `typescript` or `javascript` and `stdlib = false`; exactly one of `allow_only_in`, `forbid_in` and `declare_only_in`, nonempty; `path` (F3) only with `allow_only_in` or `forbid_in`. The `id` doesn't start with `$` and is unique across every authored rule ID the wire reports, not only within `[[external_rules]]`.
 - **Identity evidence:** a scope matches only a proved package identity. Trellis never guesses a scope from how a specifier is spelled; an unproved identity stays `unknown`.
 
 **Acceptance:**
