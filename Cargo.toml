@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "app/src-tauri"]
+# spike/ (M0) stays outside the workspace: disposable, never a dependency.
+exclude = ["spike"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.0"

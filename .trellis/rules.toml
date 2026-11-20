@@ -1,0 +1,195 @@
+version = 1
+# Combine's reviewed architecture (SPEC.md, "Repository layout and architecture rules").
+# Written before the code, so `trellis rules check` flags a deviation in the commit that
+# makes it. Format: trellis docs/rules.md. Lower `order` is higher; equal orders are peers.
+
+# References compiled only under `cfg(feature = "test-support")` count as test, not
+# production: the in-memory fake backend lives behind that feature.
+test_features = ["test-support"]
+
+[layer_policy]
+peers = "forbid"
+shared_outbound = "forbid"
+
+# Banned outright, wherever they appear (SPEC.md, Security model):
+# - the daemon opens no network port, so no HTTP or WebSocket server crates;
+# - herdr-core owns PTYs, so Combine never opens one;
+# - the webview gets no shell or filesystem plugin, on either side of Tauri.
+[external_policy]
+deny = [
+  { language = "rust", package = "axum", stdlib = false },
+  { language = "rust", package = "actix-web", stdlib = false },
+  { language = "rust", package = "warp", stdlib = false },
+  { language = "rust", package = "tiny_http", stdlib = false },
+  { language = "rust", package = "tokio-tungstenite", stdlib = false },
+  { language = "rust", package = "portable-pty", stdlib = false },
+  { language = "rust", package = "tauri-plugin-shell", stdlib = false },
+  { language = "rust", package = "tauri-plugin-fs", stdlib = false },
+  { language = "typescript", package = "@tauri-apps/plugin-shell", stdlib = false },
+  { language = "typescript", package = "@tauri-apps/plugin-fs", stdlib = false },
+]
+
+# --- app "combined" (crates/combined/Cargo.toml): the daemon.
+# Entry wires adapters into core. Adapters sit ABOVE core and implement its ports, so
+# core never names herdr-core, the JS engine, CLIs or the filesystem: a reference from
+# core to an adapter is upward and deviates.
+
+[layers.daemon-entry]
+app = "combined"
+order = 1
+paths = [
+  "crates/combined/src/main.rs", "crates/combined/src/lib.rs",
+  "crates/combined/src/wiring.rs", "crates/combined/src/wiring/**",
+  "crates/combined/src/rpc.rs", "crates/combined/src/rpc/**",
+  "crates/combined/src/mcp_server.rs", "crates/combined/src/mcp_server/**",
+]
+
+# One layer per adapter, all at order 2: peers are forbidden, so adapters never call
+# each other. The herdr-core adapter is the only code that speaks herdr-core's protocol.
+[layers.adapter-herdr-core]
+app = "combined"
+order = 2
+paths = ["crates/combined/src/adapters/herdr_core.rs", "crates/combined/src/adapters/herdr_core/**"]
+
+# CLI allowlist runner and the MCP client for approved servers.
+[layers.adapter-sources]
+app = "combined"
+order = 2
+paths = ["crates/combined/src/adapters/sources.rs", "crates/combined/src/adapters/sources/**"]
+
+# The loader isolate. The JS engine crates belong here and nowhere else.
+[layers.adapter-loader]
+app = "combined"
+order = 2
+paths = ["crates/combined/src/adapters/loader.rs", "crates/combined/src/adapters/loader/**"]
+external = [
+  { language = "rust", package = "rquickjs", stdlib = false },
+  { language = "rust", package = "deno_core", stdlib = false },
+]
+
+# File store, watcher and safe writes for .workspace/, settings and state.
+[layers.adapter-fs]
+app = "combined"
+order = 2
+paths = ["crates/combined/src/adapters/fs.rs", "crates/combined/src/adapters/fs/**"]
+external = [{ language = "rust", package = "notify", stdlib = false }]
+
+# Spaces, panels, layout, trust, scheduling, cache, generations. Talks to the world only
+# through ports.
+[layers.daemon-core]
+app = "combined"
+order = 3
+paths = ["crates/combined/src/core.rs", "crates/combined/src/core/**"]
+
+# The traits core needs (TerminalBackend, SourceRunner, LoaderEngine, FileStore) and the
+# plain data they carry. Shared: anything may use them; they reach into no ordered layer.
+[layers.daemon-ports]
+apps = ["combined"]
+shared = true
+paths = [
+  "crates/combined/src/ports.rs", "crates/combined/src/ports/**",
+  "crates/combined/src/model.rs", "crates/combined/src/model/**",
+]
+
+# --- app "combine" (crates/combine/Cargo.toml): the CLI, i.e. the `combine mcp` shim.
+[layers.cli]
+app = "combine"
+order = 1
+paths = ["crates/combine/**"]
+
+# --- app "combine-app" (app/src-tauri/Cargo.toml): the Tauri backend.
+[layers.app-entry]
+app = "combine-app"
+order = 1
+paths = [
+  "app/src-tauri/src/main.rs", "app/src-tauri/src/lib.rs",
+  "app/src-tauri/src/commands.rs", "app/src-tauri/src/commands/**",
+]
+
+# Host connections (SSH bridge, local socket, reconnect, host ID check) and per-client
+# state are peers: neither calls the other; commands combine them.
+[layers.app-hosts]
+app = "combine-app"
+order = 2
+paths = ["app/src-tauri/src/hosts.rs", "app/src-tauri/src/hosts/**"]
+
+[layers.app-state]
+app = "combine-app"
+order = 2
+paths = ["app/src-tauri/src/state.rs", "app/src-tauri/src/state/**"]
+
+# --- Shared by every Rust app: the wire protocol between clients, the daemon and the shim.
+[layers.protocol]
+apps = ["combined", "combine", "combine-app"]
+shared = true
+paths = ["crates/combine-protocol/**"]
+
+# --- app "combine-web" (app/web/package.json): the TypeScript frontend.
+[layers.web-shell]
+app = "combine-web"
+order = 1
+paths = ["app/web/src/main.ts", "app/web/src/shell/**"]
+
+# The panel host: lifetime, attach, data delivery. Hands renderers their data.
+[layers.web-panels]
+app = "combine-web"
+order = 2
+paths = ["app/web/src/panels/**"]
+
+# Renderers and ipc are peers: renderers never reach Tauri, and ipc never draws.
+[layers.web-renderers]
+app = "combine-web"
+order = 3
+paths = ["app/web/src/renderers/**"]
+external = [
+  { language = "typescript", package = "@xterm/xterm", stdlib = false },
+  { language = "typescript", package = "dompurify", stdlib = false },
+]
+
+# The only code that calls Tauri.
+[layers.web-ipc]
+app = "combine-web"
+order = 3
+paths = ["app/web/src/ipc/**"]
+external = [{ language = "typescript", package = "@tauri-apps/api", stdlib = false }]
+
+[layers.web-model]
+apps = ["combine-web"]
+shared = true
+paths = ["app/web/src/model/**"]
+
+# --- Hidden layers: tests, test support, the M0 spike and tooling. They sit above
+# production, so their references into it are downward; production referencing them is
+# upward and deviates.
+
+[layers.daemon-tests]
+app = "combined"
+display = "hidden"
+order = 0
+paths = ["crates/combined/tests/**"]
+
+# The in-memory fake TerminalBackend, compiled only with the test-support feature.
+[layers.daemon-test-support]
+app = "combined"
+display = "hidden"
+order = 1
+paths = ["crates/combined/src/testing.rs", "crates/combined/src/testing/**"]
+
+[layers.web-tests]
+app = "combine-web"
+display = "hidden"
+order = 0
+paths = ["app/web/test/**"]
+
+# M0 is disposable and lives outside the Cargo workspace; nothing may depend on it.
+[layers.spike]
+app = "combined"
+display = "hidden"
+order = 0
+paths = ["spike/**"]
+
+[layers.tooling]
+app = "combined"
+display = "hidden"
+order = 1
+paths = ["tools/**"]

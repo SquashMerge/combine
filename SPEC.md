@@ -1,0 +1,646 @@
+# Combine — Spec (rev 6)
+
+Updated 2026-11-20
+
+Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
+
+One Tauri window shows one herdr or Rex space at a time: its agent terminals plus the panels agents build. A small daemon on each agent host (the home Mac mini, the work MBP) owns terminals, the agents' MCP server and panel loaders; the app is a client that reaches each daemon over SSH, or directly over a Unix socket on the same machine.
+
+**Changes from rev 1:** workspaces follow herdr/Rex spaces; one window; a daemon per host with remote clients; terminal streaming from the first milestone; panels can run JS loaders on the agent's host; panel groups; state stays in files, no database.
+
+**Changes from rev 2:** `attach` joins snapshot and stream with sequence numbers; an M0 fidelity spike; render-feedback states, revisions and idempotency; a file conflict policy; per-tool MCP allowlist; cache keys include host and project; explicit threat model and limits; macOS-only v1.
+
+**Changes from rev 3:** SSH transport instead of Tailscale, with no network listener; stable host IDs; spaces keyed by the backend's own space ID; per-client focus and selection; stream epochs, emulator bootstrap and an input-ownership protocol; MCP server launch definitions need approval; repo trust covers the whole execution dependency set and starts in M1; loader run generations and cache freshness rules; aggregate limits; v1 is herdr-only behind a backend-neutral trait.
+
+**Changes from rev 4:** named Combine; exact terminal attach is an M0 go/no-go gate; request generations per (space, panel, client); background refresh rules for client-dependent panels; separate loader and source pools; approval of a full execution manifest; SSH and wire-protocol contracts; per-client active tabs; one file store per shared project; corrected the work-data statement.
+
+**Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
+
+## Goals and non-goals
+
+The app is one window over every space on every host you use, with agent-built panels around the terminals.
+
+**Goals**
+
+- One window. Picking a space swaps the whole screen to that space's terminals and panels, restored exactly as left.
+- Spaces group a host's herdr-core terminals by project folder. Example: the `trellis` space holds a claude and two prime-agents; the `mimir` space holds a claude and an opencode.
+- Several hosts: home projects run on the Mac mini, work projects on the work MBP. Either personal MBP, or the work MBP itself, can be the client.
+- No dependency on a particular network: anything that carries SSH works (local network, VPN, Tailscale).
+- Terminals stream from the first milestone; no polling phase.
+- The coding agent in a terminal can create panels: persistent views of live data and one-off views such as "show me the class diagram for these related classes".
+- Panels can carry JS loaders that run allowlisted CLIs and MCP tools on the agent's host and correlate the results.
+- Panel groups (GitHub, Jira, Trellis) hold several related views of one service, linked by a shared selection.
+- Mermaid diagrams rendered with [Pele](https://pele.run).
+
+**Non-goals for v1**
+
+- Replacing herdr or Rex. They keep owning PTYs, scrollback and session lifetime.
+- Multi-user sharing or a hosted web version.
+- Agent-written HTML as the main panel type. It stays a sandboxed fallback.
+- A database. All state is files (see Persistence).
+- Platforms other than macOS. Shortcuts, launchd and Unix sockets assume it.
+- A network listener in the daemon. Remote access goes through SSH only.
+- Backends other than herdr-core. v1 ships the herdr-core adapter only; the `TerminalBackend` trait stays backend-neutral so Rex or others plug in later without changes outside their adapter.
+
+## Hosts and connections
+
+Every machine that runs agents runs a daemon that listens only on a local Unix socket; clients reach remote daemons by running a small bridge over SSH.
+
+| Machine | Runs | Role |
+| --- | --- | --- |
+| Mac mini (home) | herdr, agents, builds, daemon | Host for home projects |
+| Work MBP | herdr, agents, daemon, app | Host for work projects; usually its own client |
+| Personal MBP x2 | app | Client for the mini; can reach the work MBP over SSH, rarely used |
+
+**Daemon** (`combined`, a launchd agent running as the user)
+
+- Listens only on a Unix socket with user-only permissions. No TCP port, no WebSocket server.
+- Talks to the local herdr or Rex over its local socket.
+- Hosts the MCP server the local agents call, runs panel loaders, and is the authority for the space's files.
+- Keeps working with no client attached: loaders refresh, agents get render feedback, state is saved.
+- Generates a stable host ID (a UUID in `<daemon data>/host.json`) on first start. Clients key everything about a host by this ID, never by its address.
+
+**Client** (the Tauri app)
+
+- Holds a list of hosts, each with an SSH destination (e.g. `mini`, `jcarreira@work-mbp.local`, or an `~/.ssh/config` alias). The local daemon is reached over its Unix socket directly.
+- Shows every connected host's spaces in one rail. A host that drops shows its spaces dimmed and reconnects in the background; its terminals keep running.
+
+**Transport**
+
+- The client runs the system `ssh` with `combined connect`, a stdio bridge to the daemon's Unix socket (like the MCP shim). One SSH session per host carries everything.
+- The protocol over the bridge, and over a local socket, is the same: length-prefixed frames, JSON for control messages, binary for terminal output.
+- **Handshake:** the first frames exchange protocol version and host ID. A version mismatch closes the connection with a message naming both versions.
+- **Frames:** at most 1 MB each; larger terminal output is split. Control frames are queued ahead of terminal output, and output from several terminals is interleaved round-robin, so a noisy terminal can't delay control messages or other terminals.
+- SSH provides authentication (the user's keys and agent), encryption, and server identity (`known_hosts`). Using the system `ssh` means `~/.ssh/config`, `ProxyJump`, and Tailscale SSH all work without app support.
+- The client checks that the host ID reported over the bridge matches the one it stored for that host, so a changed address can't silently point the rail at a different machine.
+- **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client.
+- **Failures are reported, never worked around:** an unknown or changed host key, a key whose passphrase isn't in the agent, or failed authentication each stop the connection with a message saying what to run in a terminal (`ssh <dest>` once, or `ssh-add`). Host-key checking is never disabled.
+- **Remote binary:** non-interactive SSH often lacks Homebrew's `PATH`, so each host entry stores the absolute path to `combined` (default `/opt/homebrew/bin/combined`). A missing binary shows an install hint.
+- Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attached terminal from its last sequence number.
+- Latency budget: keystroke echo should stay under about 30 ms on a local network; M0 measures it.
+
+## Core concepts and data model
+
+A space is one project folder on one host: the herdr-core terminals started in it. herdr-core has no workspace object, so Combine derives spaces from each terminal's `cwd`.
+
+| Concept | What it is | Key | Owned by |
+| --- | --- | --- | --- |
+| Host | A machine running a daemon | Host ID (UUID from the daemon) | Daemon |
+| Space | The terminals started in one project folder | Host ID + project path | Derived from herdr-core terminal `cwd` |
+| Terminal | One live PTY: shell or agent | `TermId`, e.g. `hc:t8` | herdr-core |
+| Panel | A tab in a tile: terminal view or data/diagram view | Panel ID | App (files) |
+| Panel group | Several panels for one service, sharing a loader library and selection | Group instance ID | App (files) |
+| Layout | Split tree of tiles; each tile is a stack of panels shown as tabs | Per space | App (files) |
+
+- A terminal joins the space of the git root containing its starting `cwd` (or that folder itself outside git), and stays there: a program that later changes directory doesn't move it. The navigator can reassign a terminal explicitly; the assignment is daemon runtime state.
+- A git worktree has its own root, so it is its own space.
+- The daemon keeps one in-memory file store per project path, with a single revision counter, so every reader of a `.workspace/` sees one copy.
+
+Three models, never one serialized and then stripped: a portable spec, daemon runtime state, and per-client state.
+
+```
+// Portable spec: <project>/.workspace/
+SpaceLayout   { version, root: SplitNode, groups: [GroupInstance] }       // layout.json
+SplitNode   = Split { dir: H | V, ratio, a, b } | Tile { id: TileId, panels: [PanelId], active: PanelId }
+
+PanelSpec     { version, id, title, lifetime: Persistent | Scratch, group?: GroupInstanceId,
+                content: Terminal { slot: String, template: SpawnSpec, follow_active }
+                       | View { renderer, loader?: "loader.js", sources: [Source],
+                                refresh, params: Map<String, Value | GroupRef> },
+                created_by: User | Agent { slot } }
+
+GroupInstance { id, group: "github", params: { repo: "SquashMerge/trellis" } }
+
+// Daemon runtime state: <daemon data>/state.json
+SpaceBinding  { space_id, slots: Map<slot, TermId>, trust: TrustRecord, file_hashes: Map<path, hash> }
+
+// Per-client state: <client data>/hosts/<host-id>.json
+ClientSpaceState { space_id, focused_tile: TileId, active_terminal: slot,
+                   active_tabs: Map<TileId, PanelId>,                     // overrides Tile.active
+                   group_state: Map<GroupInstanceId, { selected_pr?: 123, ... }> }
+```
+
+**Who owns which state**
+
+| State | Scope |
+| --- | --- |
+| Panel definitions and saved layout | Shared per space (files) |
+| Terminal slot bindings, trust approvals | Daemon |
+| Focused tile, active terminal, last active space | Per client |
+| Active tab in each tile | Saved default (`Tile.active`) in the layout; per-client override |
+| Group selection (e.g. selected PR) | Per client |
+| PTY size and input ownership | Daemon-arbitrated per terminal |
+
+- Two clients can look at the same space differently: switching terminals or selecting a PR on one laptop doesn't change the other. Shared live selection would be an explicit later feature.
+- Tiles and panels have stable IDs, so focus and bindings survive reloads.
+- A terminal panel refers to a logical `slot` (e.g. `claude`, `prime-1`); the daemon maps the slot to a live `TermId`. If the terminal is gone, the panel shows "exited" with options to respawn from the template or close.
+- `follow_active: true` shows the client's active terminal; `false` pins the panel to its slot, so two agents can sit side by side.
+- Repo files never hold a `TermId`; `created_by` and terminal sources refer to slots.
+
+## Persistence
+
+No database: every panel is a directory of plain files on the space's host, so agents can create and edit panels with their ordinary file tools and changes are diffable.
+
+```
+<project>/.workspace/                 per project, on the host that has it
+  layout.json                         split tree, tile stacks, group instances, version
+  panels/<panel-id>/
+    panel.json                        PanelSpec: renderer, refresh, params, group
+    loader.js                         optional; runs in the daemon
+    view.html                         optional; CustomHtml only
+
+<daemon config>/                      per host, e.g. ~/.config/combine/
+  settings.json                       CLI allowlist, approved MCP servers and tools, limits
+  groups/<group>/                     group library: github, jira, trellis, ...
+    group.json                        name, params schema, panel templates
+    lib.js                            helpers shared by the group's loaders
+    panels/<name>/{panel.json, loader.js}
+
+<daemon data>/
+  host.json                           stable host ID
+  state.json                          SpaceBinding per space, pins and recents
+  scratch/<space-id>/<panel-id>/      scratch panels until pinned or closed
+
+<daemon cache>/sources/               last good data per source key
+
+<client data>/
+  hosts.json                          host IDs, SSH destinations, rail order
+  hosts/<host-id>.json                ClientSpaceState per space, last active space
+```
+
+- **Authority:** the daemon is the sole authority for mutations made through the API (clients and MCP tools). The files stay editable by agents, editors and `git`; the daemon treats those as outside edits.
+- **Watching:** the daemon watches `.workspace/` and the group library and reloads on change.
+- **Self-write detection:** the daemon records the hash of every file it writes, and ignores watcher events whose content matches.
+- **Conflicts:** if an outside edit lands while the daemon holds an unsaved change to the same file, the outside edit wins. The daemon re-applies its pending change on top only if it touches different fields; otherwise it drops it and reports that in `list_panels`.
+- **Invalid files:** invalid JSON or an unsupported `version` leaves that panel showing the error and its last good spec; the daemon never overwrites a file it can't parse.
+- **Read-only projects:** if `.workspace/` can't be written, the space's layout lives in `<daemon data>` and the rail marks it.
+- **Safe writes:** temp file and rename, debounced about 500 ms on layout changes, immediate on space switch and quit.
+- **Scratch panels** survive space switches and daemon restarts; they are deleted when closed, or after 7 days unopened.
+- **Versioning:** every JSON file has a `version` field for later migrations.
+
+## Navigation
+
+A rail of spaces grouped by host swaps the whole screen; a terminal navigator swaps which terminal a panel shows; one command palette reaches both.
+
+**Space rail (left edge)**
+
+- One section per host (`mini`, `work-mbp`), listing that host's spaces by folder name. Pinned spaces first, then by recent activity.
+- Spaces with no live terminals stay listed, dimmed, if pinned or recent. Opening one calls `ensure_session`.
+- Each entry shows a badge for terminals needing attention: agent waiting for input, command finished, process exited.
+- A terminal started in a new folder on any connected host makes its space appear automatically. "Open folder" starts a shell there through herdr-core, with a single terminal panel.
+
+**Terminal navigator (sidebar section, collapsible)**
+
+- Lists the selected space's terminals: name, command, state, last output line. In the `trellis` space that is the claude and the two prime-agents.
+- An "All spaces" toggle lists every terminal on every host, grouped by host and space.
+- Clicking a terminal shows it in the focused terminal panel if that panel follows the active terminal; otherwise it opens a new terminal panel beside it.
+- Actions: new terminal (shell or agent template), rename, kill, open in a new panel, open in herdr or Rex natively.
+
+| Shortcut | Action |
+| --- | --- |
+| Cmd+K | Command palette: spaces, terminals, panels, groups, actions, fuzzy matched |
+| Cmd+P | Switch space |
+| Cmd+T | Switch terminal in the focused panel |
+| Cmd+1 to Cmd+9 | Go to space 1 to 9 on the rail |
+| Cmd+[ / Cmd+] | Previous / next terminal in this space |
+| Cmd+Shift+N | New terminal in this space |
+| Cmd+Option+arrows | Move focus between tiles |
+
+**Switching rules**
+
+- Switching spaces never kills terminals; the client only detaches the old space's terminal panels.
+- Three kinds of subscription, kept separate: high-volume terminal output (visible panels only), lightweight state events for every terminal on every host (badges, navigator), and space discovery (new or removed spaces).
+- Client-independent persistent panels keep refreshing in the daemon on their own policy; the client just stops drawing them (see Background refresh).
+- Each client remembers, per space, its focused tile and active terminal, so returning restores exactly where you were on that machine.
+
+## Terminal backends
+
+The daemon talks to herdr-core or Rex through one `TerminalBackend` trait over their socket APIs from the start; there is no CLI-polling phase.
+
+```rust
+#[async_trait]
+pub trait TerminalBackend: Send + Sync {
+    fn id(&self) -> &'static str;                                       // "herdr-core" | "rex"
+    fn capabilities(&self) -> Capabilities;                             // agent_state, positioned_snapshot, ...
+    async fn list_spaces(&self) -> Result<Vec<SpaceInfo>>;              // backend's own ID, name, cwd
+    async fn watch_spaces(&self) -> Result<BoxStream<'static, SpaceEvent>>;
+    async fn ensure_session(&self, project: &Path) -> Result<SessionRef>;
+    async fn spawn(&self, s: &SessionRef, spec: SpawnSpec) -> Result<TermId>;
+    async fn list(&self, s: Option<&SessionRef>) -> Result<Vec<TermInfo>>;
+    async fn attach(&self, id: &TermId) -> Result<Attachment>;          // snapshot + ordered stream, atomically
+    async fn resume(&self, id: &TermId, epoch: Epoch, after: Seq) -> Result<Resume>; // Stream(..) or Gap
+    async fn write(&self, id: &TermId, bytes: &[u8]) -> Result<()>;     // raw input from xterm.js
+    async fn resize(&self, id: &TermId, cols: u16, rows: u16) -> Result<()>;
+    async fn watch_states(&self) -> Result<BoxStream<'static, StateEvent>>; // all terminals, for badges
+    async fn kill(&self, id: &TermId) -> Result<()>;
+}
+
+pub struct Attachment { epoch: Epoch, snapshot: Snapshot, at: Seq,
+                        stream: BoxStream<'static, (Seq, TermEvent)> }
+pub struct Snapshot   { ansi: Bytes, cols: u16, rows: u16, cursor: (u16, u16),
+                        alt_screen: bool, modes: TermModes, scrollback: Bytes,
+                        fidelity: Exact | BestEffort }
+```
+
+**What herdr-core provides** (checked against `hc schema`, herdr-core 0.1.21, protocol generation 1)
+
+| Need | herdr-core primitive |
+| --- | --- |
+| Transport | JSON-RPC 2.0 on the local hc socket; `hello` with `framed: true` switches the connection to framed mode |
+| Terminals and spaces | `terminal.list` / `terminal.get` (address, `cwd`, `argv`, size, labels, foreground); `events.subscribe` returns a snapshot, then every change in order |
+| Attach | `terminal.attach` opens a channel: first paint, then live bytes, in order. Input goes back as DATA; RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it |
+| Size | The viewer's `cols`/`rows` at attach; `observe` viewers never type or resize; `resumed` viewers set size only once active again; RESIZE arrives before replacement paints when `resize_notifications` is on |
+| Terminal queries | Answered by herdr-core from each viewer's `display` (colors, cell size) |
+| Flow control | CREDIT frames |
+| Agent state | Programs' 7501 status reports (`reported`, `records`); `terminal.wait` |
+| Loss and restart | Loss ends the stream; reattach after the `restarted` event. `server.restart` saves screens and the next core adopts running programs |
+| Caller identity | `HC_TERMINAL_ID` in each terminal's environment; `caller` param on calls |
+| Remote | `hc connect` speaks the API over stdio (`ssh box hc connect`); a core can add other machines (`machine.add`, addresses like `mini/t7`) |
+
+The daemon talks only to its own host's herdr-core. A Rex adapter (after v1) would map its own primitives behind `capabilities()`.
+
+**Attach, sequence and epoch**
+
+- Every output chunk carries a per-terminal sequence number within an epoch. The epoch changes whenever numbering restarts (daemon restart, backend restart, re-bootstrap), so a reset is never mistaken for a continuation.
+- A snapshot is taken at sequence N, and its stream starts at N+1.
+- A client that sees a jump in sequence numbers, or reconnects, calls `resume` with its epoch and last number. The daemon replays from a bounded per-terminal buffer (about 4 MB), or answers `Gap` and the client attaches again.
+- Two guarantees, kept separate. **State fidelity:** after an `Exact` attach, the screen, cursor and modes match the terminal; a `BestEffort` attach promises nothing, and the panel header says so. **Output history:** every byte is delivered in order only while the client stays within the replay buffer; after a `Gap`, bytes in the gap are lost from the client's view and only state is restored.
+- Backpressure: each client has a bounded send queue, and the daemon grants herdr-core CREDIT only as the client drains it. A client that falls past it anyway gets the queue dropped and a fresh attach (a `Gap`), never unbounded buffering.
+
+**Where snapshots come from (M0 go/no-go)**
+
+**herdr-core finding:** `terminal.attach` sends a first paint and then live bytes on one ordered channel, and herdr-core keeps the screen itself. That is the primitive this section asks for, so the daemon needs no emulator of its own for herdr-core. M0 confirms it holds for terminals started before the daemon, across a daemon restart, and across a herdr-core `server.restart`.
+
+An `Exact` attach needs a backend primitive that ties a screen state to a stream position. Local arrival timing can't do it: the stream and a screen read are buffered and scheduled independently.
+
+- **Acceptable primitives:** a snapshot carrying the stream position it reflects (`capabilities().positioned_snapshot`); replay from the terminal's start, or from a checkpoint, sufficient to rebuild state; or another synchronization mechanism herdr supports.
+- **Daemon emulator:** once the daemon has an exact starting state, it can keep its own emulator (e.g. the `alacritty_terminal` crate) from one upstream subscription and number chunks itself. It still needs one of the primitives above to get that starting state for terminals that existed before it, and after it restarts.
+- **Experimental fallback only:** subscribe, read the screen, then nudge a repaint with a one-row resize. Programs need not repaint fully, hidden buffers and modes aren't rebuilt, there's no "repaint done" signal, and the resize is visible to the program. This yields `BestEffort` attaches and never satisfies M0.
+- **If herdr lacks a primitive:** M0 ends with a decision, not a workaround: add positioned snapshots to herdr, or explicitly accept `BestEffort` attaches for terminals that predate the daemon.
+
+**Input ownership protocol**
+
+herdr-core already arbitrates between viewers (attach size, `observe`, FOCUS, `resumed`). With herdr-core, each Combine attachment is its own herdr-core viewer: focusing or typing in a panel sends FOCUS, and herdr-core picks the size and sends RESIZE. The protocol below is what the daemon enforces among Combine's own attachments, and the full arbitration for a backend without it.
+
+- Each attached panel gets an attachment ID; two panels in one client are separate attachments.
+- The daemon decides ownership per terminal and keeps an ownership generation. A keystroke from a non-owner first asks for ownership; the daemon grants it, bumps the generation, notifies all attachments, and only then forwards the input.
+- `resize` messages carry the sender's generation; the daemon rejects any from an older generation, so stale resizes can't fight the owner.
+- When the owner detaches or its connection drops, ownership passes to the attachment that most recently had focus, or none. With no owner, the PTY keeps its last size.
+- **Terminal query replies** (device attributes, cursor position, colors): herdr-core answers display queries itself, using the `display` each viewer reports at attach. Clients report their xterm.js colors and cell size there and don't forward xterm.js's own replies. M0 confirms no query reaches xterm.js unanswered.
+- `hc attach` from an ordinary terminal is another herdr-core viewer, outside Combine; herdr-core arbitrates between it and Combine's attachments. M0 tests that both behave.
+
+**Rules for adapters**
+
+- The trait and its types carry nothing herdr-specific. Anything only one backend can do is a flag in `capabilities()`, not a method or field.
+- Besides herdr-core, v1 ships an in-memory fake backend that implements the trait for tests. Every daemon and client test that doesn't need a real PTY runs against it. That helps keep the trait backend-neutral, but it can't prove a second real backend needs no trait changes.
+- `TermId` is opaque outside the adapter and prefixed with the backend name.
+- Adapters hide reconnects and emit `Lost` only after giving up.
+- Missing features are reported through `capabilities()`, and the UI hides what isn't supported.
+- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; two clients attached at once; attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
+
+## Panels, loaders and groups
+
+A panel is a loader (optional JS, run in the daemon) that produces data, plus a built-in renderer that draws it in the client; groups bundle related panels for one service around a shared selection.
+
+**Renderers** (in the client)
+
+| Renderer | Shows | Input | Notes |
+| --- | --- | --- | --- |
+| Terminal | A live herdr/Rex terminal | Terminal slot | xterm.js with WebGL; follows the active terminal or is pinned |
+| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele `render()`; Mermaid 12.1.0 syntax; themed with `--pele-*` variables |
+| Markdown | Notes, summaries, agent reports | Markdown text | Sanitized; code blocks highlighted |
+| Table | Lists of records | JSON rows + column hints | Sort, filter, copy; a row click can set group state |
+| Chart | Metrics over time or across items | JSON rows + chart spec | Line, bar, area |
+| Log | Streaming text | Text stream | Tail with pause |
+| CustomHtml | Anything else | HTML/JS + JSON | Sandboxed iframe, data only through `postMessage` |
+
+**Loaders** (in the daemon, on the agent's host)
+
+```js
+// .workspace/panels/open-prs/loader.js
+export default async function load(ctx) {
+  const prs = await ctx.cli.run("gh-prs", { repo: ctx.params.repo });
+  const checks = await ctx.cli.run("gh-checks", { repo: ctx.params.repo });
+  const issues = await ctx.mcp.call("jira", "search", { jql: `key in (${keysFrom(prs)})` });
+  return prs.map(pr => ({ ...pr, ci: checks[pr.number]?.state, jira: issues[pr.headRefName] }));
+}
+```
+
+- The loader's only I/O is `ctx`: `cli.run(id, args)`, `mcp.call(server, tool, args)`, `files.read(path)` inside the project, `terminal.read(slot)`, `params`, and the group's `state` and `lib`.
+- It runs in an embedded JS isolate in the daemon with no filesystem, network or process access, a time limit and a memory cap. Engine choice is open (deno_core or QuickJS).
+- Its return value is validated against the renderer's input before it reaches a client.
+- A panel with no loader uses a single declared source or static content.
+
+**Loader runs**
+
+- A run's **effective input** is the panel revision plus its resolved params, including the requesting client's group state. Effective inputs key the cache and shared computation.
+- Each request gets a monotonically increasing **request generation** per (space, panel, client), and records its effective input and panel revision.
+- A result is published to a client only if its request is still that client's current generation and revision. If PR 456 is selected after PR 123, a late result for 123 can still fill the cache, but never replaces the client's PR 456 view.
+- A newer request asks older ones for the same (space, panel, client) to cancel. The generation check, not cancellation, is what guarantees correctness.
+
+**Background refresh**
+
+| Panel inputs | Behavior |
+| --- | --- |
+| Client-independent (no group state in its params) | Refreshes on its policy, with or without clients |
+| Client-dependent, client connected | Runs for that client's effective input |
+| Client-dependent, client disconnected | Selection-specific refreshes stop; the last results stay in the bounded cache |
+| Agent asks for a client-dependent run | The agent must pass the input explicitly (e.g. `selected_pr`) |
+
+- `panel_status` reports spec validation separately from results, and results per client or explicit input.
+
+**Panel groups**
+
+- A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks and diff.
+- A space instantiates a group with params; the instance is one entry in `layout.json` plus its panels. The `trellis` space might hold a GitHub group for `SquashMerge/trellis` and a Trellis group for its index.
+- Group state holds the selection and is per client. Clicking a row in the PR list sets `selected_pr` for that client; every panel whose params bind to it reloads for that client.
+- By default a group opens as one tile with its panels as tabs; panels can be split out and stay in the group.
+- Agents can create group definitions and instances through MCP tools or by writing the files directly.
+
+**Panel lifetime**
+
+Lifetime is separate from content: a pinned diagram is persistent static content; a live PR list is persistent loader content.
+
+- **Persistent** panels live in `.workspace/` and survive restarts; their content is static or produced by a loader or source.
+- **Scratch** panels (a one-off class diagram) live in the daemon's scratch area and open in a scratch tab stack. They are deleted when closed unless pinned; pinning moves them into `.workspace/`.
+
+**Terminal panel behavior**
+
+- The header shows terminal name, state, host and backend, and marks whether this panel holds input ownership; a dropdown switches terminals without leaving the panel.
+- Output streams only while visible. On show, the panel calls `attach`, draws the snapshot, then plays the stream from the snapshot's sequence number.
+- Keyboard input goes straight to the terminal when focused; app shortcuts use Cmd so they don't clash with the shell.
+- Resizing the tile resizes the PTY only when this attachment holds ownership; otherwise the panel letterboxes at the owner's size.
+
+## Data sources
+
+The daemon runs every source on the agent's host, so CLIs use that host's credentials and approved MCP servers run where the agents' copies do.
+
+| Source | Spec | How it runs |
+| --- | --- | --- |
+| `Cli` | Allowlisted command ID + typed args | Spawned with args as an array, a fixed cwd (the project) and env, a timeout and an output cap; stdout parsed as JSON or text |
+| `Mcp` | Approved server + tool + args | Daemon's MCP client (`rmcp`); only approved servers and tools |
+| `File` | Path inside the project | Read by the daemon within the containment rules; `OnEvent` refresh uses a file watcher |
+| `Terminal` | Slot + optional regex | Snapshot or followed output from the backend |
+| `Static` | Inline content | Stored in the panel |
+| `Pushed` | Data sent by an agent | Last value from `push_panel_data` |
+
+**The agents' MCP servers**
+
+The daemon discovers the MCP servers the host's agents have, but treats each one as a proposal: launching a stdio server is running a program, so nothing launches until its launch definition is approved.
+
+| Server kind | How the daemon uses it |
+| --- | --- |
+| stdio servers in `.mcp.json`, `~/.claude.json`, opencode config | Proposed with its executable, args, env, cwd; launched only after approval |
+| Remote HTTP servers with OAuth | Proposed by URL; the daemon signs in itself after approval and does not borrow the agents' tokens |
+| claude.ai connectors | Not reachable; an agent fetches the data and calls `push_panel_data` (a snapshot, not live) |
+
+- An approved server is stored in `settings.json` with a hash of its launch definition (executable path, args, env, cwd, URL). Tool approvals are bound to that server identity.
+- If the discovered definition changes (for example a repo's `.mcp.json` changes the command behind the same name), the approval and its tool approvals are suspended until re-approved.
+- Tools are callable only when approved one by one. `readOnlyHint` is the server's own claim, so it only pre-fills the suggested list; it is never trusted on its own.
+
+**CLI allowlist**
+
+- Stored in the host's `settings.json`, optionally narrowed per project. It never lives in the repo, so a repo can't widen its own allowlist.
+- Each entry names a command, fixed args, the args a loader may set with a type or pattern each, the output format, and the env it runs with. Example: `gh-prs = gh pr list --json number,title,author,state --repo {repo}` with `repo` matching `owner/name`.
+
+**Refresh and cache**
+
+- `Manual`: refresh button or agent call; always fetches.
+- `Interval(secs)`: minimum 10 s; the interval is also the cache freshness window. Client-independent panels run whether or not a client shows them (see Background refresh); hidden panels back off to a slower rate.
+- `OnEvent`: file change, terminal output match, backend event, or group state change; invalidates the affected cache entries.
+- Cache key: host, project path, source spec and the allowlist or server approval version. Identical calls from different projects never share results.
+- An entry is fresh until the shortest interval among the panels using it has passed, or an event invalidates it. A stale entry is still shown, greyed, while a fetch runs.
+- In-flight deduplication: a request for a key that is already being fetched waits on that fetch instead of starting another. A shared fetch is cancelled only when no request still waits on it.
+- A failing source shows its error with the last good data greyed out; agents see the error through `list_panels`.
+
+## Agent integration
+
+The coding agent already running in the space builds panels through the local daemon's MCP server, and gets validation feedback even when no client is attached.
+
+**Connection**
+
+- A stdio shim (`combine mcp`) connects to the daemon's Unix socket on the same host. Register it once per agent, e.g. `claude mcp add combine -- combine mcp`.
+- The shim identifies its caller from the terminal's environment (herdr-core sets `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`), so panels land in the right space and record which slot made them. Fallback for Rex: match the shim's cwd to a space. This is attribution, not authentication (see Security model).
+
+**Tools**
+
+| Tool | Purpose | Returns |
+| --- | --- | --- |
+| `list_panels` | Panels and groups in the caller's space, with specs, revisions, states and last errors | Panel list |
+| `create_panel` | New panel: title, lifetime, renderer, loader code or sources, params, group, placement hint, idempotency key | Panel ID + revision + state |
+| `update_panel` | Change a panel's spec, loader or content | New revision + state |
+| `panel_status` | State of a panel at a revision | State + errors |
+| `remove_panel` | Close a panel | OK |
+| `show_diagram` | Shortcut for a scratch Mermaid panel | Panel ID + revision + state |
+| `run_loader` | Run a loader once without saving it | Output sample or error with stack |
+| `list_sources` | Approved CLIs, MCP servers and tools a loader may call | Source catalog |
+| `list_groups` / `create_group` | Read or add group definitions in the host's library | Group list / group ID |
+| `push_panel_data` | Send data the daemon can't fetch itself | OK |
+
+**Feedback**
+
+1. `create_panel` returns the panel ID as soon as the spec is accepted, so a timeout never leaves the agent guessing whether the panel exists. A repeated call with the same idempotency key returns the same panel.
+2. Every create or update gets a revision number. A result for an older revision never overwrites a newer one.
+3. Daemon states: `validating`, `fetching`, `validated`, `failed`, `untrusted` (waiting for the user's trust approval).
+4. Client render status is separate: `rendered` or `render_failed`, reported per client against the revision. `validated` means the spec, loader output and diagram source passed the daemon's checks; it does not prove a client drew it.
+5. Mermaid is validated in the daemon with the same Pele code the client uses, run headless if `render()` works without a DOM. If it doesn't, the daemon uses a Mermaid parser and reports its result as `validated (parser only)`.
+6. The tool waits up to about 5 s for `validated` or `failed` and returns that state with the error (parse message, loader stack trace), plus any client render status already in. Otherwise it returns the current state, and the agent polls `panel_status`.
+7. Closing a panel while it's pending cancels its work; later calls for it return `removed`.
+
+Tool descriptions state the rules: Mermaid 12.1.0 syntax, the renderer list and row formats, the loader `ctx` API, the limits, and that CustomHtml is a last resort.
+
+## Architecture
+
+The daemon on each host holds every outside connection and listens on nothing but a Unix socket; the client only draws, so agent-made panels can't reach any machine.
+
+```mermaid
+flowchart TB
+  subgraph client["Client: Tauri app (personal MBP or work MBP)"]
+    nav["Rail + navigator<br/>command palette"]
+    term["Terminal panels<br/>xterm.js"]
+    view["View panels<br/>Pele, table, chart"]
+    custom["CustomHtml<br/>sandboxed iframe"]
+  end
+
+  subgraph mini["Mac mini · home projects"]
+    bridge["combined connect<br/>stdio bridge"]
+    subgraph daemon["Daemon (launchd agent, Unix socket only)"]
+      backend["TerminalBackend<br/>herdr adapter, attach + seq"]
+      mcp["MCP server<br/>panel tools for agents"]
+      loader["Loader isolate<br/>JS with the ctx API only"]
+      runner["Source runner<br/>CLI allowlist, approved MCP"]
+    end
+    herdr["herdr + agents<br/>agents in PTYs"]
+    files[".workspace/<br/>layouts, loaders"]
+    tools["CLIs + MCP servers<br/>gh, Jira, Trellis"]
+  end
+
+  subgraph work["Work MBP · work projects"]
+    wdaemon["Daemon<br/>same stack as the mini"]
+    wherdr["herdr + agents"]
+  end
+
+  client <-- "ssh mini" --> bridge
+  bridge <-- "Unix socket" --> daemon
+  client <-- "ssh work-mbp, or local socket" --> wdaemon
+  backend <-- "streams" --> herdr
+  herdr -- "MCP via shim" --> mcp
+  daemon <-- "read, write" --> files
+  runner -- "spawn, call" --> tools
+  wdaemon <--> wherdr
+```
+
+Agents call their own host's daemon through the MCP shim; the client sees their panels through the same daemon connection it uses for terminals.
+
+**Streaming**
+
+- Control calls (spawn, write, panel CRUD) are JSON frames on the host connection; inside the client they become Tauri commands.
+- Terminal output is batched in the daemon and flushed about once per frame (16 ms) as sequence-numbered binary frames, then handed to xterm.js over Tauri 2 `Channel`s, not `emit` events.
+- Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
+- The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
+
+**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, possibly `alacritty_terminal` for snapshots, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React or Svelte, xterm.js (WebGL addon), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+
+## Security model
+
+Agent-made panels and anything that arrives from a repo are untrusted: they can show data, but only the daemon acts on a machine, and only within that host's approvals.
+
+**Threat model**
+
+- Trusted: the user, and any process running as the user's OS account on a host. Such a process can already read SSH keys and run `gh`, so the app does not try to defend against it. The `TermId` from a shim's environment is attribution, not proof of identity.
+- Trusted for remote access: whoever can log in to the host over SSH as the user. That is the same trust the user already places in SSH; the app adds no second credential.
+- Untrusted: other machines and users on the network, repo contents (including a pulled `.workspace/` and project `.mcp.json`), agent-written panel content and loaders, MCP server output, and CLI output.
+
+**Rules**
+
+- **Network:** the daemon opens no network port. Remote clients come in through SSH, which handles authentication, encryption and server identity. There is no WebSocket or HTTP endpoint for a browser page to reach. Never start Rex's TCP listener with `--allow-anonymous`.
+- **Host identity:** the client stores each host's ID and refuses a connection whose daemon reports a different one, on top of SSH's `known_hosts` check.
+- **MCP server (for agents):** a Unix socket with user-only permissions. Its tools change panels and run loaders in the sandbox. Through loaders and `run_loader` they can cause approved CLIs and MCP tools to run, never anything else.
+- **Loaders:** an isolate with no filesystem, network or process access. All I/O goes through `ctx`, which enforces the CLI allowlist, approved MCP servers and tools, and file containment. Time and memory limits apply.
+- **Authorization per source:** every CLI entry, MCP server launch definition and MCP tool is approved individually in `settings.json`, with typed args, a fixed cwd and env. Avoiding shell interpolation prevents injection; approval is what keeps commands safe.
+- **Repo-origin trust:** nothing from a repo runs until the user approves it. The daemon builds a normalized **execution manifest** per panel: its spawn spec, declared sources, loader bytes, every group `lib.js` and definition it imports, its params and group params, and which group state its params may bind. Approval is a hash of that manifest.
+    - Any change to the manifest suspends that panel until re-approved, so a changed `lib.js` suspends every loader that imports it. Moving a tile, renaming a panel or editing a title is outside the manifest and needs no approval.
+    - Interactive selection within approved bindings (choosing PR 456 instead of 123) needs no approval; a change that widens access (a different repo param, a new source) does.
+    - The daemon runs the exact bytes it approved: it keeps the approved copy in memory and refuses to run if the file on disk no longer matches.
+    - Changes written through the MCP tools by a local agent need no prompt.
+- **File containment:** `files.read` and `File` sources resolve paths with symlinks followed and refuse anything outside the project root, plus `.git/` and files over 10 MB.
+- **Webview:** Tauri capabilities limit IPC to the app's own commands; no shell or filesystem plugin is exposed to the frontend.
+- **CustomHtml:** `<iframe sandbox="allow-scripts">` without `allow-same-origin`, a strict CSP with no network, data only via `postMessage`.
+- **SVG and Markdown:** always sanitized with DOMPurify before insertion, whatever Pele escapes itself.
+- **Audit:** every panel records which slot created it, and the panel header shows it.
+
+**Limits** (defaults, set in `settings.json`)
+
+| What | Default |
+| --- | --- |
+| Panels per space | 100 |
+| Loader run time / memory | 10 s / 64 MB |
+| Concurrent loader runs per host | 8 |
+| Concurrent source executions (CLI, MCP) per host | 8, a separate pool |
+| Concurrent loader runs per space | 3, so one busy space can't starve others |
+| Queued runs per host | 64; beyond that, the oldest queued refresh is dropped |
+| Backoff after a timeout or failure | Doubles per failure, up to 10 min |
+| CLI output cap | 10 MB |
+| Table rows sent to a client | 10,000 |
+| Log panel retention | 5,000 lines |
+| Mermaid source size | 200 KB |
+| Terminal replay buffer | 4 MB per terminal |
+
+- Scheduling is round-robin across spaces. Manual refreshes and agent calls jump the queue; interval refreshes of hidden panels go last.
+- A loader waiting on `ctx.cli.run` or `ctx.mcp.call` holds only its loader permit; the call takes a permit from the separate source pool, so loaders can't deadlock waiting on their own children.
+- Cancelled runs (removed panel, superseded generation, timeout) free their loader permit immediately. A source fetch they started stops only when no other run still waits on it.
+
+## Repository layout and architecture rules
+
+`.trellis/rules.toml` records the layering below, and `trellis rules check` reports any reference that breaks it. The rules exist before the code, so a deviation shows up in the commit that makes it.
+
+```
+Cargo.toml                          workspace
+crates/
+  combine-protocol/                 wire frames and messages (library, shared by every Rust app)
+  combined/                         daemon binary
+    src/main.rs, src/wiring/        entry: builds the adapters and hands them to core
+    src/rpc/                        entry: client connections, the `combined connect` bridge
+    src/mcp_server/                 entry: the agents' MCP tools
+    src/adapters/herdr_core/        TerminalBackend for herdr-core
+    src/adapters/sources/           CLI runner, MCP client
+    src/adapters/loader/            JS isolate
+    src/adapters/fs/                file store, watcher, safe writes
+    src/core/                       spaces, panels, layout, trust, scheduler, cache, generations
+    src/ports/                      traits core needs: TerminalBackend, SourceRunner, LoaderEngine, FileStore
+    src/model/                      plain data shared by core, ports and adapters
+    src/testing/                    in-memory fake backend (test-support feature)
+    tests/
+  combine/                          `combine` CLI: the `combine mcp` shim
+app/
+  src-tauri/                        Tauri backend
+    src/main.rs, src/commands/      entry: Tauri commands
+    src/hosts/                      SSH bridge, local socket, reconnect, host ID check
+    src/state/                      per-client state files
+  web/                              TypeScript frontend (package.json)
+    src/main.ts, src/shell/         rail, navigator, palette, layout
+    src/panels/                     panel host: lifetime, attach, data delivery
+    src/renderers/                  terminal, Mermaid, Markdown, table, chart, log, CustomHtml
+    src/ipc/                        the only code that calls Tauri
+    src/model/                      shared types
+    test/
+spike/                              M0 code: disposable, outside the workspace
+tools/                              developer scripts
+```
+
+| Architectural rule | How `rules.toml` checks it |
+| --- | --- |
+| Core never knows herdr-core, the JS engine, CLIs or the filesystem | Adapters sit above core (order 2 vs 3) and implement its ports. Adapter to core is downward and conforms; core to an adapter is upward and deviates |
+| Adapters don't call each other | Each adapter is its own layer at the same order, and peers are forbidden |
+| Ports and model never reach into core or adapters | They are a shared layer; shared to ordered deviates |
+| The JS engine is used only by the loader adapter | `rquickjs` and `deno_core` are assigned to that layer |
+| Renderers never reach Tauri; they get data from the panel host | Renderers and `ipc/` are peers; `@tauri-apps/api` is assigned to `ipc/` |
+| No network listener, no PTY ownership, no shell or fs plugin in the webview | `[external_policy] deny` for HTTP/WebSocket server crates, `portable-pty`, and the Tauri shell and fs plugins |
+| Production code never depends on the fake backend, tests or the spike | They are hidden layers above production; production referencing them is upward |
+
+The app names in `rules.toml` (`combined`, `combine`, `combine-app`, `combine-web`) are the package names the manifests must use. Until those manifests exist, trellis has no apps to check against.
+
+## Milestones
+
+An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each milestone after M0 is usable on its own. M0 is disposable code; only its findings carry forward. v1 is M1 to M4 plus the herdr parts of M6; the Rex adapter (M5) comes after v1.
+
+0. **M0: Terminal fidelity spike.** One daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: exact attach for terminals that predate the daemon must rest on a backend primitive (see Where snapshots come from). Without one, M0 ends with a decision to add it to herdr or to accept `BestEffort` attaches; a fallback that usually looks right doesn't pass. Also decides who answers terminal queries.
+1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter over `terminal.attach` and `events.subscribe`, a clean `trellis rules check`, framed protocol with per-frame batching, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts.
+2. **M2: Agent-built diagrams.** MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation. Done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.
+3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` and Jira data shows live and survives a daemon restart.
+4. **M4: Panel groups.** Group library, params, per-client selection, a GitHub group as the first template. Done when clicking a PR in the list updates its detail, checks and diff panels.
+5. **M5: Rex adapter (after v1).** Passes the shared contract tests. The goal is no changes outside the adapter; any trait change it needs is reviewed as a design change. Rex spaces appear on the rail. Requires the `rex` CLI.
+6. **M6: Polish.** CustomHtml sandbox, `push_panel_data`, and after M5, attention badges from Rex output heuristics.
+
+## Open questions
+
+**New in rev 4**
+
+- [x] Does herdr-core answer terminal queries itself? Yes, from each viewer's `display`. M0 confirms nothing reaches xterm.js unanswered.
+- [ ] herdr-core arbitrates size between viewers (attach size, FOCUS, `observe`, `resumed`). Does that behave with two Combine clients and an `hc attach` open? M0 answers this.
+- [ ] Should remote terminals use herdr-core's own machine links (`machine.add`, `mini/t7`) instead of Combine's SSH bridge? A daemon is still needed on each host for loaders and panel files, so v1 keeps one bridge for everything.
+- [x] Work MBP access. Decided: the work MBP is usually its own client. A personal MBP can reach it over SSH but rarely does. Commands and credential storage stay on the work MBP. A remote client receives terminal output and panel results, which may contain source code, file contents, secrets or other work data, so remote access to the work MBP must comply with work policy. Keeping computation remote is not a data-loss boundary.
+
+**From rev 3**
+
+- [x] Does herdr-core offer a positioned snapshot? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirms it for terminals that predate the daemon and across restarts.
+- [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
+
+**From rev 2**
+
+- [ ] JS engine for loaders: deno_core or QuickJS (`rquickjs`)?
+- [ ] Should a group library be per host, or synced between hosts (e.g. a dotfiles repo)?
+- [x] Is Rex in v1 scope? Decided: no. v1 is herdr-only behind the backend-neutral trait; the Rex adapter (M5) comes after v1.
+
+**From rev 1**
+
+- [ ] Does Pele's `render()` work without a DOM? Needed for headless validation in the daemon.
+- [ ] Should `.workspace/` be committed or gitignored by default?
+- [ ] Where should agent-created views go by default: a new tile, a tab in the focused tile, or the scratch stack?
+- [x] Product name. Decided: Combine.
+
+**For the Rex adapter (after v1)**
+
+- [ ] Does Rex expose the current terminal's ID in its environment? herdr-core does (`HC_TERMINAL_ID`).
+- [ ] Does Rex report each session's working directory? herdr-core does (`hc ls --json`).
+- [ ] How stable is Rex's API between beta versions?

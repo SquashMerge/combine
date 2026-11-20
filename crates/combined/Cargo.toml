@@ -1,0 +1,12 @@
+[package]
+name = "combined"
+description = "Combine daemon: one per agent host"
+edition.workspace = true
+version.workspace = true
+
+[features]
+# Compiles the in-memory fake TerminalBackend (src/testing/) for tests.
+test-support = []
+
+[dependencies]
+combine-protocol = { path = "../combine-protocol" }

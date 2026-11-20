@@ -1,0 +1,5 @@
+[package]
+name = "combine-protocol"
+description = "Wire protocol shared by the Combine daemon, CLI and app"
+edition.workspace = true
+version.workspace = true

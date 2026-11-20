@@ -1,0 +1,8 @@
+[package]
+name = "combine"
+description = "Combine CLI: the `combine mcp` shim"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+combine-protocol = { path = "../combine-protocol" }
