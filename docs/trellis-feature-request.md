@@ -4,16 +4,20 @@ Drafted 2026-11-20 from Combine (`SquashMerge/combine`), for filing against Trel
 
 ## Summary
 
-Combine's `.trellis/rules.toml` records its architecture before any code exists. A review that ran negative fixtures against it found that `trellis rules check` passes (exit 0) on several violations the rules were written to catch. Every gap is documented Trellis behavior, not a bug: the policy language can't yet express these rules. Combine now covers them with a stopgap lexical checker, `tools/arch-guard`. This request asks for six Trellis features, each of which retires one or more of its rules.
+Combine's `.trellis/rules.toml` records its architecture before any code exists. A review that ran negative fixtures against it found that `trellis rules check` passes (exit 0) on several violations the rules were written to catch. Every gap is documented Trellis behavior, not a bug: the policy language can't yet express these rules. Combine now covers them with a stopgap lexical checker, `tools/arch-guard`. This request asks for six Trellis features. The table says which guard rules each one retires, and which parts of a rule stay in the guard.
 
 | # | Feature | Retires `tools/arch-guard` rule(s) | Priority |
 | --- | --- | --- | --- |
-| F1 | External package identities for Cargo workspace **members** | `no-listener-crates`, `no-pty-crates`, `no-webview-shell-or-fs`, `js-engine-only-in-daemon` (and makes Combine's existing Rust selectors work) | High |
+| F1a | External package identities for Cargo workspace **members**, for source references | None on its own: it makes Combine's existing Rust `external` selectors and `deny` entries see member sources. The guard's crate rules ban **declarations**, including unused ones, which F1a can't see | High |
+| F1b | Manifest dependency-declaration policy | `no-listener-crates`, `no-pty-crates`, `no-webview-shell-or-fs`, `js-engine-only-in-daemon` (needs F4b's manifest sites) | Medium |
 | F2 | Source-scoped external rules: "only these sources may use package X" | `js-engine-only-in-loader`, `tauri-only-in-ipc` | High |
-| F3 | Module- and item-level external selectors (`std::fs`, `tokio::net::TcpListener`) | `core-does-no-io`, `no-listener-no-pty` | High |
-| F4 | Non-production layers that every app's production code is forbidden to reach | `no-production-dependency-on-non-production` | Medium |
-| F5 | Opt-in failure on `unknown` at protected boundaries (unassigned, `cross_app`) | none directly; closes the "exit 0 on unknown" hole | Medium |
+| F3 | Module- and item-level paths in external rules (`std::fs`, `tokio::net::TcpListener`) | `core-does-no-io`, `no-raw-listen-or-pty`, and the external half of `no-listener-no-pty`. The local FFI half (`extern "C" { fn openpty(); }`) has no external identity and stays in the guard | High |
+| F4a | Non-production layers that every app's production code is forbidden to reach, over today's native references | The relative-import part of `no-production-dependency-on-non-production` | Medium |
+| F4b | Captured path-reference evidence for manifests, `#[path]`, `include!` and non-source files | The rest of `no-production-dependency-on-non-production` | Medium |
+| F5 | Opt-in failure on `unknown` at protected boundaries (unassigned, `cross_app`) | None directly; closes the "exit 0 on unknown" hole | Medium |
 | F6 | Layer source-language policy | `frontend-is-typescript` | Low |
+
+The guard also checks things no feature here retires: `frontend-imports-are-literal` (a non-literal `import()` is a violation), and its own `guard-parse` and `guard-skip` diagnostics. Trellis's equivalents are its existing `unknown` reasons, which F5 can make fail.
 
 All six follow Trellis's existing principles. Positive evidence is required for `deviates`, absence never proves conformance, uncertain cases stay `unknown`, and a rules file without the new keys behaves exactly as today. Several add closed top-level or table keys, so each needs an amendment to `docs/rules.md`.
 
@@ -32,23 +36,52 @@ The review fixture is a copy of Combine's `rules.toml` over a four-app checkout:
 
 Combine's `tools/arch-guard/test_check.py` encodes each probe as a fixture. Those fixtures can become Trellis acceptance tests.
 
-## F1. External package identities for workspace members
+## F1a. External package identities for workspace members
 
 **Today** (`docs/rules.md`, external mapping): "External package labels still come only from the root manifest: a workspace member's own registry dependencies, inherited dependencies without a member binding, custom roots and unproved ownership remain unknown." A virtual workspace root has no `[dependencies]`, so for Combine every Rust `external` selector and every Rust `deny` entry is inert.
 
-**Proposal.** Bind Rust external identities per workspace member, from that member's captured `Cargo.toml`, for sites in files the member owns.
+**Proposal.** Bind Rust external identities per workspace member, from that member's captured `Cargo.toml`, for sites in files the member is proved to compile.
 
-- **Ownership:** a file belongs to the member whose root contains it most specifically, using the member resolution Trellis already has (#772). Files no member proves it owns stay `unknown`, as today.
-- **Bindings:** `[dependencies]`, `[build-dependencies]` and `[target.'<cfg>'.dependencies]` tables. The Cargo key is the binding name, with hyphen normalization; `package = "<name>"` gives the upstream identity, so `web = { package = "warp" }` binds `web` to `warp`.
-- **Inheritance:** `foo = { workspace = true }` resolves through the root's `[workspace.dependencies]` entry, including that entry's `package` rename.
-- **Roles:** unchanged from the root-manifest slice. `dev-dependencies` stay declaration evidence, not production, and section and target qualifiers don't prove activation.
-- **Conflicts and path dependencies:** a key bound to two different identities across the member's tables stays `unknown`. A path dependency is an in-repo module, never an external package.
+- **Ownership:** the existing proved crate-ownership rules (`docs/rules.md`, conventional crate roots and module chains, around lines 950–969 and 1626–1637). Directory containment alone doesn't prove a file is compiled by a crate. Custom target paths and ambiguous ownership stay `unknown`, as today.
+- **Bindings:** every dependency table, each also under `[target.'<cfg>'.*]`: `[dependencies]`; `[build-dependencies]` and its edition-2021 spelling `[build_dependencies]`; `[dev-dependencies]` and `[dev_dependencies]`. The Cargo key is the binding name, with hyphen normalization; `package = "<name>"` gives the upstream identity, so `web = { package = "warp" }` binds `web` to `warp`.
+- **Roles are unchanged.** The table a binding comes from doesn't change the role of a site that uses it: build and dev bindings are retained evidence like normal ones, and section or target qualifiers don't prove activation. Test roles still come only from test classification (`cfg(test)`, `test_features`, test targets).
+- **Inheritance:** `foo = { workspace = true }` resolves through the root's `[workspace.dependencies]` entry, including that entry's `package` rename. A member entry that combines `workspace = true` with its own `package` is invalid in Cargo and stays `unknown`.
+- **Conflicts:** a key bound to two different identities across one member's tables (for example a normal and a target table) stays `unknown`, with a named reason.
+- **Path dependencies** are in-repo modules, never external packages.
 - **Evidence:** captured from the same admitted snapshot as source (no live reads, no Cargo invocation), within the existing manifest byte and work bounds.
 
+**What it doesn't cover.** `$external` applies only to positively observed edges (`docs/rules.md`, around lines 767–773). A banned dependency that is declared but never imported produces no edge, so F1a alone can't retire the guard's declaration bans; that is F1b.
+
 **Acceptance:**
-1. The `axum` probe above reports `$external` `deviates` and exits 1.
-2. `rquickjs` used from `crates/combined/src/adapters/loader/` resolves to the external identity and conforms against the loader layer's `external` selector.
-3. A workspace-inherited `tauri-plugin-shell = { workspace = true }` in `app/src-tauri/Cargo.toml` deviates against the ban.
+1. **Imported banned dependency:** the `axum` probe above reports `$external` `deviates` and exits 1.
+2. **Unused banned dependency:** `axum` declared in `crates/combined/Cargo.toml` and imported nowhere produces no `$external` instance (F1b covers it).
+3. **Build dependency:** a crate declared under `[build-dependencies]` and used from `build.rs` resolves to its identity, with the role `build.rs` has today.
+4. **Dev dependency behind a test gate:** a `[dev-dependencies]` crate used inside `#[cfg(test)] mod tests` resolves and is reported in `testOnly`.
+5. **Rename and inheritance:** `rquickjs` used from `crates/combined/src/adapters/loader/` through `js = { package = "rquickjs" }` resolves and conforms against the loader layer's `external` selector. A `tauri-plugin-shell = { workspace = true }` imported in `app/src-tauri/src/main.rs` deviates against the ban.
+
+## F1b. Manifest dependency-declaration policy
+
+**Today:** a dependency declaration isn't a reference, so nothing in `rules.toml` can say "no package may depend on `axum`" or "only `combined` may depend on `rquickjs`".
+
+**Proposal:** declaration rules over captured manifests.
+
+```toml
+[external_policy]
+deny = [
+  { language = "rust", package = "axum", stdlib = false, declarations = true },
+]
+
+[[external_rules]]
+id = "js-engine-only-in-daemon"
+select = [{ language = "rust", package = "rquickjs", stdlib = false }]
+declare_only_in = ["crates/combined/Cargo.toml"]
+```
+
+- **`declarations = true`** on a `deny` entry: any workspace member that declares the package in a normal or build table (either spelling, target tables, inherited, renamed) deviates under `$external_declaration`. A dev-table declaration has the test role.
+- **`declare_only_in`** on an external rule: a declaration in a manifest outside the listed paths deviates.
+- **Evidence:** the site is a manifest entry, not a native source module, so this needs F4b's manifest site representation.
+
+**Acceptance:** an unused `axum` in `[dependencies]` deviates; the same under `[dev-dependencies]` is `testOnly`; `rquickjs` declared by `app/src-tauri/Cargo.toml` deviates against `js-engine-only-in-daemon`.
 
 ## F2. Source-scoped external rules
 
@@ -78,18 +111,21 @@ allow_only_in = ["crates/combined/src/adapters/loader.rs", "crates/combined/src/
 - **`select`** uses the existing external selector shape. `npm_scope` is an optional alternative to `package` that matches every package in one npm scope. It is a literal scope, not a glob.
 - **`allow_only_in`** or **`forbid_in`** (exactly one) takes source path globs with the existing pattern rules.
 - **Semantics:** each observed production edge from a source to a selected identity is one instance of the rule. It deviates when its source falls outside `allow_only_in`, or inside `forbid_in`, and conforms otherwise. An edge whose identity isn't proved stays `unknown`. Test-only sites are reported in `testOnly` and never fail the production check, as `$external` does today.
-- **Reviewed exceptions:** module-to-module and declaration exceptions don't apply. An exception for an external rule needs its own reviewed shape (source path, identity, reason), or none at all, which matches `$external` today.
+- **No exceptions in the first version.** Module-to-module and declaration exceptions don't apply to external rules, matching `$external` today. A reviewed exception shape can come later if a user needs one.
+- **Validation** (each a located `invalid_rules` error): `select` is nonempty; each selector has exactly one of `package` and `npm_scope`; `npm_scope` is only valid with `language` `typescript` or `javascript` and `stdlib = false`; exactly one of `allow_only_in` and `forbid_in`, nonempty; `id` is unique across `[[external_rules]]` and doesn't start with `$`.
+- **Identity evidence:** a scope matches only a proved package identity. Trellis never guesses a scope from how a specifier is spelled; an unproved identity stays `unknown`.
 
 **Acceptance:**
 1. The `main.ts` Tauri probe deviates.
 2. `app/web/src/ipc/client.ts` importing `@tauri-apps/api/core` conforms.
-3. `use rquickjs::Runtime;` in `crates/combined/src/main.rs` deviates (with F1).
+3. `use rquickjs::Runtime;` in `crates/combined/src/main.rs` deviates (with F1a).
+4. Each validation rule above has a fixture that fails with `invalid_rules` at the right key.
 
-## F3. Module- and item-level external selectors
+## F3. Module- and item-level paths in external rules
 
 **Today:** an external identity is a whole package, and `std`/`core`/`alloc` are reviewed root labels. "Core does no filesystem, process or network I/O" can't be written: banning `std` bans everything, and `tokio::fs` is indistinguishable from `tokio::sync`.
 
-**Proposal:** an optional `path` field on Rust external selectors, naming a module or item inside the package:
+**Proposal:** an optional `path` field on Rust selectors **in `[[external_rules]]` only**, naming a module or item inside the package. Layer `external` assignments don't accept it (`invalid_rules`), so two subpaths of one package are never assigned to different layers, and the external identity stays package-level:
 
 ```toml
 [[external_rules]]
@@ -103,29 +139,47 @@ select = [
   { language = "rust", package = "tokio", stdlib = false, path = ["process"] },
   { language = "rust", package = "tokio", stdlib = false, path = ["net"] },
 ]
-forbid_in = ["crates/combined/src/core/**", "crates/combined/src/ports/**", "crates/combined/src/model/**"]
+forbid_in = [
+  "crates/combined/src/core.rs",  "crates/combined/src/core/**",
+  "crates/combined/src/ports.rs", "crates/combined/src/ports/**",
+  "crates/combined/src/model.rs", "crates/combined/src/model/**",
+]
 
 [[external_rules]]
 id = "no-listener"
 select = [
   { language = "rust", package = "std",   stdlib = true,  path = ["net", "TcpListener"] },
+  { language = "rust", package = "std",   stdlib = true,  path = ["net", "UdpSocket"] },
   { language = "rust", package = "tokio", stdlib = false, path = ["net", "TcpListener"] },
+  { language = "rust", package = "tokio", stdlib = false, path = ["net", "TcpSocket"] },
+  { language = "rust", package = "tokio", stdlib = false, path = ["net", "UdpSocket"] },
+  { language = "rust", package = "libc",  stdlib = false, path = ["listen"] },
+  { language = "rust", package = "libc",  stdlib = false, path = ["openpty"] },
+  { language = "rust", package = "nix",   stdlib = false, path = ["pty"] },
 ]
 forbid_in = ["**"]
 ```
 
-- **Matching:** a site matches when its resolved path starts with the selector's path, segment by segment. That covers `use` trees with braces and aliases (`use std::{io, fs}`, `use std::process::Command as Cmd`), absolute paths (`::std::fs::read`), and qualified paths in expressions and types.
+- **Matching per site, before aggregation:** each site is matched against the selector paths first; the matched sites are then aggregated into the rule's instances by package identity, as today. A site matches when its resolved path starts with the selector's path, segment by segment, with raw identifiers (`r#fs`) normalized. That covers `use` trees with braces and aliases (`use std::{io, fs}`, `use std::process::Command as Cmd`), absolute paths (`::std::fs::read`), and qualified paths in expressions and types.
 - **Evidence:** the path must be proved from syntax. A path reached through a re-export, a glob import of a parent (`use std::*; fs::read`), an alias of a crate root (`use std as s;`), or a macro expansion stays `unknown` with a named reason. It is never assumed to match or not match.
 - **Scope:** this is name-path evidence, not a resolved API inventory, and it doesn't claim the item exists in a given toolchain version. That keeps the current statement that `std/core/alloc` are labels, not member inventories.
 
+- **What stays in the guard:** a local FFI declaration such as `extern "C" { fn openpty(); }` has no external package identity, so no selector sees it. The guard keeps reserving those names.
+
 **Acceptance:**
-1. Each spelling in Combine's `test_core_io_in_every_spelling` fixture deviates, at the right line.
-2. Comments, string literals and `#[cfg(test)]` items are not production sites.
-3. `tokio::net::UnixListener` doesn't match `no-listener`.
+1. Each spelling in Combine's `test_core_io_in_every_spelling` fixture deviates, at the right line, including `std::r#fs::read`.
+2. The root module files `core.rs`, `ports.rs` and `model.rs` are protected, not only the files under `core/`, `ports/` and `model/`.
+3. Comments, string literals and `#[cfg(test)]` items are not production sites.
+4. `tokio::net::UnixListener` doesn't match `no-listener`.
+5. A `path` in a layer's `external` assignment fails with `invalid_rules`.
 
 ## F4. Non-production layers, enforced across apps
 
-**Today:** `display = "hidden"` is presentation only. Order is compared only within an app, so a production reference from app A into a hidden layer of app B is `unknown` (`cross_app`) and never fails (ruling 4 of #783, pending #686). Path-based reaches aren't references at all: Cargo `path` dependencies, Rust `#[path = "..."]` and `include_str!`/`include_bytes!`, and JavaScript relative imports into non-module trees.
+**Today:** `display = "hidden"` is presentation only. Order is compared only within an app, so a production reference from app A into a hidden layer of app B is `unknown` (`cross_app`) and never fails (ruling 4 of #783, pending #686). Ordinary relative JS/TS imports already resolve natively (`docs/rules.md`, around lines 1109–1168); what's missing is a policy that crosses apps. Other path-based reaches aren't references at all: Cargo `path` dependencies, Rust `#[path = "..."]`, `include_str!`/`include_bytes!`, and any target that isn't a native source module (`tests/data.txt`).
+
+This splits into two parts. F4a is a policy over references Trellis already has. F4b needs new captured evidence and a wire amendment.
+
+### F4a. Destination-layer policy over native references
 
 **Proposal:** a layer attribute that is policy, not presentation:
 
@@ -138,14 +192,33 @@ order = 0
 paths = ["spike/**"]
 ```
 
-- **Reserved rule `$non_production`:** any production site, in any app, whose destination is a file in a `production = false` layer deviates. This applies before the `cross_app` rule, which stays as it is for production-to-production pairs.
-- **Path-based references count as references for this rule only:** Cargo `path` dependencies (manifest site), `#[path]` attributes, the `include!` macro family with a literal argument, and relative JS/TS import specifiers. Each is resolved against the captured snapshot. A target that can't be resolved stays `unknown`.
+- **Reserved rule `$non_production`:** any production site, in any app, whose native destination is a module in a `production = false` layer deviates. This applies before the `cross_app` rule, which stays as it is for production-to-production pairs.
+- **Sites inside a `production = false` layer are not production.** Otherwise one spike file importing another would be a production site reaching the spike. The simplest wire choice is to give them the existing test role; a separate `nonProduction` role would need a wire amendment.
 - **Interaction with `test_features` (#988):** sites already classified as test are not production and don't count.
+- **A directory import** (`import "../test"`) resolves to its index module, as the native resolver does today; a resolved index inside the layer deviates.
 
 **Acceptance:**
-1. The `main.ts` → `spike/helper` probe deviates.
-2. `m0 = { path = "../../spike/m0" }` in a member's `[dependencies]` deviates; the same under `[dev-dependencies]` doesn't.
-3. `include_str!("../../combined/tests/data.txt")` from `crates/combine/src/main.rs` deviates when `crates/*/tests/**` is a `production = false` layer.
+1. The `main.ts` → `spike/helper` probe deviates, and so does `import { helper } from "../test"` resolving to `app/web/test/index.ts`.
+2. `spike/a.ts` importing `spike/b.ts` doesn't produce a `$non_production` instance.
+3. A test file importing `spike/helper` is `testOnly`.
+
+### F4b. Captured path-reference evidence
+
+**Today:** the closed wire contract requires native source and rule targets; a `Destination` is a native `Target` or an `externalPackage`, and native SIDs must not be invented (`docs/rules.md`, around lines 1484–1495). A `Cargo.toml` entry is not a native source site, and `tests/data.txt` has no native module SID, so neither can be reported today.
+
+**Proposal:** a wire amendment that adds typed path-reference evidence.
+
+- **New site kinds:** a manifest dependency entry (manifest path, table, key), a `#[path = "..."]` attribute, and an `include!`-family macro with a literal argument (normal and raw strings decoded). Each is captured from the admitted snapshot.
+- **New destination kind:** a checkout-relative file or directory path that isn't a native module, with whether the snapshot retained it.
+- **Missing or unretained targets** stay `unknown` with a named reason (`path_target_missing`, `path_target_unretained`), never `conforms`.
+- **Roles:** a manifest entry in a dev table has the test role; a `#[path]` or `include!` site has the role of its enclosing item, so one inside `#[cfg(test)]` is test.
+
+**Acceptance:**
+1. `m0 = { path = "../../spike/m0" }` in a member's `[dependencies]` deviates; the same under `[dev-dependencies]` is `testOnly`.
+2. `include_str!("../../combined/tests/data.txt")` from `crates/combine/src/main.rs` deviates when `crates/*/tests/**` is a `production = false` layer, and so does `include_str!(r"...")`; the same call inside `#[cfg(test)]` is `testOnly`.
+3. A `#[path]` target that isn't in the snapshot is `unknown` (`path_target_missing`).
+
+Until F4b lands, Combine's guard keeps its Cargo, `#[path]` and `include!` checks.
 
 ## F5. Opt-in failure on `unknown` at protected boundaries
 
@@ -155,30 +228,42 @@ paths = ["spike/**"]
 
 **Proposal:**
 - `[layer_policy] unassigned = "forbid"` (default `"allow"`, today's behavior). A production source file under any app's root that no layer selects fails the check. It is reported per file, with its app.
-- `trellis rules check --fail-on <reason>[,<reason>]` (for example `layer_unassigned` or `cross_app`). The selected `unknown` reasons fail the run. The JSON payload is unchanged; only the exit status and a summary line differ.
+- `trellis rules check --fail-on <reason>[,<reason>]` (for example `layer_unassigned` or `cross_app`). The selected `unknown` reasons fail the run. An unrecognized reason name is a usage error (exit 2), not ignored.
+- **Verdicts don't change.** These options change the exit status and add a summary line; an `unknown` instance stays `unknown` in the JSON.
+- **Unassigned files are reported per file**, including a file with no references at all, which has no instance today. That needs a small wire addition, for example an `unassignedFiles` array of `{ app, path }`.
+- **Test-only files and sites are exempt**: a test file in no layer doesn't fail, and `--fail-on cross_app` counts only production instances.
 
 These are opt-in, so existing checkouts keep today's semantics. Combine would turn on `unassigned = "forbid"` from its first commit, since every production path is planned in advance.
 
 **Acceptance:**
-1. A new `crates/combined/src/adapters/mod.rs` that matches no layer fails with `unassigned = "forbid"` and passes without it.
+1. A new `crates/combined/src/adapters/mod.rs` that matches no layer fails with `unassigned = "forbid"` and passes without it, even if the file has no references.
+2. `--fail-on cross_app` fails on the `main.ts` → `spike/helper` probe, and not on the same import from a test file.
+3. `--fail-on no_such_reason` exits 2.
+4. With and without `--fail-on`, the JSON verdicts are identical.
 
 ## F6. Layer source-language policy
 
 **Today:** layers select paths, and external selectors carry a language. A `.js` file in a TypeScript frontend gets JavaScript identities that TypeScript-only selectors never see. Combine has worked around this by duplicating every selector for both languages.
 
-**Proposal:** an optional `languages = ["typescript"]` on a layer. A source file the layer selects whose detected language isn't listed is one `$layers` instance that deviates, with reason `language_not_allowed`.
+**Proposal:** an optional `languages = ["typescript"]` on a layer. A production source file the layer selects whose detected language isn't listed is one `$layers` instance that deviates, with reason `language_not_allowed`.
+
+- **One instance per file**, not per reference in it.
+- **Test files are exempt**, as for other `$layers` instances.
+- **Only languages the index captures.** A file type Trellis doesn't index isn't detected, so this can't promise that no other language is present.
 
 **Acceptance:**
-1. `app/web/src/renderers/direct.js` deviates in a layer with `languages = ["typescript"]`.
+1. `app/web/src/renderers/direct.js` deviates once, however many imports it has, in a layer with `languages = ["typescript"]`.
+2. A `.js` file under `app/web/test/` in the same layer doesn't deviate.
 
 ## Compatibility and wire shape
 
-- New closed keys: `[[external_rules]]` at top level, and `path`/`npm_scope` in external selectors. New layer keys `production` and `languages`, and `layer_policy.unassigned`. Each needs a located `invalid_rules` schema error for bad values, and a rules file without them is unchanged.
-- New reserved rule IDs: `$non_production` and one per `[[external_rules]]` entry (its `id`). They use the existing `rules:v2` instance shape, with exact counts, bounded samples and production/test roles.
+- New closed keys: `[[external_rules]]` at top level (with `declare_only_in` for F1b), `path` and `npm_scope` in its selectors, and `declarations` on `deny` entries. New layer keys `production` and `languages`, and `layer_policy.unassigned`. Each needs a located `invalid_rules` schema error for bad values, and a rules file without them is unchanged.
+- New reserved rule IDs: `$non_production`, `$external_declaration`, and one per `[[external_rules]]` entry (its `id`). F1a, F2, F3, F4a and F6 fit the existing `rules:v2` instance shape, with exact counts, bounded samples and production/test roles.
+- Wire amendments: F4b's path-reference sites and destinations (which F1b also needs), and F5's per-file unassigned report.
 - All new evidence is read from the admitted snapshot, within the existing work bounds, and fails atomically with `bounded_work` on exhaustion.
 
 ## Suggested order
 
-F1 first: it is a mapping change inside an existing contract, and it makes Combine's current Rust selectors and bans work. Then F2 and F3 together, since they share the `[[external_rules]]` table. Then F4 and F5, which close the silent-pass holes. F6 last: the selector duplication workaround is cheap.
+F1a first: it is a mapping change inside an existing contract, and it makes Combine's current Rust selectors and bans see member sources. Then F2 and F3 together, since they share the `[[external_rules]]` table. Then F4a and F5, which close the silent-pass holes without a new evidence kind. F4b and F1b need the wire amendment, so they come together after that. F6 last: the selector duplication workaround is cheap.
 
 When a feature lands, Combine deletes the matching `tools/arch-guard` rule and moves its fixture into a `rules.toml` check.

@@ -1,4 +1,4 @@
-# Combine — Spec (rev 7)
+# Combine — Spec (rev 8)
 
 Updated 2026-11-20
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 7 (review 2):** each attachment's events (data, resizes, facts) form one ordered, replayable log, and the client acknowledges the last event it applied; the replay buffer is per attachment; the listener and PTY check is described as a conservative list of spellings, not proof; `tools/arch-guard` tokenizes instead of matching text, and reports what it can't analyze.
 
 ## Goals and non-goals
 
@@ -72,7 +74,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - The client runs the system `ssh` with `combined connect`, a stdio bridge to the daemon's Unix socket (like the MCP shim). One SSH session per host carries everything.
 - The protocol over the bridge, and over a local socket, is the same: length-prefixed frames, JSON for control messages, binary for terminal output.
 - **Handshake:** the first frames exchange protocol version and host ID. A version mismatch closes the connection with a message naming both versions.
-- **Frames:** at most 1 MB each; larger terminal output is split. Control frames are queued ahead of terminal output, and output from several terminals is interleaved round-robin, so a noisy terminal can't delay control messages or other terminals.
+- **Frames:** at most 1 MB each; larger terminal output is split. Replies and control messages are queued ahead of terminal output, and output from several attachments is interleaved round-robin, so a noisy terminal can't delay control messages or other terminals. Priority never reorders one attachment's events relative to each other: its data, resizes and other events travel in one ordered stream (see Attach, sequence and epoch).
 - SSH provides authentication (the user's keys and agent), encryption, and server identity (`known_hosts`). Using the system `ssh` means `~/.ssh/config`, `ProxyJump`, and Tailscale SSH all work without app support.
 - The client checks that the host ID reported over the bridge matches the one it stored for that host, so a changed address can't silently point the rail at a different machine.
 - **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client.
@@ -253,7 +255,7 @@ pub trait Attachment: Send {
 ```
 
 - Every operation on a viewer goes through its attachment. Terminal identity (`TermId`) and attachment identity are separate, so two panels on one terminal can differ in size, display and focus.
-- `Data` is opaque: the first paint and live bytes, in order. The daemon never parses or emulates it.
+- `Data` is opaque: the first paint and live bytes, in order. The daemon never parses or emulates it, but it never reorders `Data` relative to the attachment's other events either: bytes painted at 80 columns must reach xterm.js before the `Resized` to 120 and the replacement paint that follows it.
 - Spaces aren't a backend concept: the daemon derives them from `TermInfo.cwd` (see Core concepts).
 
 **What herdr-core provides** (checked against `hc schema`, herdr-core 0.1.21, protocol generation 1)
@@ -278,8 +280,9 @@ The daemon talks only to its own host's herdr-core, and uses only that host's te
 
 Each client panel gets its own backend attachment, and the daemon relays that attachment's stream as opaque bytes. There is no shared per-terminal stream: each viewer gets its own first paint and replacement paints, so one viewer's bytes are never replay history for another.
 
-- Every chunk the daemon relays carries a cursor `(attachment ID, epoch, seq)`. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
-- If the client's connection drops, it reconnects and resumes from its last cursor. The daemon keeps the attachment open for a grace period (about 30 s) and replays from a bounded per-attachment buffer (about 4 MB), or answers `Gap`. On `Gap` the client clears its xterm.js and attaches again, getting a fresh first paint.
+- **One ordered event log per attachment.** The daemon relays every `AttachEvent` (`Data`, `Resized`, `Facts`, `Closed`, `Lost`) in one sequence, each carrying a cursor `(attachment ID, epoch, seq)`. A `Data` chunk split across frames keeps one `seq` per frame, in order. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
+- The client acknowledges the last event it has **applied** to xterm.js (bytes written, resize done), not the last frame received. Replay starts after that event.
+- If the client's connection drops, it reconnects and resumes from its last acknowledged cursor. The daemon keeps the attachment open for a grace period (about 30 s) and replays the event log from a bounded per-attachment buffer (about 4 MB), or answers `Gap`. Replay carries resizes and facts in their original places, never bytes alone. On `Gap` the client clears its xterm.js and attaches again, getting a fresh first paint.
 - Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer; after a `Gap`, only state is restored.
 - Backpressure: each attachment has a bounded send queue, and the daemon grants herdr-core CREDIT only as the client drains it. A client that falls past its queue anyway gets a `Gap` and a fresh attach, never unbounded buffering.
 
@@ -310,7 +313,7 @@ herdr-core already arbitrates between viewers (attach size, `observe`, FOCUS, `r
 - `TermId` is opaque outside the adapter and prefixed with the backend name.
 - Adapters hide reconnects and emit `Lost` only after giving up.
 - Missing features are reported through `capabilities()`, and the UI hides what isn't supported.
-- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; two attachments on one terminal with different sizes and display facts, where each operation affects only its own attachment; attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
+- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; a disconnect and replay just before and just after a resize, where the client ends with the same screen as a client that never dropped; two attachments on one terminal with different sizes and display facts, where each operation is routed to the attachment that sent it (the terminal itself is shared, so input and the PTY size still reach every viewer); attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
 - The fake backend also injects what real runs rarely show: an `Inexact` terminal, and a local `t7` beside a remote `work/t7` with the same `cwd`, which must not appear.
 
 ## Panels, loaders and groups
@@ -559,7 +562,7 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 | Table rows sent to a client | 10,000 |
 | Log panel retention | 5,000 lines |
 | Mermaid source size | 200 KB |
-| Terminal replay buffer | 4 MB per terminal |
+| Terminal replay buffer | 4 MB per attachment |
 
 - Scheduling is round-robin across spaces. Manual refreshes and agent calls jump the queue; interval refreshes of hidden panels go last.
 - A loader waiting on `ctx.cli.run` or `ctx.mcp.call` holds only its loader permit; the call takes a permit from the separate source pool, so loaders can't deadlock waiting on their own children.
@@ -619,11 +622,11 @@ Each rule says what checks it today. `rules.toml` checks layer direction between
 | Renderers never import `ipc/` or a Tauri package | `rules.toml`: renderers and `ipc/` are peers, and the Tauri packages (TypeScript and JavaScript) are assigned to `ipc/` |
 | Core, ports and model do no I/O (`std::fs`, `std::process`, `std::net`, their tokio versions) | `tools/arch-guard` |
 | Only the loader adapter uses a JS engine; only `ipc/` imports Tauri packages | `tools/arch-guard` (`rules.toml` alone allows higher layers too) |
-| No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. Rust crate bans and listener or PTY calls need the `tools/arch-guard` |
+| No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. `tools/arch-guard` bans the Rust crates and reserves a list of listener and PTY spellings (`TcpListener`, `TcpSocket`, `UdpSocket`, `openpty`, `libc::listen`, ...). The list is conservative, not proof: any other way to open a socket or PTY needs review |
 | No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the `tools/arch-guard` |
 | Frontend sources are TypeScript | `tools/arch-guard` |
 
-**`tools/arch-guard`** is a supplemental checker for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, cross-app path imports and the frontend's source language. Its rules are in `tools/arch-guard/guard.toml`, and its tests cover every case the review found trellis letting through. It is lexical, not a compiler: it removes comments, strings and test-gated items, expands `use` trees, and reads manifests, but doesn't expand macros or follow re-exports (limits are listed in `check.py`). It is a stopgap: each rule retires once trellis can express it (`docs/trellis-feature-request.md`).
+**`tools/arch-guard`** is a supplemental checker for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, cross-app path imports and the frontend's source language. Its rules are in `tools/arch-guard/guard.toml`, and its tests cover every case the review found trellis letting through. It tokenizes Rust and TypeScript and reads every workspace manifest, but it is not a compiler: it removes test-gated items, expands `use` trees, decodes literals and maps dependency renames, but doesn't expand macros or follow re-exports (limits are listed in `check.py`). Text it can't tokenize, and a `skip` glob that would hide production source, are reported, never passed as clean. A non-literal frontend `import()` is a violation. It is a stopgap: each rule retires once trellis can express it (`docs/trellis-feature-request.md`).
 
 Before finishing a change, run both checks:
 
@@ -660,7 +663,7 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 **From rev 3**
 
-- [x] Does herdr-core offer a positioned snapshot? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirms it for terminals that predate the daemon and across restarts.
+- [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirms it for terminals that predate the daemon and across restarts.
 - [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
 
 **From rev 2**

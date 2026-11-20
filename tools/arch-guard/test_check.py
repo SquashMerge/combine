@@ -237,6 +237,290 @@ class GuardTest(unittest.TestCase):
             },
         )
 
+    # --- Review 2 (opencode, 2026-11-20): Cargo renames, membership and table spellings
+
+    def test_renamed_engine_used_outside_loader(self):
+        self.assertFlags(
+            {
+                "crates/combined/Cargo.toml": package("combined", '[dependencies]\njs = { package = "rquickjs", version = "0.6" }\n'),
+                "crates/combined/src/main.rs": "use js::Runtime;\nfn main() { let _ = Runtime::new(); }\n",
+                "crates/combined/src/adapters/loader/engine.rs": "use js::Runtime;\n",
+            },
+            ("js-engine-only-in-loader", "crates/combined/src/main.rs"),
+        )
+
+    def test_renamed_engine_inherited_through_target_table(self):
+        self.assertFlags(
+            {
+                "Cargo.toml": WORKSPACE + '\n[workspace.dependencies]\nengine = { package = "deno_core", version = "0.300" }\n',
+                "crates/combined/Cargo.toml": package("combined", "[target.'cfg(unix)'.dependencies]\nengine = { workspace = true }\n"),
+                "crates/combined/src/main.rs": "fn main() { let _ = engine::JsRuntime::new(Default::default()); }\n",
+            },
+            ("js-engine-only-in-loader", "crates/combined/src/main.rs"),
+        )
+
+    def test_extern_crate_alias_is_followed(self):
+        self.assertFlags(
+            {"crates/combined/src/main.rs": "extern crate rquickjs as qjs;\nfn main() { let _ = qjs::Runtime::new(); }\n"},
+            ("js-engine-only-in-loader", "crates/combined/src/main.rs"),
+        )
+
+    def test_implicit_member_through_path_dependency(self):
+        self.assertFlags(
+            {
+                "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = ["crates/combined"]\n',
+                "crates/combined/Cargo.toml": package("combined", '[dependencies]\nhelper = { path = "../helper" }\n'),
+                "crates/helper/Cargo.toml": package("helper", '[dependencies]\naxum = "0.8"\n'),
+                "crates/helper/src/lib.rs": "",
+            },
+            ("no-listener-crates", "crates/helper/Cargo.toml"),
+        )
+
+    def test_excluded_path_dependency_is_not_a_member(self):
+        # spike is excluded, so its own dependencies aren't checked; reaching it still is.
+        self.assertFlags(
+            {
+                "crates/combined/Cargo.toml": package("combined", '[dependencies]\nm0 = { path = "../../spike/m0" }\n'),
+                "spike/m0/Cargo.toml": package("m0", '[dependencies]\nportable-pty = "0.8"\n'),
+            },
+            ("no-production-dependency-on-non-production", "crates/combined/Cargo.toml"),
+        )
+
+    def test_legacy_build_dependencies_table(self):
+        self.assertFlags(
+            {"crates/combined/Cargo.toml": package("combined", '[build_dependencies]\naxum = "0.8"\n')},
+            ("no-listener-crates", "crates/combined/Cargo.toml"),
+        )
+
+    def test_legacy_dev_dependencies_table_is_not_production(self):
+        self.assertFlags({"crates/combined/Cargo.toml": package("combined", '[dev_dependencies]\naxum = "0.8"\n')})
+
+    # --- Review 2: Rust test gates and item boundaries
+
+    def test_test_gates_in_every_supported_spelling(self):
+        core = """\
+        #[cfg(test)]
+        fn helper(_: [u8; 1]) {
+            let _ = std::fs::read("x");
+        }
+
+        #[test]
+        fn plain_test() { let _ = std::fs::read("x"); }
+
+        #[tokio::test]
+        async fn async_test() { let _ = std::fs::read("x"); }
+
+        #[cfg(/* only in tests */ test)]
+        fn commented() { let _ = std::fs::read("x"); }
+
+        #[cfg(any(test, feature = "test-support",))]
+        fn trailing_comma() { let _ = std::fs::read("x"); }
+
+        #[cfg(all(unix, test))]
+        fn all_with_test() { let _ = std::fs::read("x"); }
+
+        #[cfg(test)]
+        const SIZES: [usize; 2] = [1; 2];
+
+        mod inner {
+            #![cfg(test)]
+            use std::process::Command;
+        }
+        """
+        self.assertFlags({"crates/combined/src/core/gates.rs": core})
+
+    def test_production_cfgs_are_not_test_gates(self):
+        core = """\
+        #[cfg(not(test))]
+        pub fn a() { let _ = std::fs::read("x"); }
+
+        #[cfg(any(test, unix))]
+        pub fn b() { let _ = std::fs::read("x"); }
+
+        #[cfg(feature = "metrics")]
+        pub fn c() { let _ = std::fs::read("x"); }
+        """
+        self.assertEqual(
+            sorted(v.line for v in self._violations({"crates/combined/src/core/prod.rs": core})),
+            [2, 5, 8],
+        )
+
+    def test_gated_field_hides_only_that_field(self):
+        core = """\
+        pub struct S {
+            #[cfg(test)]
+            probe: std::fs::File,
+            pub file: std::fs::File,
+        }
+        """
+        self.assertEqual([v.line for v in self._violations({"crates/combined/src/core/s.rs": core})], [4])
+
+    def test_raw_identifiers_in_paths(self):
+        self.assertEqual(
+            sorted(v.line for v in self._violations({"crates/combined/src/core.rs": (
+                "pub fn a() { let _ = std::r#fs::read(\"x\"); }\n"
+                "pub fn b() { let _ = r#std::fs::read(\"x\"); }\n"
+                "use r#tokio::r#process;\n")})),
+            [1, 2, 3],
+        )
+
+    def test_unterminated_rust_is_a_parse_error(self):
+        self.assertFlags(
+            {"crates/combined/src/core.rs": 'pub const X: &str = "never closed;\n'},
+            ("guard-parse", "crates/combined/src/core.rs"),
+        )
+
+    # --- Review 2: path sites
+
+    def test_test_only_fixture_includes_are_allowed(self):
+        self.assertFlags(
+            {
+                "crates/combine/src/main.rs": (
+                    'fn main() {}\n#[cfg(test)]\nfn helper() { let _ = include_str!("../../combined/tests/data.txt"); }\n'),
+                "crates/combine/src/fixture.rs": '#![cfg(test)]\nconst SAMPLE: &str = include_str!("../../combined/tests/data.txt");\n',
+            },
+        )
+
+    def test_raw_string_path_sites(self):
+        self.assertFlags(
+            {
+                "crates/combined/src/main.rs": 'const X: &str = include_str!(r"../../../spike/data.txt");\nfn main() {}\n',
+                "crates/combine/src/main.rs": '#[path = r#"../../../spike/helper.rs"#]\nmod helper;\nfn main() {}\n',
+            },
+            ("no-production-dependency-on-non-production", "crates/combined/src/main.rs"),
+            ("no-production-dependency-on-non-production", "crates/combine/src/main.rs"),
+        )
+
+    def test_path_in_doc_string_is_not_a_reach(self):
+        src = 'const DOC: &str = "include_str!(\\"../../../spike/x\\")";\n/// #[path = "../../../spike/y.rs"]\nfn main() {}\n'
+        self.assertFlags({"crates/combined/src/main.rs": src})
+
+    # --- Review 2: listeners
+
+    def test_socket_builder_and_syscall_crates(self):
+        self.assertFlags(
+            {
+                "crates/combined/src/rpc.rs": (
+                    "pub fn f() -> std::io::Result<()> {\n"
+                    "    let socket = tokio::net::TcpSocket::new_v4()?;\n"
+                    "    socket.bind(\"127.0.0.1:1\".parse().unwrap())?;\n"
+                    "    let _l = socket.listen(128)?;\n    Ok(())\n}\n"),
+                "crates/combined/src/adapters/fs/raw.rs": "pub fn g(fd: i32) { unsafe { libc::listen(fd, 1); } }\n",
+            },
+            ("no-listener-no-pty", "crates/combined/src/rpc.rs"),
+            ("no-raw-listen-or-pty", "crates/combined/src/adapters/fs/raw.rs"),
+        )
+
+    def test_reserved_names_flag_local_types_too(self):
+        # Deliberate: the identifier list reserves these names. Rename the local type.
+        self.assertFlags(
+            {"crates/combined/src/model.rs": "pub struct TcpListener { pub enabled: bool }\n"},
+            ("no-listener-no-pty", "crates/combined/src/model.rs"),
+        )
+
+    # --- Review 2: skipped directories
+
+    def test_nested_dist_and_target_inside_source_are_read(self):
+        self.assertFlags(
+            {
+                "crates/combined/src/core/dist/mod.rs": "pub fn f() { let _ = std::fs::read(\"x\"); }\n",
+                "crates/combined/src/core/target.rs": "use std::process::Command;\n",
+            },
+            ("core-does-no-io", "crates/combined/src/core/dist/mod.rs"),
+            ("core-does-no-io", "crates/combined/src/core/target.rs"),
+        )
+
+    def test_skip_glob_inside_source_is_reported(self):
+        self.assertFlags(
+            {"crates/combined/src/core/node_modules/x.rs": "use std::fs;\n"},
+            ("guard-skip", "crates/combined/src/core/node_modules"),
+        )
+
+    def test_build_output_roots_are_skipped(self):
+        self.assertFlags(
+            {
+                "target/debug/build/out.rs": "use std::net::TcpListener;\n",
+                "app/web/dist/assets/index.js": "import '@tauri-apps/plugin-shell';\n",
+            },
+        )
+
+    # --- Review 2: frontend lexing
+
+    def test_imports_inside_strings_templates_and_regexes_are_not_imports(self):
+        src = """\
+        export const documentation = "import '@tauri-apps/api/core'";
+        export const tpl = `require("@tauri-apps/plugin-fs")`;
+        export const re = /import "@tauri-apps\\/api"/;
+        """
+        self.assertFlags({"app/web/src/main.ts": src})
+
+    def test_import_after_regex_literal(self):
+        self.assertFlags(
+            {"app/web/src/main.ts": 'const slash = /\\//; import { invoke } from "@tauri-apps/api/core";\n'},
+            ("tauri-only-in-ipc", "app/web/src/main.ts"),
+        )
+
+    def test_escaped_specifiers_are_decoded(self):
+        self.assertFlags(
+            {
+                "app/web/src/main.ts": 'import { invoke } from "\\u0040tauri-apps/api/core";\n',
+                "app/web/src/ipc/shell.ts": 'export * from "@tauri-apps/plugin\\u002dshell";\n',
+                "app/web/src/panels/host.ts": "const m = require('\\x40tauri-apps/api');\n",
+            },
+            ("tauri-only-in-ipc", "app/web/src/main.ts"),
+            ("no-webview-shell-or-fs-plugin", "app/web/src/ipc/shell.ts"),
+            ("tauri-only-in-ipc", "app/web/src/panels/host.ts"),
+        )
+
+    def test_import_inside_template_substitution(self):
+        self.assertFlags(
+            {"app/web/src/main.ts": 'export const s = `${(await import("@tauri-apps/api/core")).invoke}`;\n'},
+            ("tauri-only-in-ipc", "app/web/src/main.ts"),
+        )
+
+    def test_computed_specifiers_are_reported(self):
+        self.assertFlags(
+            {
+                "app/web/src/main.ts": (
+                    "const name = '@tauri-apps/api/core';\n"
+                    "export const a = import(name);\n"
+                    "export const b = import(`@tauri-apps/${'api'}`);\n"
+                    "export const c = import(`./model/types`);\n"),
+            },
+            ("frontend-imports-are-literal", "app/web/src/main.ts"),
+        )
+        self.assertEqual(
+            sorted(v.line for v in self._violations({"app/web/src/main.ts": "export const a = import(x);\nexport const b = import(`${y}`);\n"})),
+            [1, 2],
+        )
+
+    def test_not_imports(self):
+        src = """\
+        export const meta = import.meta.url;
+        export const obj = { import: 1, require: 2 };
+        export const v = obj.import + obj.require;
+        export { meta as m };
+        export const x = "from '@tauri-apps/api'";
+        """
+        self.assertFlags({"app/web/src/main.ts": src})
+
+    def test_directory_root_imports(self):
+        self.assertFlags(
+            {
+                "app/web/test/index.ts": "export const helper = 1;\n",
+                "app/web/src/main.ts": 'import { helper } from "../test";\n',
+                "app/web/src/shell/boot.ts": 'import "../../../../spike";\n',
+            },
+            ("no-production-dependency-on-non-production", "app/web/src/main.ts"),
+            ("no-production-dependency-on-non-production", "app/web/src/shell/boot.ts"),
+        )
+
+    def test_unterminated_frontend_is_a_parse_error(self):
+        self.assertFlags(
+            {"app/web/src/main.ts": "export const s = 'never closed;\nimport '@tauri-apps/api';\n"},
+            ("guard-parse", "app/web/src/main.ts"),
+        )
+
     # --- Config
 
     def test_unknown_config_key_is_an_error(self):
