@@ -1,5 +1,7 @@
 # Architecture guard rules: what .trellis/rules.toml can't express (SPEC.md, "Repository
 # layout and architecture rules"). Checked by tools/arch-guard/check.py.
+# Each rule retires when its trellis issue lands (milestone 0.3, #1263-#1272); the map, and
+# the checks that stay here for good, are in docs/trellis-feature-request.md.
 #
 # Globs are checkout-relative: `*` and `?` stay within one path segment, `**` spans
 # segments, and `dir/**` selects what is under dir, not dir.rs itself.

@@ -1,8 +1,50 @@
 # Trellis feature request: enforce the architecture rules Combine needs
 
-Drafted 2026-11-20 from Combine (`SquashMerge/combine`), for filing against Trellis.
+**Status: superseded (2026-11-20).** The Trellis owner reviewed this request and filed it as issues in SquashMerge/trellis milestone 0.3. Those issues are now the source of truth; the original request below is kept as history. Trellis's review and the owner's rulings are in `.reviews/trellis-feature-request-review.md` (local, not committed).
 
-## Summary
+## Filed issues, in build order
+
+| Issue | Scope | From |
+| --- | --- | --- |
+| #1263 | The whole `$` prefix is reserved for rule IDs | F2 validation |
+| #1264 | Literal dynamic imports resolve: `import("x")` always; `require("x")` when `require` isn't locally bound. Non-literal imports stay `unknown` | new |
+| #1265 | Per-member Cargo external bindings. Normal and dev tables bind in lib/bin sources; build-dependencies don't. `build.rs` sites stay `unknown` (no build-script crate root yet) | F1a |
+| #1266 | `[[access_rules]]`: `select` names external packages (including `npm_scope`) or native layers (`{ layer = "x" }`); `allow_only_from` / `forbid_from` take layer names or globs; works across apps | F2, widened |
+| #1267 | `[layer_policy] unassigned = "forbid"`: each unassigned production file is a `$unassigned` deviation, checkout-wide | F5 (no `--fail-on`, no wire change) |
+| #1268 | `production = false` layers: production code in any app that reaches them deviates under `$non_production`. Sources inside such a layer are skipped by that rule but keep their roles | F4a |
+| #1269 | Rust declaration policy: `declarations = true` on `deny`; `declare_only_in` takes member package names. `package.json` declarations deferred | F1b (no longer needs F4b) |
+| #1270 | Module and item `path`s in access rules, including `::std::...`, uses through imports and crate-root aliases | F3 |
+| #1271 | Cargo `path` dependencies, `#[path]` and `include!` as reaches to indexed modules | F4b, native part |
+| #1272 | Tracker for the deferred parts (`include_str!`/`include_bytes!` to data files, `package.json` declarations) | F4b data, F1b npm |
+
+Not filed: F6 (use `unassigned = "forbid"` plus per-extension layer globs) and `--fail-on`.
+
+## Retiring `tools/arch-guard` rules
+
+When an issue lands, delete the guard rule (or the part of it) and move its fixture into a `rules.toml` check. Combine's `rules.toml` must then use the shipped key names (`[[access_rules]]`, `allow_only_from`), not this request's.
+
+| Guard rule | Retired by | Stays in the guard |
+| --- | --- | --- |
+| `no-listener-crates`, `no-pty-crates`, `no-webview-shell-or-fs` | #1265 for imports, #1269 (`declarations = true`) for unused declarations | build-dependency declarations, if #1269 doesn't cover them |
+| `js-engine-only-in-daemon` | #1269 (`declare_only_in = ["combined"]`) | |
+| `js-engine-only-in-loader` | #1266 with #1265 | |
+| `core-does-no-io`, `no-raw-listen-or-pty` | #1270 with #1266 (and #1265 for `tokio`, `libc`, `nix`, `rustix`) | |
+| `no-listener-no-pty` | #1270 for external paths (`std::net::TcpListener`, `tokio::net::TcpSocket`, ...) | local FFI names (`extern "C" { fn openpty(); }`) |
+| `tauri-only-in-ipc` | #1266 for static imports, #1264 for literal `import()`/`require()` | |
+| `no-webview-shell-or-fs-plugin` | Static imports: `rules.toml`'s `deny` already deviates today. `require()`/`import()`: #1264 | |
+| `frontend-imports-are-literal` | | all of it: non-literal imports stay `unknown` in Trellis |
+| `frontend-is-typescript` | #1267 plus per-extension layer globs | |
+| `no-production-dependency-on-non-production` | #1268 for native references across apps, #1271 for Cargo `path`, `#[path]` and `include!` of modules | `include_str!`/`include_bytes!` of data files (#1272); symlinks, which Trellis capture never follows |
+| Test-gate recognition | | the stricter attribute list: Trellis keeps "any final `::test` attribute is test" (Decision 0011), so `#[helper::test]` is test there |
+| `guard-parse`, `guard-skip` | | all of it |
+
+**Fixtures that won't become Trellis tests as written:** `test_only_known_test_attributes_gate` (contradicts Decision 0011); the implicit-member, `[lib] name` and symlink fixtures (Trellis's member and capture model differs); and the npm fixtures until their packages are declared in the nearest `package.json`, because Trellis proves only declared npm identities.
+
+---
+
+# Original request (2026-11-20)
+
+### Summary
 
 Combine's `.trellis/rules.toml` records its architecture before any code exists. A review that ran negative fixtures against it found that `trellis rules check` passes (exit 0) on several violations the rules were written to catch. Every gap is documented Trellis behavior, not a bug: the policy language can't yet express these rules. Combine now covers them with a stopgap lexical checker, `tools/arch-guard`. This request asks for six Trellis features. The table says which guard rules each one retires, and which parts of a rule stay in the guard.
 
@@ -21,7 +63,7 @@ The guard also checks things no feature here retires: `frontend-imports-are-lite
 
 All six follow Trellis's existing principles. Positive evidence is required for `deviates`, absence never proves conformance, uncertain cases stay `unknown`, and a rules file without the new keys behaves exactly as today. Several add closed top-level or table keys, so each needs an amendment to `docs/rules.md`.
 
-## Reproduction
+### Reproduction
 
 The review fixture is a copy of Combine's `rules.toml` over a four-app checkout: Cargo binaries `combined`, `combine` and `combine-app` in a virtual workspace, and npm app `combine-web`. These probes all exit 0:
 
@@ -36,7 +78,7 @@ The review fixture is a copy of Combine's `rules.toml` over a four-app checkout:
 
 Combine's `tools/arch-guard/test_check.py` encodes each probe as a fixture. Those fixtures can become Trellis acceptance tests.
 
-## F1a. External package identities for workspace members
+### F1a. External package identities for workspace members
 
 **Today** (`docs/rules.md`, external mapping): "External package labels still come only from the root manifest: a workspace member's own registry dependencies, inherited dependencies without a member binding, custom roots and unproved ownership remain unknown." A virtual workspace root has no `[dependencies]`, so for Combine every Rust `external` selector and every Rust `deny` entry is inert.
 
@@ -59,7 +101,7 @@ Combine's `tools/arch-guard/test_check.py` encodes each probe as a fixture. Thos
 4. **Dev dependency behind a test gate:** a `[dev-dependencies]` crate used inside `#[cfg(test)] mod tests` resolves and is reported in `testOnly`.
 5. **Rename and inheritance:** `rquickjs` used from `crates/combined/src/adapters/loader/` through `js = { package = "rquickjs" }` resolves and conforms against the loader layer's `external` selector. A `tauri-plugin-shell = { workspace = true }` imported in `app/src-tauri/src/main.rs` deviates against the ban. `js = { workspace = true, package = "plain" }`, with the workspace entry renaming `rquickjs`, binds `js` to `rquickjs`.
 
-## F1b. Manifest dependency-declaration policy
+### F1b. Manifest dependency-declaration policy
 
 **Today:** a dependency declaration isn't a reference, so nothing in `rules.toml` can say "no package may depend on `axum`" or "only `combined` may depend on `rquickjs`".
 
@@ -83,7 +125,7 @@ declare_only_in = ["crates/combined/Cargo.toml"]
 
 **Acceptance:** an unused `axum` in `[dependencies]` deviates; the same under `[dev-dependencies]` is `testOnly`; `rquickjs` declared by `app/src-tauri/Cargo.toml` deviates against `js-engine-only-in-daemon`.
 
-## F2. Source-scoped external rules
+### F2. Source-scoped external rules
 
 **Today:** assigning an external package to a layer makes references from that layer, and from every higher layer of the same app, conform. "Only the loader adapter may use the JS engine" and "only `ipc/` imports Tauri" can't be written. The closest form, making the owning layer a peer, also bans legitimate callers above it.
 
@@ -121,7 +163,7 @@ allow_only_in = ["crates/combined/src/adapters/loader.rs", "crates/combined/src/
 3. `use rquickjs::Runtime;` in `crates/combined/src/main.rs` deviates (with F1a).
 4. Each validation rule above has a fixture that fails with `invalid_rules` at the right key.
 
-## F3. Module- and item-level paths in external rules
+### F3. Module- and item-level paths in external rules
 
 **Today:** an external identity is a whole package, and `std`/`core`/`alloc` are reviewed root labels. "Core does no filesystem, process or network I/O" can't be written: banning `std` bans everything, and `tokio::fs` is indistinguishable from `tokio::sync`.
 
@@ -173,13 +215,13 @@ forbid_in = ["**"]
 4. `tokio::net::UnixListener` doesn't match `no-listener`.
 5. A `path` in a layer's `external` assignment fails with `invalid_rules`.
 
-## F4. Non-production layers, enforced across apps
+### F4. Non-production layers, enforced across apps
 
 **Today:** `display = "hidden"` is presentation only. Order is compared only within an app, so a production reference from app A into a hidden layer of app B is `unknown` (`cross_app`) and never fails (ruling 4 of #783, pending #686). Ordinary relative JS/TS imports already resolve natively (`docs/rules.md`, around lines 1109–1168); what's missing is a policy that crosses apps. Other path-based reaches aren't references at all: Cargo `path` dependencies, Rust `#[path = "..."]`, `include_str!`/`include_bytes!`, and any target that isn't a native source module (`tests/data.txt`).
 
 This splits into two parts. F4a is a policy over references Trellis already has. F4b needs new captured evidence and a wire amendment.
 
-### F4a. Destination-layer policy over native references
+#### F4a. Destination-layer policy over native references
 
 **Proposal:** a layer attribute that is policy, not presentation:
 
@@ -202,7 +244,7 @@ paths = ["spike/**"]
 2. `spike/a.ts` importing `spike/b.ts` doesn't produce a `$non_production` instance.
 3. A test file importing `spike/helper` is `testOnly`.
 
-### F4b. Captured path-reference evidence
+#### F4b. Captured path-reference evidence
 
 **Today:** the closed wire contract requires native source and rule targets; a `Destination` is a native `Target` or an `externalPackage`, and native SIDs must not be invented (`docs/rules.md`, around lines 1484–1495). A `Cargo.toml` entry is not a native source site, and `tests/data.txt` has no native module SID, so neither can be reported today.
 
@@ -220,7 +262,7 @@ paths = ["spike/**"]
 
 Until F4b lands, Combine's guard keeps its Cargo, `#[path]` and `include!` checks.
 
-## F5. Opt-in failure on `unknown` at protected boundaries
+### F5. Opt-in failure on `unknown` at protected boundaries
 
 **Today:** `unknown` never fails `trellis rules check`. That keeps checks honest about uncertainty, but a policy can then silently pass. Two cases are common and avoidable:
 - a production file that lands in no layer (`layer_unassigned`);
@@ -241,7 +283,7 @@ These are opt-in, so existing checkouts keep today's semantics. Combine would tu
 3. `--fail-on no_such_reason` exits 2.
 4. With and without `--fail-on`, the JSON verdicts are identical.
 
-## F6. Layer source-language policy
+### F6. Layer source-language policy
 
 **Today:** layers select paths, and external selectors carry a language. A `.js` file in a TypeScript frontend gets JavaScript identities that TypeScript-only selectors never see. Combine has worked around this by duplicating every selector for both languages.
 
@@ -255,14 +297,14 @@ These are opt-in, so existing checkouts keep today's semantics. Combine would tu
 1. `app/web/src/renderers/direct.js` deviates once, however many imports it has, in a layer with `languages = ["typescript"]`.
 2. A `.js` file under `app/web/test/` in the same layer doesn't deviate.
 
-## Compatibility and wire shape
+### Compatibility and wire shape
 
 - New closed keys: `[[external_rules]]` at top level (with `declare_only_in` for F1b), `path` and `npm_scope` in its selectors, and `declarations` on `deny` entries. New layer keys `production` and `languages`, and `layer_policy.unassigned`. Each needs a located `invalid_rules` schema error for bad values, and a rules file without them is unchanged.
 - New reserved rule IDs: `$non_production`, `$external_declaration`, and one per `[[external_rules]]` entry (its `id`). F1a, F2, F3, F4a and F6 fit the existing `rules:v2` instance shape, with exact counts, bounded samples and production/test roles.
 - Wire amendments: F4b's path-reference sites and destinations (which F1b also needs), and F5's per-file unassigned report.
 - All new evidence is read from the admitted snapshot, within the existing work bounds, and fails atomically with `bounded_work` on exhaustion.
 
-## Suggested order
+### Suggested order
 
 F1a first: it is a mapping change inside an existing contract, and it makes Combine's current Rust selectors and bans see member sources. Then F2 and F3 together, since they share the `[[external_rules]]` table. Then F4a and F5, which close the silent-pass holes without a new evidence kind. F4b and F1b need the wire amendment, so they come together after that. F6 last: the selector duplication workaround is cheap.
 
