@@ -1,0 +1,37 @@
+{
+ "overflow": {
+  "resume": "attached",
+  "daemonLogWhileAway": {
+   "att": 3409641473,
+   "bound": false,
+   "cols": 80,
+   "data_bytes_in": 4353272,
+   "epoch": 1,
+   "log_bytes": 4194304,
+   "log_events": 1230,
+   "next_seq": 1262,
+   "outstanding_credit": 0,
+   "overflows": 0,
+   "rows": 24,
+   "terminal": "fl-over",
+   "trimmed_upto": 32
+  },
+  "lines": {
+   "count": 131095,
+   "last": 262143,
+   "jumps": [
+    "68015->199065"
+   ],
+   "jumpCount": 1,
+   "dups": 0,
+   "expected": 262144,
+   "repaints": 1,
+   "done": true
+  },
+  "events": 1538,
+  "seqGaps": 0,
+  "seqDups": 0,
+  "finalScreenVsFreshAttach": [],
+  "pass": true
+ }
+}

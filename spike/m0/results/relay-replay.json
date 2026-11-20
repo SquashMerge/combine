@@ -1,0 +1,31 @@
+{
+ "replay": {
+  "pass": true,
+  "drops": [
+   95,
+   835,
+   835,
+   835,
+   835,
+   835,
+   835,
+   835,
+   835,
+   835
+  ],
+  "lines": {
+   "count": 49152,
+   "last": 49151,
+   "jumps": [],
+   "jumpCount": 0,
+   "dups": 0,
+   "expected": 49152,
+   "repaints": 0,
+   "done": true
+  },
+  "events": 835,
+  "seqGaps": 0,
+  "seqDups": 0,
+  "finalScreenVsFreshAttach": []
+ }
+}

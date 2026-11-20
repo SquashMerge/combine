@@ -1,0 +1,66 @@
+{
+ "backpressure": {
+  "mode": "ack",
+  "rss_kb_before": 3312,
+  "rss_kb_peak": 8640,
+  "max_log_bytes": 4194304,
+  "finalScreenVsFreshAttach": [],
+  "pass": true
+ },
+ "gap": {
+  "mode": "eager, cap 1 MiB",
+  "stats_while_paused": {
+   "att": 3228762113,
+   "bound": true,
+   "cols": 80,
+   "data_bytes_in": 8388869,
+   "epoch": 1,
+   "log_bytes": 1029133,
+   "log_events": 595,
+   "next_seq": 3493,
+   "outstanding_credit": 262144,
+   "overflows": 7,
+   "rows": 24,
+   "terminal": "fl-gap",
+   "trimmed_upto": 2898
+  },
+  "live_gap_events": [
+   {
+    "att": 3228762113,
+    "from_seq": 77,
+    "op": "gap",
+    "reason": "overflow"
+   }
+  ],
+  "resume_reply": {
+   "att": 3228762113,
+   "op": "gap",
+   "reason": "outside_replay_buffer",
+   "req": 1
+  },
+  "fresh_after_gap": {
+   "automatic_input": true,
+   "cols": 80,
+   "input_viewer_resize_notifications": null,
+   "paired": false,
+   "resize_notifications": false,
+   "resumed_viewer": false,
+   "rows": 24,
+   "screen": "exact",
+   "terminal": "t1p"
+  },
+  "pass": true
+ },
+ "hcattach": {
+  "combine_saw_hc_attach_input": true,
+  "hc_attach_saw_output": true,
+  "combine_resizes": [
+   "80x24",
+   "100x30",
+   "80x24"
+  ],
+  "combine_input_after": true,
+  "final_pty": "80x24",
+  "pass": true
+ }
+}

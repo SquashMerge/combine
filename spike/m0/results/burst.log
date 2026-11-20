@@ -1,0 +1,4 @@
+count {"mb":50,"seconds":0.66,"MBps":75.3,"bytes_received":52428813,"lines_last":819199,"lines_expected":819200,"jumps":0,"dups":0,"core_repaints_in_band":0,"daemon_rss_kb":{"before":3360,"peak":4928},"core_rss_kb":{"before":11536,"peak":16800},"no_loss":true}
+xterm {"mb":50,"seconds":0.73,"MBps":8.3,"bytes_received":6302404,"lines_last":819199,"lines_expected":819200,"jumps":11,"dups":0,"core_repaints_in_band":11,"daemon_rss_kb":{"before":3280,"peak":10096},"core_rss_kb":{"before":12912,"peak":22992},"no_loss":false}
+ssh-xterm {"mb":50,"seconds":0.7,"MBps":8.6,"bytes_received":6302404,"lines_last":819199,"lines_expected":819200,"jumps":11,"dups":0,"core_repaints_in_band":11,"daemon_rss_kb":{"before":3328,"peak":9456},"core_rss_kb":{"before":18256,"peak":23024},"no_loss":false}
+finished

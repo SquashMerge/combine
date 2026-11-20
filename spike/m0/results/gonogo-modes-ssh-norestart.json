@@ -1,0 +1,123 @@
+{
+ "fixture": "modes",
+ "cases": {
+  "a_fresh_attach_before_daemon": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.text: reference=\"blue bg to EOL\" attach=\"blue bg to EOL                                                                  \""
+   ],
+   "paint_bytes": 1083,
+   "info": {
+    "automatic_input": true,
+    "cols": 80,
+    "input_viewer_resize_notifications": null,
+    "paired": false,
+    "resize_notifications": false,
+    "resumed_viewer": false,
+    "rows": 24,
+    "screen": "exact",
+    "terminal": "t26"
+   }
+  },
+  "a_terminal_read": {
+   "pass": true,
+   "read": [
+    " M0 FIXTURE (alt screen)",
+    "bold italic under 256c truecolor",
+    "wide: 漢字テスト emoji: 🎉🚀 combining: é flag: 🇵🇹 end",
+    "blue bg to EOL",
+    "row 5 ...................................",
+    "row 6 ....................................",
+    "row 7 .....................................",
+    "row 8 ......................................"
+   ],
+   "reference": [
+    " M0 FIXTURE (alt screen)",
+    "bold italic under 256c truecolor",
+    "wide: 漢字テスト emoji: 🎉🚀 combining: é flag: 🇵🇹 end",
+    "blue bg to EOL",
+    "row 5 ...................................",
+    "row 6 ....................................",
+    "row 7 .....................................",
+    "row 8 ......................................"
+   ]
+  },
+  "b_resume_reply": {
+   "pass": true,
+   "reply": {
+    "att": 3410690049,
+    "op": "gap",
+    "reason": "unknown_attachment",
+    "req": 1
+   }
+  },
+  "b_fresh_attach_after_daemon_restart": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.text: reference=\"blue bg to EOL\" attach=\"blue bg to EOL                                                                  \""
+   ]
+  },
+  "live_p_pen": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.text: reference=\"blue bg to EOL\" attach=\"blue bg to EOL                                                                  \""
+   ]
+  },
+  "live_r_saved_cursor_DECRC_": {
+   "pass": false,
+   "diffs": [
+    "cursor: reference=\"6,14\" attach=\"2,0\"",
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.0.text: reference=\" M0 FIXTURE (alt screen) \" attach=\"RC0 FIXTURE (alt screen) \"",
+    "activeRows.0.cells: reference=\"0: |1|default|default|inverse 1:M|1|default|default|inverse 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\" attach=\"0:R|1|default|default| 1:C|1|default|default| 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\"",
+    "activeRows.3.text: reference=\"blue bg to EOL\" attach=\"blue bg to EOL                                                                  \"",
+    "activeRows.14.text: reference=\"    RC\" attach=\"\"",
+    "activeRows.14.cells: reference=\"4:R|1|default|default| 5:C|1|default|default|\" attach=\"\""
+   ]
+  },
+  "live_s_scroll_region": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.0.text: reference=\" M0 FIXTURE (alt screen) \" attach=\"RC0 FIXTURE (alt screen) \"",
+    "activeRows.0.cells: reference=\"0: |1|default|default|inverse 1:M|1|default|default|inverse 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\" attach=\"0:R|1|default|default| 1:C|1|default|default| 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\"",
+    "activeRows.11.text: reference=\"    RC\" attach=\"\"",
+    "activeRows.11.cells: reference=\"4:R|1|default|default| 5:C|1|default|default|\" attach=\"\""
+   ]
+  },
+  "live_w_autowrap": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.0.text: reference=\" M0 FIXTURE (alt screen) \" attach=\"RC0 FIXTURE (alt screen) \"",
+    "activeRows.0.cells: reference=\"0: |1|default|default|inverse 1:M|1|default|default|inverse 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\" attach=\"0:R|1|default|default| 1:C|1|default|default| 2:0|1|default|default|inverse 3: |1|default|default|inverse 4:F|1|default|default|inverse 5:I|1|default|default|inverse 6:X|1|default|default|inverse 7:T|1|default|default|inverse 8:U|1|default|default|inverse 9:R|1|default|default|inverse 10:E|1|default|default|inverse 11: |1|default|default|inverse 12:(|1|default|default|inverse 13:a|1|default|default|inverse 14:l|1|default|default|inverse 15:t|1|default|default|inverse 16: |1|default|default|inverse 17:s|1|default|default|inverse 18:c|1|default|default|inverse 19:r|1|default|default|inverse 20:e|1|default|default|inverse 21:e|1|default|default|inverse 22:n|1|default|default|inverse 23:)|1|default|default|inverse 24: |1|default|default|inverse\"",
+    "activeRows.11.text: reference=\"    RC\" attach=\"\"",
+    "activeRows.11.cells: reference=\"4:R|1|default|default| 5:C|1|default|default|\" attach=\"\""
+   ]
+  },
+  "live_q_leave_alt_screen_main_screen": {
+   "pass": false,
+   "diffs": [
+    "cursorStyle: reference=\"underline/false\" attach=\"unset/unset\"",
+    "scrollRegion: reference=\"1;24\" attach=\"3;20\"",
+    "savedCursor.alt: reference=\"4,14\" attach=\"0,0\"",
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\""
+   ]
+  }
+ }
+}

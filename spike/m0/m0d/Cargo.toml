@@ -1,0 +1,16 @@
+[package]
+name = "m0d"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "M0 spike: relay daemon between herdr-core attachments and Combine clients. Disposable."
+
+# Own workspace: the spike never joins the root Cargo workspace.
+[workspace]
+
+[dependencies]
+serde_json = "=1.0.153"
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+[profile.release]
+debug = 1

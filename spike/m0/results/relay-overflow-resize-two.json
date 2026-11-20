@@ -1,0 +1,149 @@
+{
+ "overflow": {
+  "resume": "attached",
+  "daemonLogWhileAway": {
+   "att": 3223715841,
+   "bound": false,
+   "cols": 80,
+   "data_bytes_in": 4504824,
+   "epoch": 1,
+   "log_bytes": 4194304,
+   "log_events": 1410,
+   "next_seq": 1450,
+   "outstanding_credit": 0,
+   "overflows": 0,
+   "rows": 24,
+   "terminal": "fl-over",
+   "trimmed_upto": 40
+  },
+  "lines": {
+   "count": 131095,
+   "last": 262143,
+   "jumps": [
+    "70383->201433"
+   ],
+   "jumpCount": 1,
+   "dups": 0,
+   "expected": 262144,
+   "repaints": 1,
+   "done": true
+  },
+  "events": 1708,
+  "seqGaps": 0,
+  "seqDups": 0,
+  "finalScreenVsFreshAttach": [
+   "savedCursor.normal: reference=\"0,0\" attach=\"0,10000\""
+  ],
+  "pass": false
+ },
+ "resize": {
+  "paired_before": {
+   "resume": "attached",
+   "size": "100x30",
+   "resizes": [
+    "80x24@1",
+    "100x30@3"
+   ],
+   "events": 5,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "paired_after": {
+   "resume": "attached",
+   "size": "90x20",
+   "resizes": [
+    "80x24@1",
+    "90x20@3"
+   ],
+   "events": 5,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "active_before": {
+   "resume": "attached",
+   "size": "100x30",
+   "resizes": [
+    "100x30@2"
+   ],
+   "events": 3,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "active_after": {
+   "resume": "attached",
+   "size": "90x20",
+   "resizes": [
+    "90x20@2"
+   ],
+   "events": 3,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  }
+ },
+ "two": {
+  "active": {
+   "replies_seen_by_A": [
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'"
+   ],
+   "A_term": "80x24",
+   "B_term": "120x40",
+   "pty": "120x40",
+   "A_resizes": [],
+   "B_resizes": [],
+   "input_from_A_seen": true,
+   "input_from_B_seen": true
+  },
+  "paired": {
+   "replies_seen_by_A": [
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'\u001b[5;1H\u001b[0m\u001b[?9001lREPLY bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'\u001b[7;1H\u001b[0m\u001b[?9001l<got 61>\u0018\u001b[!p\u001b[?2026l\u001b[?9l\u001b[?1000l\u001b[?1001l\u001b[?1002l\u001b[?1003l\u001b[?1004l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?2004l\u001b[?1l\u001b[?66l\u001b[?2031l\u001b[?2048l\u001b[=0;1u\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[25G\u001bH\u001b[33G\u001bH\u001b[41G\u001bH\u001b[49G\u001bH\u001b[57G\u001bH\u001b[65G\u001bH\u001b[73G\u001bH\u001b[81G\u001bH\u001b[89G\u001bH\u001b[97G\u001bH\u001b[105G\u001bH\u001b[113G\u001bH\u001b[Hqloop ready",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'"
+   ],
+   "A_term": "120x40",
+   "B_term": "120x40",
+   "pty": "120x40",
+   "A_resizes": [
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40"
+   ],
+   "B_resizes": [
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40"
+   ],
+   "input_from_A_seen": true,
+   "input_from_B_seen": true
+  }
+ }
+}

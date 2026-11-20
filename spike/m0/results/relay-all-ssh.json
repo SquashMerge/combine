@@ -1,0 +1,210 @@
+{
+ "replay": {
+  "pass": false,
+  "drops": [
+   73,
+   803,
+   803,
+   803,
+   803,
+   803,
+   803,
+   803,
+   803,
+   803
+  ],
+  "lines": {
+   "count": 49152,
+   "last": 49151,
+   "jumps": [],
+   "jumpCount": 0,
+   "dups": 0,
+   "expected": 49152,
+   "repaints": 0,
+   "done": true
+  },
+  "events": 803,
+  "seqGaps": 0,
+  "seqDups": 0,
+  "finalScreenVsFreshAttach": [
+   "savedCursor.normal: reference=\"0,0\" attach=\"0,-10000\""
+  ]
+ },
+ "resize": {
+  "paired_before": {
+   "resume": "attached",
+   "size": "100x30",
+   "resizes": [
+    "80x24@1",
+    "100x30@3"
+   ],
+   "events": 6,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "paired_after": {
+   "resume": "attached",
+   "size": "90x20",
+   "resizes": [
+    "80x24@1",
+    "90x20@3"
+   ],
+   "events": 4,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "active_before": {
+   "resume": "attached",
+   "size": "100x30",
+   "resizes": [
+    "100x30@2"
+   ],
+   "events": 3,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  },
+  "active_after": {
+   "resume": "attached",
+   "size": "90x20",
+   "resizes": [
+    "90x20@2"
+   ],
+   "events": 3,
+   "seqGaps": 0,
+   "seqDups": 0,
+   "diffs": [],
+   "pass": true
+  }
+ },
+ "two": {
+  "active": {
+   "replies_seen_by_A": [
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'"
+   ],
+   "A_term": "80x24",
+   "B_term": "120x40",
+   "pty": "120x40",
+   "A_resizes": [],
+   "B_resizes": [],
+   "input_from_A_seen": true,
+   "input_from_B_seen": true
+  },
+  "paired": {
+   "replies_seen_by_A": [
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'\u001b[5;1H\u001b[0m\u001b[?9001lREPLY bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'\u001b[7;1H\u001b[0m\u001b[?9001l<got 61>\u0018\u001b[!p\u001b[?2026l\u001b[?9l\u001b[?1000l\u001b[?1001l\u001b[?1002l\u001b[?1003l\u001b[?1004l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?2004l\u001b[?1l\u001b[?66l\u001b[?2031l\u001b[?2048l\u001b[=0;1u\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[25G\u001bH\u001b[33G\u001bH\u001b[41G\u001bH\u001b[49G\u001bH\u001b[57G\u001bH\u001b[65G\u001bH\u001b[73G\u001bH\u001b[81G\u001bH\u001b[89G\u001bH\u001b[97G\u001bH\u001b[105G\u001bH\u001b[113G\u001bH\u001b[Hqloop ready",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'",
+    "bg=b'\\x1b]11;rgb:aaaa/0000/0000\\x1b\\\\' size=b'\\x1b[8;24;80t'",
+    "bg=b'\\x1b]11;rgb:0000/bbbb/0000\\x1b\\\\' size=b'\\x1b[8;40;120t'"
+   ],
+   "A_term": "120x40",
+   "B_term": "120x40",
+   "pty": "120x40",
+   "A_resizes": [
+    "120x40",
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40"
+   ],
+   "B_resizes": [
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40",
+    "80x24",
+    "120x40"
+   ],
+   "input_from_A_seen": true,
+   "input_from_B_seen": true
+  }
+ },
+ "backpressure": {
+  "mode": "ack",
+  "rss_kb_before": 8368,
+  "rss_kb_peak": 12624,
+  "max_log_bytes": 4194304,
+  "finalScreenVsFreshAttach": [],
+  "pass": true
+ },
+ "gap": {
+  "mode": "eager, cap 1 MiB",
+  "stats_while_paused": {
+   "att": 3407020033,
+   "bound": true,
+   "cols": 80,
+   "data_bytes_in": 8388869,
+   "epoch": 1,
+   "log_bytes": 1037325,
+   "log_events": 553,
+   "next_seq": 3244,
+   "outstanding_credit": 262144,
+   "overflows": 7,
+   "rows": 24,
+   "terminal": "fl-gap",
+   "trimmed_upto": 2691
+  },
+  "live_gap_events": [
+   {
+    "att": 3407020033,
+    "from_seq": 312,
+    "op": "gap",
+    "reason": "overflow"
+   }
+  ],
+  "resume_reply": {
+   "att": 3407020033,
+   "op": "gap",
+   "reason": "outside_replay_buffer",
+   "req": 1
+  },
+  "fresh_after_gap": {
+   "automatic_input": true,
+   "cols": 80,
+   "input_viewer_resize_notifications": null,
+   "paired": false,
+   "resize_notifications": false,
+   "resumed_viewer": false,
+   "rows": 24,
+   "screen": "exact",
+   "terminal": "t21"
+  },
+  "pass": true
+ },
+ "hcattach": {
+  "combine_saw_hc_attach_input": true,
+  "hc_attach_saw_output": true,
+  "combine_resizes": [
+   "80x24",
+   "100x30",
+   "80x24"
+  ],
+  "combine_input_after": true,
+  "final_pty": "80x24",
+  "pass": true
+ }
+}

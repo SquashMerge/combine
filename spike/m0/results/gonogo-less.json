@@ -1,0 +1,194 @@
+{
+ "fixture": "less",
+ "cases": {
+  "a_fresh_attach_before_daemon": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.wrapped: reference=true attach=false",
+    "activeRows.10.wrapped: reference=true attach=false",
+    "activeRows.14.wrapped: reference=true attach=false",
+    "activeRows.18.wrapped: reference=true attach=false",
+    "activeRows.22.wrapped: reference=true attach=false"
+   ],
+   "paint_bytes": 1559,
+   "info": {
+    "automatic_input": true,
+    "cols": 80,
+    "input_viewer_resize_notifications": null,
+    "paired": false,
+    "resize_notifications": false,
+    "resumed_viewer": false,
+    "rows": 24,
+    "screen": "exact",
+    "terminal": "t19"
+   }
+  },
+  "a_terminal_read": {
+   "pass": false,
+   "read": [
+    "line 15 fn main() { let x = \"str\"; // comment }",
+    "line 16 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 17 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 18 lorem ipsum dolor sit amet",
+    "line 19 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 20 fn main() { let x = \"str\"; // comment }",
+    "line 21 wide 漢字 and emoji 🎉 here",
+    "line 22 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 23 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 24 lorem ipsum dolor sit amet",
+    "line 25 fn main() { let x = \"str\"; // comment }",
+    "line 26 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 27 lorem ipsum dolor sit amet",
+    "line 28 wide 漢字 and emoji 🎉 here",
+    "line 29 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 30 fn main() { let x = \"str\"; // comment }",
+    "line 31 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 32 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "/Users/jcarreira/projects/squashmerge/combine/spike/m0/fixtures/sample.txt"
+   ],
+   "reference": [
+    "line 15 fn main() { let x = \"str\"; // comment }",
+    "line 16 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 17 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 18 lorem ipsum dolor sit amet",
+    "line 19 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 20 fn main() { let x = \"str\"; // comment }",
+    "line 21 wide 漢字 and emoji 🎉 here",
+    "line 22 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 23 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 24 lorem ipsum dolor sit amet",
+    "line 25 fn main() { let x = \"str\"; // comment }",
+    "line 26 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 27 lorem ipsum dolor sit amet",
+    "line 28 wide 漢字 and emoji 🎉 here",
+    "line 29 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 30 fn main() { let x = \"str\"; // comment }",
+    "line 31 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 32 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "/Users/jcarreira/projects/squashmerge/combine/spike/m0/fixtures/sample.txt"
+   ]
+  },
+  "b_resume_reply": {
+   "pass": true,
+   "reply": {
+    "att": 3212443649,
+    "op": "gap",
+    "reason": "unknown_attachment",
+    "req": 1
+   }
+  },
+  "b_fresh_attach_after_daemon_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.wrapped: reference=true attach=false",
+    "activeRows.10.wrapped: reference=true attach=false",
+    "activeRows.14.wrapped: reference=true attach=false",
+    "activeRows.18.wrapped: reference=true attach=false",
+    "activeRows.22.wrapped: reference=true attach=false"
+   ]
+  },
+  "c_daemon_reattach_after_server_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.wrapped: reference=true attach=false",
+    "activeRows.10.wrapped: reference=true attach=false",
+    "activeRows.14.wrapped: reference=true attach=false",
+    "activeRows.18.wrapped: reference=true attach=false",
+    "activeRows.22.wrapped: reference=true attach=false"
+   ],
+   "epoch_event": {
+    "att": 3212509185,
+    "automatic_input": true,
+    "cols": 80,
+    "epoch": 2,
+    "input_viewer_resize_notifications": null,
+    "kind": "attached",
+    "op": "ev",
+    "paired": false,
+    "resize_notifications": false,
+    "resumed_viewer": true,
+    "rows": 24,
+    "screen": "exact",
+    "seq": 3,
+    "terminal": "t19"
+   },
+   "screen": "exact"
+  },
+  "c_fresh_attach_after_server_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.3.wrapped: reference=true attach=false",
+    "activeRows.10.wrapped: reference=true attach=false",
+    "activeRows.14.wrapped: reference=true attach=false",
+    "activeRows.18.wrapped: reference=true attach=false",
+    "activeRows.22.wrapped: reference=true attach=false"
+   ],
+   "screen": "exact"
+  },
+  "c_terminal_read": {
+   "pass": false,
+   "read": [
+    "line 15 fn main() { let x = \"str\"; // comment }",
+    "line 16 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 17 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 18 lorem ipsum dolor sit amet",
+    "line 19 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 20 fn main() { let x = \"str\"; // comment }",
+    "line 21 wide 漢字 and emoji 🎉 here",
+    "line 22 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 23 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 24 lorem ipsum dolor sit amet",
+    "line 25 fn main() { let x = \"str\"; // comment }",
+    "line 26 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 27 lorem ipsum dolor sit amet",
+    "line 28 wide 漢字 and emoji 🎉 here",
+    "line 29 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 30 fn main() { let x = \"str\"; // comment }",
+    "line 31 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 32 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "/Users/jcarreira/projects/squashmerge/combine/spike/m0/fixtures/sample.txt"
+   ],
+   "reference": [
+    "line 15 fn main() { let x = \"str\"; // comment }",
+    "line 16 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 17 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 18 lorem ipsum dolor sit amet",
+    "line 19 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 20 fn main() { let x = \"str\"; // comment }",
+    "line 21 wide 漢字 and emoji 🎉 here",
+    "line 22 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 23 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 24 lorem ipsum dolor sit amet",
+    "line 25 fn main() { let x = \"str\"; // comment }",
+    "line 26 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 27 lorem ipsum dolor sit amet",
+    "line 28 wide 漢字 and emoji 🎉 here",
+    "line 29 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "line 30 fn main() { let x = \"str\"; // comment }",
+    "line 31 lorem ipsum dolor sit amet lorem ipsum dolor sit amet",
+    "line 32 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor",
+    "sit amet",
+    "/Users/jcarreira/projects/squashmerge/combine/spike/m0/fixtures/sample.txt"
+   ]
+  },
+  "live_less_quit_restores_main_screen": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\""
+   ]
+  }
+ }
+}

@@ -1,0 +1,24 @@
+[!p[?2026l[?9l[?1000l[?1001l[?1002l[?1003l[?1004l[?1005l[?1006l[?1015l[?1016l[?2004l[?1l[?66l[?2031l[?2048l[=0;1u[?1049l[?1047l[?47l[H[2J[?1h[?66h[?1000h[?1002h[?1004h[?1006h[?2004h[3g[9GH[17GH[25GH[33GH[41GH[49GH[57GH[65GH[73GH[H[>4;2m[1;1H[0m[?1049h[!p[?1h[?66h[?1000h[?1002h[?1004h[?1006h[?2004h[3g[9GH[17GH[25GH[33GH[41GH[49GH[57GH[65GH[73GH[H[0m[38;5;130m  1 [0mline 01 lorem ipsum dolor sit amet lorem ipsum dolor sit amet
+[0m[38;5;130m  2 [0mline 02 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum do
+[0m[38;5;130m    [0mlor sit amet 
+[0m[38;5;130m  3 [0mline 03 lorem ipsum dolor sit amet
+[0m[38;5;130m  4 [0mline 04 lorem ipsum dolor sit amet lorem ipsum dolor sit amet
+[0m[38;5;130m  5 [0mline 05 fn main() { let x = "str"; // comment }
+[0m[38;5;130m  6 [0mline 06 lorem ipsum dolor sit amet
+[0m[38;5;130m  7 [0mline 07 wide 漢字 and emoji 🎉 here
+[0m[38;5;130m  8 [0mline 08 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum do
+[0m[38;5;130m    [0mlor sit amet
+[0m[38;5;130m  9 [0mline 09 lorem ipsum dolor sit amet
+[0m[38;5;130m 10 [0mline 10 fn main() { let x = "str"; // comment }
+[0m[38;5;130m 11 [0mline 11 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum do
+[0m[38;5;130m    [0mlor sit amet
+[0m[38;5;130m 12 [0mline 12 lorem ipsum dolor sit amet
+[0m[38;5;130m 13 [0mline 13 lorem ipsum dolor sit amet lorem ipsum dolor sit amet
+[0m[38;5;130m 14 [0mline 14 wide 漢字 and emoji 🎉 here
+[0m[38;5;130m 15 [0mline 15 fn main() { let x = "str"; // comment }
+[0m[38;5;130m 16 [0mline 16 lorem ipsum dolor sit amet lorem ipsum dolor sit amet
+[0m[38;5;130m 17 [0mline 17 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum do
+[0m[38;5;130m    [0mlor sit amet
+[0m[38;5;130m 18 [0mline 18 lorem ipsum dolor sit amet
+[0m[38;5;130m 19 [0mline 19 lorem ipsum dolor sit amet lorem ipsum dolor sit amet
+<ojects/squashmerge/combine/spike/m0/fixtures/sample.txt" 60L, 3431B[>4;2m[15;11H[0m[?9001l

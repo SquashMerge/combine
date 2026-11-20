@@ -1,0 +1,154 @@
+{
+ "fixture": "modes2",
+ "cases": {
+  "a_fresh_attach_before_daemon": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ],
+   "paint_bytes": 621,
+   "info": {
+    "automatic_input": true,
+    "cols": 80,
+    "input_viewer_resize_notifications": null,
+    "paired": false,
+    "resize_notifications": false,
+    "resumed_viewer": false,
+    "rows": 24,
+    "screen": "exact",
+    "terminal": "t16"
+   }
+  },
+  "a_terminal_read": {
+   "pass": true,
+   "read": [
+    "line 1: some text here",
+    "line 2: some text here",
+    "line 3: some text here",
+    "line 4: some text here",
+    "line 5: some text here",
+    "line 6: some text here",
+    "line 7: some text here",
+    "line 8: some text here",
+    "palette-1 red?",
+    "link-open ┌───┐ ascii"
+   ],
+   "reference": [
+    "line 1: some text here",
+    "line 2: some text here",
+    "line 3: some text here",
+    "line 4: some text here",
+    "line 5: some text here",
+    "line 6: some text here",
+    "line 7: some text here",
+    "line 8: some text here",
+    "palette-1 red?",
+    "link-open ┌───┐ ascii"
+   ]
+  },
+  "b_resume_reply": {
+   "pass": true,
+   "reply": {
+    "att": 3207200769,
+    "op": "gap",
+    "reason": "unknown_attachment",
+    "req": 1
+   }
+  },
+  "b_fresh_attach_after_daemon_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ]
+  },
+  "c_daemon_reattach_after_server_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ],
+   "epoch_event": {
+    "att": 3207266305,
+    "automatic_input": true,
+    "cols": 80,
+    "epoch": 2,
+    "input_viewer_resize_notifications": null,
+    "kind": "attached",
+    "op": "ev",
+    "paired": false,
+    "resize_notifications": false,
+    "resumed_viewer": true,
+    "rows": 24,
+    "screen": "exact",
+    "seq": 3,
+    "terminal": "t16"
+   },
+   "screen": "exact"
+  },
+  "c_fresh_attach_after_server_restart": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ],
+   "screen": "exact"
+  },
+  "c_terminal_read": {
+   "pass": true,
+   "read": [
+    "line 1: some text here",
+    "line 2: some text here",
+    "line 3: some text here",
+    "line 4: some text here",
+    "line 5: some text here",
+    "line 6: some text here",
+    "line 7: some text here",
+    "line 8: some text here",
+    "palette-1 red?",
+    "link-open ┌───┐ ascii"
+   ],
+   "reference": [
+    "line 1: some text here",
+    "line 2: some text here",
+    "line 3: some text here",
+    "line 4: some text here",
+    "line 5: some text here",
+    "line 6: some text here",
+    "line 7: some text here",
+    "line 8: some text here",
+    "palette-1 red?",
+    "link-open ┌───┐ ascii"
+   ]
+  },
+  "live_g_charset": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ]
+  },
+  "live_i_insert_mode": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ]
+  },
+  "live_o_origin_mode": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ]
+  },
+  "live_w_autowrap_off": {
+   "pass": false,
+   "diffs": [
+    "tabStops: reference=\"0,8,16,24,32,40,48,56,64,72\" attach=\"8,16,24,32,40,48,56,64,72\"",
+    "activeRows.9.cells: reference=\"0:l|1|default|default|underline 1:i|1|default|default|underline 2:n|1|default|default|underline 3:k|1|default|default|underline 4:-|1|default|default|underline 5:o|1|default|default|underline 6:p|1|default|default|underline 7:e|1|default|default|underline 8:n|1|default|default|underline 9: |1|default|default|underline 10:┌|1|default|default|underline 11:─|1|default|default|underline 12:─|1|default|default|underline 13:─|1|default|default|underline 14:┐|1|default|default|underline 15: |1|default|default|underline 16:a|1|default|default|underline 17:s|1|default|default|underline 18:c|1|default|default|underline 19:i|1|default|default|underline 20:i|1|default|default|underline 21: |1|default|default|underline\" attach=\"0:l|1|default|default| 1:i|1|default|default| 2:n|1|default|default| 3:k|1|default|default| 4:-|1|default|default| 5:o|1|default|default| 6:p|1|default|default| 7:e|1|default|default| 8:n|1|default|default| 10:┌|1|default|default| 11:─|1|default|default| 12:─|1|default|default| 13:─|1|default|default| 14:┐|1|default|default| 16:a|1|default|default| 17:s|1|default|default| 18:c|1|default|default| 19:i|1|default|default| 20:i|1|default|default|\""
+   ]
+  }
+ }
+}
