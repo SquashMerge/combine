@@ -1,4 +1,4 @@
-# Combine — Spec (rev 6)
+# Combine — Spec (rev 7)
 
 Updated 2026-11-20
 
@@ -15,6 +15,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 4:** named Combine; exact terminal attach is an M0 go/no-go gate; request generations per (space, panel, client); background refresh rules for client-dependent panels; separate loader and source pools; approval of a full execution manifest; SSH and wire-protocol contracts; per-client active tabs; one file store per shared project; corrected the work-data statement.
 
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
+
+**Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
 
 ## Goals and non-goals
 
@@ -94,6 +96,7 @@ A space is one project folder on one host: the herdr-core terminals started in i
 
 - A terminal joins the space of the git root containing its starting `cwd` (or that folder itself outside git), and stays there: a program that later changes directory doesn't move it. The navigator can reassign a terminal explicitly; the assignment is daemon runtime state.
 - A git worktree has its own root, so it is its own space.
+- Only the host's own terminals count. herdr-core also lists terminals on machines it has linked (`work/t7`); those never join a space here (see Terminal backends).
 - The daemon keeps one in-memory file store per project path, with a single revision counter, so every reader of a `.workspace/` sees one copy.
 
 Three models, never one serialized and then stripped: a portable spec, daemon runtime state, and per-client state.
@@ -185,7 +188,7 @@ A rail of spaces grouped by host swaps the whole screen; a terminal navigator sw
 **Space rail (left edge)**
 
 - One section per host (`mini`, `work-mbp`), listing that host's spaces by folder name. Pinned spaces first, then by recent activity.
-- Spaces with no live terminals stay listed, dimmed, if pinned or recent. Opening one calls `ensure_session`.
+- Spaces with no live terminals stay listed, dimmed, if pinned or recent. Opening one starts a shell there.
 - Each entry shows a badge for terminals needing attention: agent waiting for input, command finished, process exited.
 - A terminal started in a new folder on any connected host makes its space appear automatically. "Open folder" starts a shell there through herdr-core, with a single terminal panel.
 
@@ -221,62 +224,73 @@ The daemon talks to herdr-core or Rex through one `TerminalBackend` trait over t
 #[async_trait]
 pub trait TerminalBackend: Send + Sync {
     fn id(&self) -> &'static str;                                       // "herdr-core" | "rex"
-    fn capabilities(&self) -> Capabilities;                             // agent_state, positioned_snapshot, ...
-    async fn list_spaces(&self) -> Result<Vec<SpaceInfo>>;              // backend's own ID, name, cwd
-    async fn watch_spaces(&self) -> Result<BoxStream<'static, SpaceEvent>>;
-    async fn ensure_session(&self, project: &Path) -> Result<SessionRef>;
-    async fn spawn(&self, s: &SessionRef, spec: SpawnSpec) -> Result<TermId>;
-    async fn list(&self, s: Option<&SessionRef>) -> Result<Vec<TermInfo>>;
-    async fn attach(&self, id: &TermId) -> Result<Attachment>;          // snapshot + ordered stream, atomically
-    async fn resume(&self, id: &TermId, epoch: Epoch, after: Seq) -> Result<Resume>; // Stream(..) or Gap
-    async fn write(&self, id: &TermId, bytes: &[u8]) -> Result<()>;     // raw input from xterm.js
-    async fn resize(&self, id: &TermId, cols: u16, rows: u16) -> Result<()>;
-    async fn watch_states(&self) -> Result<BoxStream<'static, StateEvent>>; // all terminals, for badges
+    fn capabilities(&self) -> Capabilities;                             // agent_state, ordered_attach, ...
+    async fn list(&self) -> Result<Vec<TermInfo>>;                      // this host's terminals only: cwd, argv, state
+    async fn watch(&self) -> Result<BoxStream<'static, TermEvent>>;     // created, changed, exited, lost, restarted
+    async fn spawn(&self, spec: SpawnSpec) -> Result<TermId>;           // cmd, cwd, env, labels, initial size
+    async fn attach(&self, id: &TermId, opts: AttachOptions) -> Result<Box<dyn Attachment>>;
     async fn kill(&self, id: &TermId) -> Result<()>;
 }
 
-pub struct Attachment { epoch: Epoch, snapshot: Snapshot, at: Seq,
-                        stream: BoxStream<'static, (Seq, TermEvent)> }
-pub struct Snapshot   { ansi: Bytes, cols: u16, rows: u16, cursor: (u16, u16),
-                        alt_screen: bool, modes: TermModes, scrollback: Bytes,
-                        fidelity: Exact | BestEffort }
+pub struct AttachOptions { cols: u16, rows: u16,
+                           display: Display,      // the viewer's colors and cell size
+                           observe: bool,         // watch only: never types or resizes
+                           resumed: bool,         // back after a dropped line
+                           history: u32 }         // scrollback lines to paint first
+
+/// One viewer of one terminal. Two panels on one terminal are two attachments.
+#[async_trait]
+pub trait Attachment: Send {
+    fn fidelity(&self) -> Fidelity;                         // Exact | Inexact, as the backend reports it
+    fn resize_notifications(&self) -> bool;                 // what the backend negotiated, not what was asked
+    fn events(&mut self) -> BoxStream<'static, AttachEvent>; // Data(bytes) | Resized | Facts | Closed | Lost
+    async fn write(&mut self, bytes: &[u8]) -> Result<()>;   // raw input from xterm.js
+    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
+    async fn focus(&mut self) -> Result<()>;
+    async fn credit(&mut self, amount: u32) -> Result<()>;   // units fixed by M0
+    async fn detach(self: Box<Self>) -> Result<()>;
+}
 ```
+
+- Every operation on a viewer goes through its attachment. Terminal identity (`TermId`) and attachment identity are separate, so two panels on one terminal can differ in size, display and focus.
+- `Data` is opaque: the first paint and live bytes, in order. The daemon never parses or emulates it.
+- Spaces aren't a backend concept: the daemon derives them from `TermInfo.cwd` (see Core concepts).
 
 **What herdr-core provides** (checked against `hc schema`, herdr-core 0.1.21, protocol generation 1)
 
 | Need | herdr-core primitive |
 | --- | --- |
 | Transport | JSON-RPC 2.0 on the local hc socket; `hello` with `framed: true` switches the connection to framed mode |
-| Terminals and spaces | `terminal.list` / `terminal.get` (address, `cwd`, `argv`, size, labels, foreground); `events.subscribe` returns a snapshot, then every change in order |
-| Attach | `terminal.attach` opens a channel: first paint, then live bytes, in order. Input goes back as DATA; RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it |
-| Size | The viewer's `cols`/`rows` at attach; `observe` viewers never type or resize; `resumed` viewers set size only once active again; RESIZE arrives before replacement paints when `resize_notifications` is on |
-| Terminal queries | Answered by herdr-core from each viewer's `display` (colors, cell size) |
-| Flow control | CREDIT frames |
-| Agent state | Programs' 7501 status reports (`reported`, `records`); `terminal.wait` |
-| Loss and restart | Loss ends the stream; reattach after the `restarted` event. `server.restart` saves screens and the next core adopts running programs |
+| Terminals | `terminal.list` / `terminal.get` (address, `cwd`, `argv`, size, labels, foreground). `events.subscribe` returns a snapshot with a `seq`, then every fact change in order; after `missed`, take a fresh snapshot. Both include every connected machine's terminals (`machine/t7`), which the adapter drops |
+| Attach | `terminal.attach` opens a channel: first paint, then live bytes, in order. Input goes back as DATA; RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it. No output sequence, paint-complete marker or structured screen fields are exposed |
+| Size | The viewer's `cols`/`rows` at attach; `observe` viewers never type or resize; `resumed` viewers set size only once active again. RESIZE arrives before replacement paints only if the returned `AttachResult.resize_notifications` is true; asking for it isn't enough |
+| Screen fidelity | `Terminal.screen` is `exact`, or `inexact` after a core crash when older history may be missing |
+| Terminal queries | herdr-core answers display queries from each viewer's `display` (colors, cell size); XTVERSION from `Terminal.identity`. Whether every other query is consumed is an M0 test |
+| Flow control | CREDIT frames; units and initial allowance are in the framed protocol, not the schema |
+| Agent state | OSC 7501 status reports: `Terminal.status`, `status_ms`, `turn` (`reported` only says whether one was ever sent; `records` holds secondary ids); `terminal.wait` |
+| Loss and restart | Loss ends the stream. `restarted` applies to kept terminals that were recovered; reattach after it. `server.restart` saves screens and the next core adopts running programs |
 | Caller identity | `HC_TERMINAL_ID` in each terminal's environment; `caller` param on calls |
 | Remote | `hc connect` speaks the API over stdio (`ssh box hc connect`); a core can add other machines (`machine.add`, addresses like `mini/t7`) |
 
-The daemon talks only to its own host's herdr-core. A Rex adapter (after v1) would map its own primitives behind `capabilities()`.
+The daemon talks only to its own host's herdr-core, and uses only that host's terminals. herdr-core's lists, snapshots and events also carry every connected machine's terminals, so the adapter drops machine-qualified addresses (`work/t7`) from all of them and rejects one in any call. Otherwise a mini that had `machine.add`ed the work MBP would show work terminals under a mini space, run their loaders on the wrong host, and duplicate them when the work daemon is connected too. A Rex adapter (after v1) would map its own primitives behind `capabilities()`.
 
 **Attach, sequence and epoch**
 
-- Every output chunk carries a per-terminal sequence number within an epoch. The epoch changes whenever numbering restarts (daemon restart, backend restart, re-bootstrap), so a reset is never mistaken for a continuation.
-- A snapshot is taken at sequence N, and its stream starts at N+1.
-- A client that sees a jump in sequence numbers, or reconnects, calls `resume` with its epoch and last number. The daemon replays from a bounded per-terminal buffer (about 4 MB), or answers `Gap` and the client attaches again.
-- Two guarantees, kept separate. **State fidelity:** after an `Exact` attach, the screen, cursor and modes match the terminal; a `BestEffort` attach promises nothing, and the panel header says so. **Output history:** every byte is delivered in order only while the client stays within the replay buffer; after a `Gap`, bytes in the gap are lost from the client's view and only state is restored.
-- Backpressure: each client has a bounded send queue, and the daemon grants herdr-core CREDIT only as the client drains it. A client that falls past it anyway gets the queue dropped and a fresh attach (a `Gap`), never unbounded buffering.
+Each client panel gets its own backend attachment, and the daemon relays that attachment's stream as opaque bytes. There is no shared per-terminal stream: each viewer gets its own first paint and replacement paints, so one viewer's bytes are never replay history for another.
 
-**Where snapshots come from (M0 go/no-go)**
+- Every chunk the daemon relays carries a cursor `(attachment ID, epoch, seq)`. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
+- If the client's connection drops, it reconnects and resumes from its last cursor. The daemon keeps the attachment open for a grace period (about 30 s) and replays from a bounded per-attachment buffer (about 4 MB), or answers `Gap`. On `Gap` the client clears its xterm.js and attaches again, getting a fresh first paint.
+- Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer; after a `Gap`, only state is restored.
+- Backpressure: each attachment has a bounded send queue, and the daemon grants herdr-core CREDIT only as the client drains it. A client that falls past its queue anyway gets a `Gap` and a fresh attach, never unbounded buffering.
 
-**herdr-core finding:** `terminal.attach` sends a first paint and then live bytes on one ordered channel, and herdr-core keeps the screen itself. That is the primitive this section asks for, so the daemon needs no emulator of its own for herdr-core. M0 confirms it holds for terminals started before the daemon, across a daemon restart, and across a herdr-core `server.restart`.
+**Where the first paint comes from (M0 go/no-go)**
 
-An `Exact` attach needs a backend primitive that ties a screen state to a stream position. Local arrival timing can't do it: the stream and a screen read are buffered and scheduled independently.
+herdr-core keeps each terminal's screen and sends it as the first paint of every attach, ordered before live bytes on the same channel. So the daemon needs no emulator, and attaching can't race the stream. The schema doesn't define the frame encodings, whether the end of the first paint is visible, or credit units; M0 pins those down from herdr-core's framed protocol.
 
-- **Acceptable primitives:** a snapshot carrying the stream position it reflects (`capabilities().positioned_snapshot`); replay from the terminal's start, or from a checkpoint, sufficient to rebuild state; or another synchronization mechanism herdr supports.
-- **Daemon emulator:** once the daemon has an exact starting state, it can keep its own emulator (e.g. the `alacritty_terminal` crate) from one upstream subscription and number chunks itself. It still needs one of the primitives above to get that starting state for terminals that existed before it, and after it restarts.
-- **Experimental fallback only:** subscribe, read the screen, then nudge a repaint with a one-row resize. Programs need not repaint fully, hidden buffers and modes aren't rebuilt, there's no "repaint done" signal, and the resize is visible to the program. This yields `BestEffort` attaches and never satisfies M0.
-- **If herdr lacks a primitive:** M0 ends with a decision, not a workaround: add positioned snapshots to herdr, or explicitly accept `BestEffort` attaches for terminals that predate the daemon.
+- **M0 passes** when a fresh attach restores the screen, cursor, alternate screen and input modes (mouse, bracketed paste, application keys) for a terminal started before the daemon, after a daemon restart, and after a herdr-core `server.restart`.
+- **Not an M0 failure:** a terminal herdr-core reports as `inexact` after a core crash attaches with fidelity `Inexact`. Crash recovery is tested separately from planned restarts.
+- **If the first paint doesn't restore modes,** M0 ends with a decision: add that to herdr-core, or accept the gap and record which modes are lost.
+- **A backend without an ordered attach** (a future one) can only use the subscribe, read, nudge-a-repaint fallback. That is experimental and always `Inexact`.
 
 **Input ownership protocol**
 
@@ -296,7 +310,8 @@ herdr-core already arbitrates between viewers (attach size, `observe`, FOCUS, `r
 - `TermId` is opaque outside the adapter and prefixed with the backend name.
 - Adapters hide reconnects and emit `Lost` only after giving up.
 - Missing features are reported through `capabilities()`, and the UI hides what isn't supported.
-- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; two clients attached at once; attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
+- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; two attachments on one terminal with different sizes and display facts, where each operation affects only its own attachment; attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
+- The fake backend also injects what real runs rarely show: an `Inexact` terminal, and a local `t7` beside a remote `work/t7` with the same `cwd`, which must not appear.
 
 ## Panels, loaders and groups
 
@@ -367,7 +382,7 @@ Lifetime is separate from content: a pinned diagram is persistent static content
 **Terminal panel behavior**
 
 - The header shows terminal name, state, host and backend, and marks whether this panel holds input ownership; a dropdown switches terminals without leaving the panel.
-- Output streams only while visible. On show, the panel calls `attach`, draws the snapshot, then plays the stream from the snapshot's sequence number.
+- Output streams only while visible. On show, the panel attaches and writes the stream into a cleared xterm.js: the first paint, then live bytes.
 - Keyboard input goes straight to the terminal when focused; app shortcuts use Cmd so they don't clash with the shell.
 - Resizing the tile resizes the PTY only when this attachment holds ownership; otherwise the panel letterboxes at the owner's size.
 
@@ -499,7 +514,7 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
 
-**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, possibly `alacritty_terminal` for snapshots, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React or Svelte, xterm.js (WebGL addon), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React or Svelte, xterm.js (WebGL addon), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
 
 ## Security model
 
@@ -588,23 +603,37 @@ spike/                              M0 code: disposable, outside the workspace
 tools/                              developer scripts
 ```
 
-| Architectural rule | How `rules.toml` checks it |
-| --- | --- |
-| Core never knows herdr-core, the JS engine, CLIs or the filesystem | Adapters sit above core (order 2 vs 3) and implement its ports. Adapter to core is downward and conforms; core to an adapter is upward and deviates |
-| Adapters don't call each other | Each adapter is its own layer at the same order, and peers are forbidden |
-| Ports and model never reach into core or adapters | They are a shared layer; shared to ordered deviates |
-| The JS engine is used only by the loader adapter | `rquickjs` and `deno_core` are assigned to that layer |
-| Renderers never reach Tauri; they get data from the panel host | Renderers and `ipc/` are peers; `@tauri-apps/api` is assigned to `ipc/` |
-| No network listener, no PTY ownership, no shell or fs plugin in the webview | `[external_policy] deny` for HTTP/WebSocket server crates, `portable-pty`, and the Tauri shell and fs plugins |
-| Production code never depends on the fake backend, tests or the spike | They are hidden layers above production; production referencing them is upward |
+Each rule says what checks it today. `rules.toml` checks layer direction between mapped first-party files, and package use where trellis can prove the package. It can't check everything this table needs (verified with fixtures in review 2026-11-20):
 
-The app names in `rules.toml` (`combined`, `combine`, `combine-app`, `combine-web`) are the package names the manifests must use. Until those manifests exist, trellis has no apps to check against.
+- trellis maps Rust packages only from the root manifest, and Combine's root is a virtual workspace, so Rust package selectors and bans in member crates come back `unknown`;
+- standard-library modules (`std::fs`, `std::net`, `tokio::process`) aren't packages, so layers can't ban them;
+- assigning a package to a layer lets every higher layer use it too;
+- references between apps are `unknown` (`cross_app`), and `display = "hidden"` is presentation only;
+- `unknown` and unassigned references don't fail a check.
+
+| Architectural rule | Checked by |
+| --- | --- |
+| Core never references an adapter | `rules.toml`: adapters sit above core (order 2 vs 3); core to adapter is upward and deviates |
+| Adapters don't call each other | `rules.toml`: each adapter is its own layer at the same order; peers are forbidden |
+| Ports and model never reach into core or adapters | `rules.toml`: shared layer; shared to ordered deviates |
+| Renderers never import `ipc/` or a Tauri package | `rules.toml`: renderers and `ipc/` are peers, and the Tauri packages (TypeScript and JavaScript) are assigned to `ipc/` |
+| Core, ports and model do no I/O (`std::fs`, `std::process`, `std::net`, their tokio versions) | Architecture guard: not yet built |
+| Only the loader adapter uses a JS engine; only `ipc/` imports Tauri packages | Architecture guard: not yet built (`rules.toml` alone allows higher layers too) |
+| No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. Rust crate bans and listener or PTY calls need the architecture guard: not yet built |
+| No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the architecture guard: not yet built |
+| Frontend sources are TypeScript | Architecture guard: not yet built |
+
+The **architecture guard** is a supplemental check for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, and cross-app path imports. Until it exists, those rows are reviewed by hand. Whether it is a script in this repo or new trellis features is an open question.
+
+Run `trellis rules check` and review new `unknown` and unassigned references on these boundaries, not only new deviations.
+
+The app names in `rules.toml` (`combined`, `combine`, `combine-app`, `combine-web`) are the package names the manifests must use; `combine-protocol` is a library, mapped as a shared layer.
 
 ## Milestones
 
 An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each milestone after M0 is usable on its own. M0 is disposable code; only its findings carry forward. v1 is M1 to M4 plus the herdr parts of M6; the Rex adapter (M5) comes after v1.
 
-0. **M0: Terminal fidelity spike.** One daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: exact attach for terminals that predate the daemon must rest on a backend primitive (see Where snapshots come from). Without one, M0 ends with a decision to add it to herdr or to accept `BestEffort` attaches; a fallback that usually looks right doesn't pass. Also decides who answers terminal queries.
+0. **M0: Terminal fidelity spike.** One daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: a fresh attach must restore screen, cursor, alternate screen and input modes from herdr-core's first paint (see Where the first paint comes from); a result that usually looks right doesn't pass. M0 also pins down herdr-core's frame encodings, credit units and whether the end of the first paint is visible, and confirms that no terminal query reaches xterm.js unanswered.
 1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter over `terminal.attach` and `events.subscribe`, a clean `trellis rules check`, framed protocol with per-frame batching, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts.
 2. **M2: Agent-built diagrams.** MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation. Done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.
 3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` and Jira data shows live and survives a daemon restart.
@@ -618,6 +647,7 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 - [x] Does herdr-core answer terminal queries itself? Yes, from each viewer's `display`. M0 confirms nothing reaches xterm.js unanswered.
 - [ ] herdr-core arbitrates size between viewers (attach size, FOCUS, `observe`, `resumed`). Does that behave with two Combine clients and an `hc attach` open? M0 answers this.
+- [ ] The architecture guard: a small checker in this repo (`tools/arch-guard`), or new trellis features (member-crate dependency mapping, source-scoped package rules, cross-app path bans)? See Repository layout and architecture rules.
 - [ ] Should remote terminals use herdr-core's own machine links (`machine.add`, `mini/t7`) instead of Combine's SSH bridge? A daemon is still needed on each host for loaders and panel files, so v1 keeps one bridge for everything.
 - [x] Work MBP access. Decided: the work MBP is usually its own client. A personal MBP can reach it over SSH but rarely does. Commands and credential storage stay on the work MBP. A remote client receives terminal output and panel results, which may contain source code, file contents, secrets or other work data, so remote access to the work MBP must comply with work policy. Keeping computation remote is not a data-loss boundary.
 

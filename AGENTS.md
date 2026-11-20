@@ -5,8 +5,12 @@ Combine is one desktop window over the herdr-core agent terminals on each of you
 ## Before writing code
 
 - **Terminal backend:** herdr-core, the `hc` CLI. Read its API with `hc schema`. Ignore the older `herdr` TUI app and its `herdr api schema`.
-- **Architecture rules:** `.trellis/rules.toml` records the layering in SPEC.md, "Repository layout and architecture rules". Put new files where that layout says, and run `trellis rules check` before you finish. Fix any new deviation, or raise it with the owner. Never add an `[[exceptions]]` entry or move a path between layers just to make a check pass.
-- **Package names** in the manifests (`combined`, `combine`, `combine-protocol`, `combine-app`, `combine-web`) are the app names the rules use. Don't rename them without updating `rules.toml`.
+- **Architecture rules:** `.trellis/rules.toml` records the layering in SPEC.md, "Repository layout and architecture rules". Put new files where that layout says, and run `trellis rules check` before you finish.
+  - Fix any new deviation, or raise it with the owner. Never add an `[[exceptions]]` entry or move a path between layers just to make a check pass.
+  - A clean check is not the whole answer: trellis exits 0 on `unknown` and unassigned references. Review new ones on the boundaries in SPEC.md's architecture table, and every production file that lands in no layer.
+  - The table's "architecture guard" rows aren't checked by anything yet. Check them by hand in your change.
+- **Package names:** `combined`, `combine`, `combine-app` and `combine-web` are the app names `rules.toml` uses; `combine-protocol` is a library, mapped as a shared layer. Don't rename any of them without updating `rules.toml`.
+- **Test support:** `test_features = ["test-support"]` marks reference sites as test only where the `cfg(feature = "test-support")` gate is on the code itself. A gate on `mod testing;` doesn't carry into `testing.rs`, so start each support file with `#![cfg(feature = "test-support")]` as well (trellis `docs/rules.md`, Amendment #988).
 - **M0** lives in `spike/`, outside the Cargo workspace. Nothing may depend on it.
 
 ## Shared heavy-run lock

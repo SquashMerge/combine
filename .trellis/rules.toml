@@ -27,7 +27,13 @@ deny = [
   { language = "rust", package = "tauri-plugin-fs", stdlib = false },
   { language = "typescript", package = "@tauri-apps/plugin-shell", stdlib = false },
   { language = "typescript", package = "@tauri-apps/plugin-fs", stdlib = false },
+  { language = "javascript", package = "@tauri-apps/plugin-shell", stdlib = false },
+  { language = "javascript", package = "@tauri-apps/plugin-fs", stdlib = false },
 ]
+# Known gap (review 2026-11-20): trellis maps Rust packages only from the root manifest,
+# and the root here is a virtual workspace, so the Rust bans above and the Rust `external`
+# selectors below come back `unknown` for member crates. SPEC.md's architecture table
+# lists what the architecture guard must cover instead.
 
 # --- app "combined" (crates/combined/Cargo.toml): the daemon.
 # Entry wires adapters into core. Adapters sit ABOVE core and implement its ports, so
@@ -144,14 +150,20 @@ paths = ["app/web/src/renderers/**"]
 external = [
   { language = "typescript", package = "@xterm/xterm", stdlib = false },
   { language = "typescript", package = "dompurify", stdlib = false },
+  { language = "javascript", package = "@xterm/xterm", stdlib = false },
+  { language = "javascript", package = "dompurify", stdlib = false },
 ]
 
-# The only code that calls Tauri.
+# Where Tauri is called. Renderers (peers) can't reach it; shell and panels sit above it,
+# so "only ipc/ imports Tauri" needs the architecture guard (SPEC.md).
 [layers.web-ipc]
 app = "combine-web"
 order = 3
 paths = ["app/web/src/ipc/**"]
-external = [{ language = "typescript", package = "@tauri-apps/api", stdlib = false }]
+external = [
+  { language = "typescript", package = "@tauri-apps/api", stdlib = false },
+  { language = "javascript", package = "@tauri-apps/api", stdlib = false },
+]
 
 [layers.web-model]
 apps = ["combine-web"]
@@ -160,7 +172,8 @@ paths = ["app/web/src/model/**"]
 
 # --- Hidden layers: tests, test support, the M0 spike and tooling. They sit above
 # production, so their references into it are downward; production referencing them is
-# upward and deviates.
+# upward and deviates, but only within the same app: references from another app are
+# `unknown` (cross_app). `display = "hidden"` is presentation, not a ban.
 
 [layers.daemon-tests]
 app = "combined"
