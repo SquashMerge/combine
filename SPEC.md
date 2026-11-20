@@ -1,4 +1,4 @@
-# Combine — Spec (rev 8)
+# Combine — Spec (rev 9)
 
 Updated 2026-11-20
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 8 (M0 findings):** each Combine attachment is a pair of herdr-core viewers, because only watch-only viewers get ordered resize boundaries; a `Resized` event is only ever the backend's own boundary; herdr-core's framed protocol, credit and resync behavior are recorded; withheld credit leads to an in-band resync, not a `Gap`; the first-paint losses Combine accepts are listed, and two are requested from herdr-core; the PTY returns to herdr-core's headless size when the last active viewer leaves; xterm.js uses Unicode 11 widths; every replay log append is bounded; M1's contract tests inherit M0's stricter checks. Details and evidence: `spike/m0/FINDINGS.md`.
 
 **Changes from rev 7 (review 2):** each attachment's events (data, resizes, facts) form one ordered, replayable log, and the client acknowledges the last event it applied; the replay buffer is per attachment; the listener and PTY check is described as a conservative list of spellings, not proof; `tools/arch-guard` tokenizes instead of matching text, and reports what it can't analyze.
 
@@ -79,9 +81,10 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - The client checks that the host ID reported over the bridge matches the one it stored for that host, so a changed address can't silently point the rail at a different machine.
 - **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client.
 - **Failures are reported, never worked around:** an unknown or changed host key, a key whose passphrase isn't in the agent, or failed authentication each stop the connection with a message saying what to run in a terminal (`ssh <dest>` once, or `ssh-add`). Host-key checking is never disabled.
-- **Remote binary:** non-interactive SSH often lacks Homebrew's `PATH`, so each host entry stores the absolute path to `combined` (default `/opt/homebrew/bin/combined`). A missing binary shows an install hint.
+- **Remote binary:** non-interactive SSH often lacks Homebrew's `PATH`, so each host entry stores the absolute path to `combined` (default `/opt/homebrew/bin/combined`). A missing binary shows an install hint. M0 confirmed it: a bare command name fails over `ssh -T` (exit 127), and `~/.local/bin`, where `hc` lives, isn't on that `PATH` either.
+- **Finding herdr-core:** the daemon connects to herdr-core's local socket directly, never through `hc`. As a launchd agent it starts with a minimal environment, so the socket path (herdr-core's default `~/.local/state/herdr-core/default/default.sock`, or what `HC_SESSION`, `HC_SOCKET` and the XDG paths select) is daemon configuration, checked at start.
 - Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attached terminal from its last sequence number.
-- Latency budget: keystroke echo should stay under about 30 ms on a local network; M0 measures it.
+- Latency budget: keystroke echo should stay under about 30 ms on a local network. M0 measured p99 at 0.5 ms or less locally, through the daemon and over ssh to localhost (input to echo received, before xterm.js applies it). The local-network measurement is part of M1.
 
 ## Core concepts and data model
 
@@ -244,17 +247,21 @@ pub struct AttachOptions { cols: u16, rows: u16,
 #[async_trait]
 pub trait Attachment: Send {
     fn fidelity(&self) -> Fidelity;                         // Exact | Inexact, as the backend reports it
-    fn resize_notifications(&self) -> bool;                 // what the backend negotiated, not what was asked
-    fn events(&mut self) -> BoxStream<'static, AttachEvent>; // Data(bytes) | Resized | Facts | Closed | Lost
+    fn ordered_resizes(&self) -> bool;                      // Resized events are the backend's own boundaries
+    fn events(&mut self) -> BoxStream<'static, AttachEvent>; // Data(bytes) | Resized | Facts | Resynced | Closed | Lost
     async fn write(&mut self, bytes: &[u8]) -> Result<()>;   // raw input from xterm.js
-    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
+    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>; // a request; the outcome arrives as Resized
     async fn focus(&mut self) -> Result<()>;
-    async fn credit(&mut self, amount: u32) -> Result<()>;   // units fixed by M0
+    async fn set_display(&mut self, display: Display) -> Result<()>;
+    async fn credit(&mut self, bytes: u32) -> Result<()>;
     async fn detach(self: Box<Self>) -> Result<()>;
 }
 ```
 
-- Every operation on a viewer goes through its attachment. Terminal identity (`TermId`) and attachment identity are separate, so two panels on one terminal can differ in size, display and focus.
+- Every operation on a viewer goes through its attachment. Terminal identity (`TermId`) and attachment identity are separate, so two panels on one terminal can ask for different sizes and displays and have their own focus.
+- **A terminal has one size.** Each attachment *requests* a size, but the PTY has one, set by the panel that holds input ownership. A panel that isn't the owner shows the PTY's size (letterboxed), and learns it from its `Resized` events. An attachment keeps its latest requested size and display separately from the PTY size it observes, and reapplies them when it is re-created.
+- **`Resized` is the backend's boundary, never Combine's.** It marks the point in the stream where bytes switch from the old size to the new one. An adapter never emits one when it *sends* a resize: output the backend already produced at the old size may still be on its way, and would land after it (M0 reproduced a wrong screen this way). A backend that can't report ordered resizes says so with `ordered_resizes() == false`.
+- `Resynced` means the backend dropped output it couldn't deliver and sent a fresh paint in its place, so the screen is right but history has a hole. Only backends that signal it emit it; herdr-core 0.1.21 doesn't yet (see below).
 - `Data` is opaque: the first paint and live bytes, in order. The daemon never parses or emulates it, but it never reorders `Data` relative to the attachment's other events either: bytes painted at 80 columns must reach xterm.js before the `Resized` to 120 and the replacement paint that follows it.
 - Spaces aren't a backend concept: the daemon derives them from `TermInfo.cwd` (see Core concepts).
 
@@ -264,15 +271,27 @@ pub trait Attachment: Send {
 | --- | --- |
 | Transport | JSON-RPC 2.0 on the local hc socket; `hello` with `framed: true` switches the connection to framed mode |
 | Terminals | `terminal.list` / `terminal.get` (address, `cwd`, `argv`, size, labels, foreground). `events.subscribe` returns a snapshot with a `seq`, then every fact change in order; after `missed`, take a fresh snapshot. Both include every connected machine's terminals (`machine/t7`), which the adapter drops |
-| Attach | `terminal.attach` opens a channel: first paint, then live bytes, in order. Input goes back as DATA; RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it. No output sequence, paint-complete marker or structured screen fields are exposed |
-| Size | The viewer's `cols`/`rows` at attach; `observe` viewers never type or resize; `resumed` viewers set size only once active again. RESIZE arrives before replacement paints only if the returned `AttachResult.resize_notifications` is true; asking for it isn't enough |
-| Screen fidelity | `Terminal.screen` is `exact`, or `inexact` after a core crash when older history may be missing |
-| Terminal queries | herdr-core answers display queries from each viewer's `display` (colors, cell size); XTVERSION from `Terminal.identity`. Whether every other query is consumed is an M0 test |
-| Flow control | CREDIT frames; units and initial allowance are in the framed protocol, not the schema |
+| Attach | `terminal.attach` opens a channel: first paint, then live bytes, in order. Input goes back as DATA; RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it. No output sequence or structured screen fields are exposed. A paint's start is marked in the stream (`CAN`, then `ESC [ ! p`); its end isn't, and paints aren't wrapped in synchronized output |
+| Size | The last *active* viewer to attach, focus, type or resize sets the PTY size. `observe` viewers never type or resize; `resumed` viewers set size only once active again. **Only `observe` viewers get `resize_notifications`:** RESIZE, then a replacement paint, ahead of the program's redraw. An active viewer isn't told when another viewer changes the size. When the last active viewer leaves, the PTY returns to the core's headless size (default 200x120) |
+| Screen fidelity | `Terminal.screen` is `exact`, or `inexact` after a core crash when older history may be missing. `exact` is herdr-core's recovery status, not a promise that the paint loses nothing (see the first paint, below) |
+| Terminal queries | herdr-core answers most queries itself, even with no viewer: DA1–3, DSR, CPR, OSC 10/11/12 and 4, `CSI 14/16/18/19 t`, XTVERSION, DECRQM, kitty keyboard, DECRQSS. Display answers come from the **most recently active** viewer's `display`. Seven reach the viewer unanswered: DECXCPR, `CSI 21 t`, XTGETTCAP, OSC 52 read, ENQ, DECREQTPARM, kitty graphics `a=q` |
+| Flow control | CREDIT counts bytes of DATA. The initial allowance is 256 KiB, first paint included. Credit never blocks the program: herdr-core queues about 4 MiB per viewer, then drops that viewer's backlog and sends a fresh paint in-band, with no other signal |
 | Agent state | OSC 7501 status reports: `Terminal.status`, `status_ms`, `turn` (`reported` only says whether one was ever sent; `records` holds secondary ids); `terminal.wait` |
-| Loss and restart | Loss ends the stream. `restarted` applies to kept terminals that were recovered; reattach after it. `server.restart` saves screens and the next core adopts running programs |
+| Loss and restart | Loss ends the stream. `restarted` applies to kept terminals that were recovered; reattach after it. `server.restart` saves screens and the next core adopts running programs; the stream ends with EOF and no CLOSE, and a re-attach about 1 s later gets a byte-identical paint. The stream alone can't tell a restart from a crash, so the adapter checks `events.subscribe` or `terminal.get` |
 | Caller identity | `HC_TERMINAL_ID` in each terminal's environment; `caller` param on calls |
-| Remote | `hc connect` speaks the API over stdio (`ssh box hc connect`); a core can add other machines (`machine.add`, addresses like `mini/t7`) |
+| Remote | `hc connect` speaks the API over stdio (`ssh box <absolute path>/hc connect`); a core can add other machines (`machine.add`, addresses like `mini/t7`) |
+
+**Framed protocol** (observed in M0, not in the schema; `spike/m0/FINDINGS.md` section 1 has the evidence): `hello` and its reply are newline-terminated JSON, and framing starts with the next byte. Each frame is `u32 LE channel | u8 kind | u32 LE length | payload`; channel 0 carries JSON-RPC. Kinds: 0 DATA, 1 CREDIT (u32 LE bytes), 2 CLOSE (JSON exit detail from the core), 3 RESIZE (u16 LE cols, rows), 4 FOCUS (u8), 5 FACTS (JSON display), 6 AUTOMATIC_INPUT. Core-to-viewer DATA frames are at most 16 KiB. These are observations of 0.1.21; the adapter checks the protocol generation in `hello` and refuses one it doesn't know.
+
+**How the herdr-core adapter builds an attachment: a pair of viewers.**
+
+- **A display viewer** (`observe`, `resize_notifications` requested). Its stream is the attachment's `Data`, and its RESIZE frames become `Resized` events, each followed by the replacement paint. These are the only correct resize boundaries herdr-core offers.
+- **An input viewer** (active). It carries `write`, `resize`, `focus` and `set_display`. Its own output is credited as it arrives and discarded, so it never enters the replay log.
+- **Both halves are supervised together.** If either fails, the adapter replaces both and starts a new epoch.
+- **Re-creation uses current state.** The input viewer is re-opened with the latest requested size and display, with `resumed: true` so it doesn't take the PTY size until the panel is active again.
+- **Cost:** two core connections per attached panel.
+
+The pair goes back to one viewer if herdr-core grants ordered resizes to active viewers too.
 
 The daemon talks only to its own host's herdr-core, and uses only that host's terminals. herdr-core's lists, snapshots and events also carry every connected machine's terminals, so the adapter drops machine-qualified addresses (`work/t7`) from all of them and rejects one in any call. Otherwise a mini that had `machine.add`ed the work MBP would show work terminals under a mini space, run their loaders on the wrong host, and duplicate them when the work daemon is connected too. A Rex adapter (after v1) would map its own primitives behind `capabilities()`.
 
@@ -280,32 +299,47 @@ The daemon talks only to its own host's herdr-core, and uses only that host's te
 
 Each client panel gets its own backend attachment, and the daemon relays that attachment's stream as opaque bytes. There is no shared per-terminal stream: each viewer gets its own first paint and replacement paints, so one viewer's bytes are never replay history for another.
 
-- **One ordered event log per attachment.** The daemon relays every `AttachEvent` (`Data`, `Resized`, `Facts`, `Closed`, `Lost`) in one sequence, each carrying a cursor `(attachment ID, epoch, seq)`. A `Data` chunk split across frames keeps one `seq` per frame, in order. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
-- The client acknowledges the last event it has **applied** to xterm.js (bytes written, resize done), not the last frame received. Replay starts after that event.
+- **One ordered event log per attachment.** The daemon relays every `AttachEvent` (`Data`, `Resized`, `Facts`, `Resynced`, `Closed`, `Lost`) in one sequence, each carrying a cursor `(attachment ID, epoch, seq)`. A `Data` chunk split across frames keeps one `seq` per frame, in order. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
+- The client acknowledges the last event it has **applied** to xterm.js (bytes written, resize done), not the last frame received. Replay starts after that event. The client resizes its xterm.js when it applies a `Resized` event from the log, never ahead of it, so replay matches what the live client did.
 - If the client's connection drops, it reconnects and resumes from its last acknowledged cursor. The daemon keeps the attachment open for a grace period (about 30 s) and replays the event log from a bounded per-attachment buffer (about 4 MB), or answers `Gap`. Replay carries resizes and facts in their original places, never bytes alone. On `Gap` the client discards its xterm.js parser and screen state (a new instance, not `clear()`) and attaches again, getting a fresh first paint.
 - **The resume cursor belongs to the client's xterm state.** The client resumes from its own last-applied cursor, kept with that xterm.js instance, not from the last acknowledgement the daemon happened to receive (an acknowledgement can be lost). A client that has lost its xterm state (a webview reload, a restarted app) has no cursor to resume from, and attaches fresh.
-- Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer; after a `Gap`, only state is restored.
-- Backpressure: each attachment has a bounded send queue, and the daemon grants herdr-core CREDIT only as the client drains it. A client that falls past its queue anyway gets a `Gap` and a fresh attach, never unbounded buffering.
+- Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer and herdr-core hasn't resynced; after a `Gap` or a resync, only state is restored. Continuous Combine sequence numbers don't prove continuous backend output.
+- **Backpressure:** the daemon grants herdr-core CREDIT only while the attachment's log has room, so a slow client never makes the daemon buffer without bound. herdr-core doesn't stall the program in return: past its own ~4 MiB per viewer it drops the backlog and repaints in-band. Combine accepts that as the slow-client path (the screen ends right; the skipped output is gone). It shows "output skipped" only when the backend reports `Resynced`; matching `CAN ESC [ ! p` in the bytes would be a guess, since program output can contain it and frames can split it. M0's 50 MB burst into an xterm.js client hit this 11 times.
+- **Every append is bounded**, whatever its kind: the log caps retained bytes and event count, so a client that stops reading while resizes keep coming still hits the cap. Control and input queues per connection are bounded too. Overflow is a `Gap` in order, never a dropped or reordered event.
 
 **Where the first paint comes from (M0 go/no-go)**
 
-herdr-core keeps each terminal's screen and sends it as the first paint of every attach, ordered before live bytes on the same channel. So the daemon needs no emulator, and attaching can't race the stream. The schema doesn't define the frame encodings, whether the end of the first paint is visible, or credit units; M0 pins those down from herdr-core's framed protocol.
+herdr-core keeps each terminal's screen and sends it as the first paint of every attach, ordered before live bytes on the same channel. So the daemon needs no emulator, and attaching can't race the stream. The schema doesn't define the frame encodings, the end of the first paint or credit units; M0 pinned those down (Framed protocol, above).
 
-- **M0 passes** when a fresh attach restores the screen, cursor, alternate screen and input modes (mouse, bracketed paste, application keys) for a terminal started before the daemon, after a daemon restart, and after a herdr-core `server.restart`.
-- **Not an M0 failure:** a terminal herdr-core reports as `inexact` after a core crash attaches with fidelity `Inexact`. Crash recovery is tested separately from planned restarts.
-- **If the first paint doesn't restore modes,** M0 ends with a decision: add that to herdr-core, or accept the gap and record which modes are lost.
+**M0 result (2026-11-20): passed, with recorded losses.** A fresh attach restored the screen, cursor, alternate screen and input modes (mouse 1000/1002/1003 with SGR 1006, focus 1004, bracketed paste, application cursor keys and keypad) for a terminal started before the daemon, after a daemon restart, and after a herdr-core `server.restart`. It also restored the scroll region, SGR pen, charset, insert, origin and autowrap modes, and the title. Tested with vim, less and two fixture programs.
+
+**Lost in the first paint**, decided:
+
+| State | Effect after a fresh attach | Decision |
+| --- | --- | --- |
+| DECSC saved cursor | A program that restores its cursor before its next full redraw writes at the top-left and overwrites text there | Requested from herdr-core; until then, known limitation |
+| DECSCUSR cursor shape | A block cursor where vim showed a bar, until the program sets it again | Accepted |
+| Soft-wrap flags | Copying a long wrapped line gives line breaks; reflow on resize treats wrapped rows as separate lines | Accepted |
+| OSC 8 links on cells already written | Existing links stop being links; a link still open keeps applying to new text | Accepted |
+| OSC 4 palette and OSC 10/11 colours set by the program | The panel shows its own colours | Accepted |
+| `?1007` alternate scroll | The wheel scrolls xterm.js's buffer instead of sending arrow keys | Accepted |
+| End of the first paint | Not marked, so the client can't wait for a complete screen; it draws the paint as it arrives | Accepted |
+
+- **Requested from herdr-core** (`docs/herdr-core-requests.md`): the saved cursor in the first paint, and an out-of-band signal when it drops a viewer's backlog and repaints (`Resynced`).
+- **Unicode widths:** herdr-core lays out text with Ghostty's widths. xterm.js must use Unicode 11 widths (`@xterm/addon-unicode11`); with its default Unicode 6 tables, emoji rows came out one column off after a fresh attach.
+- **Not a failure:** a terminal herdr-core reports as `inexact` after a core crash attaches with fidelity `Inexact`. Crash recovery is tested in M1, separately from planned restarts.
 - **A backend without an ordered attach** (a future one) can only use the subscribe, read, nudge-a-repaint fallback. That is experimental and always `Inexact`.
 
 **Input ownership protocol**
 
-herdr-core already arbitrates between viewers (attach size, `observe`, FOCUS, `resumed`). With herdr-core, each Combine attachment is its own herdr-core viewer: focusing or typing in a panel sends FOCUS, and herdr-core picks the size and sends RESIZE. The protocol below is what the daemon enforces among Combine's own attachments, and the full arbitration for a backend without it.
+herdr-core already arbitrates between viewers: the last active viewer to attach, focus, type or resize sets the size. With herdr-core, focusing or typing in a panel sends FOCUS through that attachment's input viewer, herdr-core sets the size, and every attachment's display viewer gets the RESIZE and a replacement paint. The protocol below is what the daemon enforces among Combine's own attachments, and the full arbitration for a backend without it.
 
 - Each attached panel gets an attachment ID; two panels in one client are separate attachments.
 - The daemon decides ownership per terminal and keeps an ownership generation. A keystroke from a non-owner first asks for ownership; the daemon grants it, bumps the generation, notifies all attachments, and only then forwards the input.
 - `resize` messages carry the sender's generation; the daemon rejects any from an older generation, so stale resizes can't fight the owner.
-- When the owner detaches or its connection drops, ownership passes to the attachment that most recently had focus, or none. With no owner, the PTY keeps its last size.
-- **Terminal query replies** (device attributes, cursor position, colors): herdr-core answers display queries itself, using the `display` each viewer reports at attach. Clients report their xterm.js colors and cell size there and don't forward xterm.js's own replies. M0 confirms no query reaches xterm.js unanswered.
-- `hc attach` from an ordinary terminal is another herdr-core viewer, outside Combine; herdr-core arbitrates between it and Combine's attachments. M0 tests that both behave.
+- When the owner detaches or its connection drops, ownership passes to the attachment that most recently had focus, or none. With no active viewer left, herdr-core returns the PTY to its headless size (default 200x120), and the program redraws for it; the next owner's size applies when it becomes active.
+- **Terminal query replies:** herdr-core answers most queries itself, using the display of the most recently active viewer. Clients report their xterm.js colours and cell size through `set_display` and don't forward xterm.js's own replies, with one exception: DECXCPR (`CSI ? 6 n`), which herdr-core leaves unanswered and xterm.js can answer. The other six unanswered queries are a known limitation: a program that waits for one stalls until its own timeout. OSC 52 clipboard reads stay unanswered on purpose.
+- `hc attach` from an ordinary terminal is another herdr-core viewer, outside Combine; herdr-core arbitrates between it and Combine's attachments. M0 tested both working together.
 
 **Rules for adapters**
 
@@ -314,7 +348,18 @@ herdr-core already arbitrates between viewers (attach size, `observe`, FOCUS, `r
 - `TermId` is opaque outside the adapter and prefixed with the backend name.
 - Adapters hide reconnects and emit `Lost` only after giving up.
 - Missing features are reported through `capabilities()`, and the UI hides what isn't supported.
-- Every adapter passes one contract test suite: spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen; wide Unicode and emoji; a 50 MB output burst; hide/show and reconnect during heavy output with no lost or duplicated bytes inside the replay window; a disconnect and replay just before and just after a resize, where the client ends with the same screen as a client that never dropped; two attachments on one terminal with different sizes and display facts, where each operation is routed to the attachment that sent it (the terminal itself is shared, so input and the PTY size still reach every viewer); attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again.
+- Every adapter passes one contract test suite:
+  - spawn and attach, write and read back, resize, kill; a full-screen TUI (vim, htop); entering and leaving the alternate screen;
+  - wide Unicode, emoji and grapheme clusters, with xterm.js on Unicode 11 widths;
+  - a 50 MB output burst; hide/show and reconnect during heavy output, checked **byte for byte** (expected length and hash, from the end of the first paint), with drops timed so they hit while output is still flowing;
+  - a disconnect and replay on each side of a resize's applied-event boundary, with unique old-size and new-size markers and an assertion that the resize happened at the right place, ending with the same screen as a client that never dropped;
+  - **old-size output still in flight when a resize is requested** (delayed between backend and daemon), which must land before the `Resized` boundary;
+  - two attachments on one terminal asking for different sizes and displays: each operation is routed to the attachment that sent it, both end showing the PTY's size, and a reconnected attachment reapplies its latest requested size, not its original one;
+  - attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again; a backend restart; a backend crash (`Inexact`);
+  - a slow client: the daemon's memory stays bounded for data **and** events (a resize flood while not reading);
+  - a mutation check: a variant that drops or moves a `Resized` event, or a byte, must fail the suite.
+
+  Each test exits non-zero on failure and records the revision it ran against.
 - The fake backend also injects what real runs rarely show: an `Inexact` terminal, and a local `t7` beside a remote `work/t7` with the same `cwd`, which must not appear.
 
 ## Panels, loaders and groups
@@ -644,8 +689,8 @@ The app names in `rules.toml` (`combined`, `combine`, `combine-app`, `combine-we
 
 An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each milestone after M0 is usable on its own. M0 is disposable code; only its findings carry forward. v1 is M1 to M4 plus the herdr parts of M6; the Rex adapter (M5) comes after v1.
 
-0. **M0: Terminal fidelity spike.** One daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: a fresh attach must restore screen, cursor, alternate screen and input modes from herdr-core's first paint (see Where the first paint comes from); a result that usually looks right doesn't pass. M0 also pins down herdr-core's frame encodings, credit units and whether the end of the first paint is visible, and confirms that no terminal query reaches xterm.js unanswered.
-1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter over `terminal.attach` and `events.subscribe`, a clean `trellis rules check`, framed protocol with per-frame batching, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts.
+0. **M0: Terminal fidelity spike. Done 2026-11-20** (`spike/m0/FINDINGS.md`): go for the opaque relay with paired viewers; first-paint losses decided above. Moved to M1: local-network latency, a visual xterm.js client, the crash path. The `show_diagram` repair loop is M2's done criterion. Original scope: one daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: a fresh attach must restore screen, cursor, alternate screen and input modes from herdr-core's first paint (see Where the first paint comes from); a result that usually looks right doesn't pass. M0 also pins down herdr-core's frame encodings, credit units and whether the end of the first paint is visible, and confirms that no terminal query reaches xterm.js unanswered.
+1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter (paired viewers) over `terminal.attach` and `events.subscribe`, the fake backend and the contract test suite, a clean `trellis rules check`, framed protocol with per-frame batching, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts, and keystroke echo over the local network stays within the latency budget.
 2. **M2: Agent-built diagrams.** MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation. Done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.
 3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` and Jira data shows live and survives a daemon restart.
 4. **M4: Panel groups.** Group library, params, per-client selection, a GitHub group as the first template. Done when clicking a PR in the list updates its detail, checks and diff panels.
@@ -654,17 +699,22 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 ## Open questions
 
+**From M0**
+
+- [ ] herdr-core requests (`docs/herdr-core-requests.md`): the saved cursor in the first paint, and a resync signal. When they land, drop the saved-cursor limitation and emit `Resynced`.
+- [ ] If herdr-core grants ordered resizes to active viewers, should the adapter drop back to one viewer per attachment?
+
 **New in rev 4**
 
-- [x] Does herdr-core answer terminal queries itself? Yes, from each viewer's `display`. M0 confirms nothing reaches xterm.js unanswered.
-- [ ] herdr-core arbitrates size between viewers (attach size, FOCUS, `observe`, `resumed`). Does that behave with two Combine clients and an `hc attach` open? M0 answers this.
+- [x] Does herdr-core answer terminal queries itself? Mostly: 21 of 28 tested, from the most recently active viewer's display. Seven aren't answered; xterm.js answers DECXCPR, and the rest are a known limitation.
+- [x] herdr-core arbitrates size between viewers. Does that behave with two Combine clients and an `hc attach` open? Yes, with paired viewers: only watch-only viewers learn of size changes, so each attachment has one of each.
 - [x] The architecture guard. Decided: `tools/arch-guard` now; trellis milestone 0.3 (#1263–#1272) replaces it rule by rule as the issues land. Some checks stay in the guard for good (see `docs/trellis-feature-request.md`).
 - [ ] Should remote terminals use herdr-core's own machine links (`machine.add`, `mini/t7`) instead of Combine's SSH bridge? A daemon is still needed on each host for loaders and panel files, so v1 keeps one bridge for everything.
 - [x] Work MBP access. Decided: the work MBP is usually its own client. A personal MBP can reach it over SSH but rarely does. Commands and credential storage stay on the work MBP. A remote client receives terminal output and panel results, which may contain source code, file contents, secrets or other work data, so remote access to the work MBP must comply with work policy. Keeping computation remote is not a data-loss boundary.
 
 **From rev 3**
 
-- [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirms it for terminals that predate the daemon and across restarts.
+- [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirmed it for terminals that predate the daemon and across planned restarts.
 - [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
 
 **From rev 2**
