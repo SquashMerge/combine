@@ -46,7 +46,7 @@ Two things make this more than "add `ESC 7`":
 ### Acceptance
 
 1. With `modes.py`, the DECRC check after a fresh attach matches the reference in all three attach cases.
-2. **Distinct state on both screens:** different saved and live positions, pens and charsets on both buffers, a saving and a non-saving alternate-screen switch, and different saved and live origin modes. After a fresh, a replacement and a resync paint into an already-used receiver, DECRC on each buffer restores what the source terminal would.
+2. **Distinct state on both screens:** different saved and live positions, pens and charsets on both buffers, and a saving and a non-saving alternate-screen switch. After a fresh, a replacement and a resync paint into an already-used receiver, DECRC on each buffer restores the same state as that same receiver fed the original complete stream, for the fields that receiver's DECSC saves. Saved origin mode and extended rendition are checked only on receivers that implement saving them.
 3. A saved cursor on the main screen, made before entering the alternate screen, is restored after leaving it.
 4. With no saved cursor ever set, the paint adds nothing, so a later DECRC behaves as on a fresh terminal.
 
