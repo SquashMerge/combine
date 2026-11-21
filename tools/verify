@@ -19,8 +19,20 @@ if [ -z "${MIMIR_HEAVY_LOCK_HELD:-}" ] && [ -x "$heavy" ]; then
 fi
 
 # One build directory per checkout or worktree, never shared (AGENTS.md).
+# COMBINE_TARGETS sets the parent; otherwise the shared directory beside the main
+# checkout if it exists, else one beside this checkout. Factory sandboxes are named
+# after their run, so each still gets its own.
 if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  CARGO_TARGET_DIR="${COMBINE_TARGETS:-$(dirname "$root")/combine-targets}/$(basename "$root")"
+  targets=${COMBINE_TARGETS:-}
+  if [ -z "$targets" ]; then
+    shared="$HOME/projects/squashmerge/combine-targets"
+    if [ -d "$shared" ]; then targets=$shared; else targets="$(dirname "$root")/combine-targets"; fi
+  fi
+  case $root in
+    */.factory-sandboxes/*) name="factory-$(basename "$root")" ;;
+    *) name=$(basename "$root") ;;
+  esac
+  CARGO_TARGET_DIR="$targets/$name"
   export CARGO_TARGET_DIR
 fi
 
