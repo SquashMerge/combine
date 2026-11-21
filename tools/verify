@@ -1,0 +1,60 @@
+#!/bin/sh
+# Every check a change must pass: the feature factory's `verify`, and what to run
+# before finishing a change by hand.
+#
+#   ./tools/verify
+#
+# It is heavy work (the full test suite, whole-workspace clippy), so it takes the
+# shared heavy-run lease itself when heavy.sh is present (AGENTS.md). Inside a
+# lease (MIMIR_HEAVY_LOCK_HELD set) it runs directly, so wrapping it again never
+# nests. Elsewhere, such as CI, it just runs.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+heavy=${COMBINE_HEAVY_SH:-/Users/jcarreira/projects/squashmerge/trellis-evidence/heavy-lock/heavy.sh}
+if [ -z "${MIMIR_HEAVY_LOCK_HELD:-}" ] && [ -x "$heavy" ]; then
+  exec "$heavy" sh "$0" "$@"
+fi
+
+# One build directory per checkout or worktree, never shared (AGENTS.md).
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  CARGO_TARGET_DIR="${COMBINE_TARGETS:-$(dirname "$root")/combine-targets}/$(basename "$root")"
+  export CARGO_TARGET_DIR
+fi
+
+step() { printf '\n== %s\n' "$*"; }
+
+rustc --version
+step "rust: format"
+cargo fmt --all --check
+step "rust: clippy"
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+step "rust: tests"
+cargo test --workspace --all-features --locked
+
+step "architecture: tools/arch-guard"
+python3 -I -B tools/arch-guard/test_check.py
+python3 -I -B tools/arch-guard/check.py
+
+step "architecture: trellis rules check"
+if command -v trellis >/dev/null 2>&1; then
+  trellis rules check --format json >"${TMPDIR:-/tmp}/combine-trellis-$$.json"
+  status=$?
+  rm -f "${TMPDIR:-/tmp}/combine-trellis-$$.json"
+  [ "$status" -eq 0 ] || exit "$status"
+elif [ -n "${COMBINE_VERIFY_WITHOUT_TRELLIS:-}" ]; then
+  echo "trellis not installed; skipped (COMBINE_VERIFY_WITHOUT_TRELLIS is set)"
+else
+  echo "verify: trellis is not on PATH; install it, or set COMBINE_VERIFY_WITHOUT_TRELLIS=1 where it can't run" >&2
+  exit 1
+fi
+
+if [ -f app/web/package-lock.json ]; then
+  step "frontend: npm ci, typecheck, tests"
+  npm ci --prefix app/web --ignore-scripts
+  npm run --prefix app/web check
+fi
+
+printf '\nverify: all checks passed\n'

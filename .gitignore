@@ -2,3 +2,7 @@ target/
 node_modules/
 .DS_Store
 __pycache__/
+
+# feature-factory run state and sandboxes
+.factory/
+/.factory-sandboxes/
