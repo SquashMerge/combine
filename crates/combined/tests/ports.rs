@@ -41,21 +41,104 @@ fn layer_sources() -> Vec<PathBuf> {
     files
 }
 
+/// Removes `//` and `/* */` comments, leaving string, raw string and char literals untouched so
+/// that a `//` inside one doesn't hide code after it.
 fn strip_comments(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut out = String::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("//") {
-            rest = after.find('\n').map_or("", |end| &after[end..]);
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after.find("*/").map_or("", |end| &after[end + 2..]);
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &text[i..];
+        let skip = if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if rest.starts_with("/*") {
+            let mut depth = 0;
+            let mut j = 0;
+            while j < rest.len() {
+                if rest[j..].starts_with("/*") {
+                    depth += 1;
+                    j += 2;
+                } else if rest[j..].starts_with("*/") {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            j
         } else {
-            let mut chars = rest.chars();
-            out.push(chars.next().unwrap());
-            rest = chars.as_str();
-        }
+            let literal = literal_len(rest);
+            if literal > 0 {
+                out.push_str(&rest[..literal]);
+                i += literal;
+                continue;
+            }
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+        i += skip;
     }
     out
+}
+
+/// The length of the string, raw string or char literal at the start of `rest`, or 0.
+fn literal_len(rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    let (prefix, raw) = match bytes[0] {
+        b'r' => (1, true),
+        b'b' if bytes.get(1) == Some(&b'r') => (2, true),
+        b'b' => (1, false),
+        _ => (0, false),
+    };
+    if raw {
+        let hashes = bytes[prefix..].iter().take_while(|&&b| b == b'#').count();
+        if bytes.get(prefix + hashes) != Some(&b'"') {
+            return 0;
+        }
+        let close = format!("\"{}", "#".repeat(hashes));
+        let body = prefix + hashes + 1;
+        return rest[body..]
+            .find(&close)
+            .map_or(rest.len(), |end| body + end + close.len());
+    }
+    let quote = match bytes.get(prefix) {
+        Some(&q @ (b'"' | b'\'')) => q,
+        _ => return 0,
+    };
+    if prefix == 1 && bytes[0] == b'r' {
+        return 0;
+    }
+    let mut j = prefix + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b if b == quote => return j + 1,
+            b'\n' if quote == b'\'' => return 0,
+            _ => j += 1,
+        }
+    }
+    0
+}
+
+#[test]
+fn strip_comments_keeps_literals_and_drops_comments() {
+    let source = "let a = \"//\"; std::fs::read(); // tail\n/* block */ let b = r#\"/*\"#; std::env::var(\"x\");\nlet c = '\"'; /* a /* nested */ still */ done";
+    let code = strip_comments(source);
+    assert!(code.contains("std::fs::read()"));
+    assert!(code.contains("std::env::var"));
+    assert!(code.contains("\"//\""));
+    assert!(code.contains("r#\"/*\"#"));
+    assert!(code.contains("let c = '\"';"));
+    assert!(code.contains("done"));
+    assert!(!code.contains("tail"));
+    assert!(!code.contains("block"));
+    assert!(!code.contains("nested"));
+    assert!(!code.contains("still"));
 }
 
 #[test]

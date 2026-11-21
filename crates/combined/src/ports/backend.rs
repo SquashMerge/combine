@@ -112,8 +112,8 @@ pub enum AttachEvent {
 ///
 /// - `list` returns this host's terminals only, and `watch` the changes after the call. The
 ///   daemon watches first, then lists.
-/// - A [`TermId`] is `<prefix>:<address>`. The prefix is fixed per backend and the address is
-///   non-empty.
+/// - A [`TermId`] is `<prefix>:<address>`. The prefix is fixed per backend (`fake` for the
+///   fake) and the address is non-empty.
 #[async_trait]
 pub trait TerminalBackend: Send + Sync {
     fn id(&self) -> &'static str;
