@@ -1474,3 +1474,107 @@ fn unsent_ack_is_invalid_request() {
     assert_eq!(names(&messages), ["error", "data"]);
     assert_eq!(error_of(&messages[0]).code, ErrorCode::InvalidRequest);
 }
+
+#[test]
+fn resume_with_nothing_to_replay_grants_credit_back() {
+    let config = CoreConfig {
+        log_max_bytes: 8192,
+        credit_reserve: 1024,
+        credit_min_grant: 64,
+        ..CoreConfig::default()
+    };
+    let credit = Capabilities {
+        byte_credit: true,
+        initial_credit: 1000,
+        ..caps()
+    };
+    let mut rig = Rig::with(config, credit);
+    let c1 = rig.core.connect();
+    let id = rig.attach(c1, 1, 1, false);
+    rig.started(id, 1);
+    rig.effects();
+    rig.pull(c1);
+    // The backend spends every byte of credit: 1000 initial plus the 6040 granted.
+    rig.event(id, 1, AttachEvent::Data(vec![0; 7040]));
+    assert_eq!(rig.core.attachment_stats(id).unwrap().outstanding_credit, 0);
+    let sent = rig.pull(c1);
+    let last = sent.last().and_then(|m| m.cursor()).unwrap();
+    assert!(rig.effects().is_empty());
+    rig.core.disconnect(c1, rig.now());
+
+    let c2 = rig.core.connect();
+    rig.send(
+        c2,
+        ClientMessage::Resume(Resume {
+            request: RequestId(2),
+            cursor: last,
+        }),
+    );
+    let messages = rig.pull(c2);
+    let DaemonMessage::Resumed(resumed) = &messages[0] else {
+        panic!("{messages:?}")
+    };
+    assert_eq!(resumed.replay_through, None);
+    let commands = rig.commands();
+    let [BackendCommand::Credit { attachment, bytes }] = commands.as_slice() else {
+        panic!("{commands:?}");
+    };
+    assert_eq!(*attachment, id);
+    assert!(*bytes >= 64);
+}
+
+#[test]
+fn disconnect_hands_ownership_to_a_member_on_another_connection() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let x = rig.open(c1, 1, false);
+    let y = rig.open(c1, 1, false);
+    let z = rig.open(c2, 1, false);
+    rig.request_ownership(c1, x);
+    rig.focus(c2, z);
+    rig.focus(c1, y);
+    rig.effects();
+    rig.pull(c2);
+    let before = rig.generation(1);
+
+    rig.core.disconnect(c1, rig.now());
+    assert_eq!(rig.owner(1), Some(z));
+    assert_eq!(rig.generation(1).0, before.0 + 1);
+    assert_eq!(
+        rig.commands(),
+        [
+            BackendCommand::SetDisplay {
+                attachment: z,
+                display: display()
+            },
+            BackendCommand::Resize {
+                attachment: z,
+                cols: 80,
+                rows: 24
+            },
+            BackendCommand::Focus { attachment: z },
+        ]
+    );
+    assert_eq!(
+        rig.pull(c2),
+        [ownership_msg(z, rig.generation(1).0, Some(z))]
+    );
+    let _ = y;
+}
+
+#[test]
+fn disconnect_without_another_member_leaves_no_owner_and_no_commands() {
+    let mut rig = Rig::new();
+    let c1 = rig.core.connect();
+    let x = rig.open(c1, 1, false);
+    let y = rig.open(c1, 1, false);
+    rig.request_ownership(c1, x);
+    rig.focus(c1, y);
+    rig.effects();
+    let before = rig.generation(1);
+
+    rig.core.disconnect(c1, rig.now());
+    assert_eq!(rig.owner(1), None);
+    assert_eq!(rig.generation(1).0, before.0 + 1);
+    assert!(rig.effects().is_empty());
+}

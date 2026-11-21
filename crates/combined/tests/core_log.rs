@@ -518,8 +518,6 @@ fn every_kind_of_append_is_bounded() {
     // Events never bound Data: the margin the other kinds keep is enough for the entries one
     // Data event can create, so Data still fits where the others have just been refused.
     let mut log = live(limits(1 << 19, 20));
-    while log.append(&resized()) == Appended::Yes {}
-    let mut log = live(limits(1 << 19, 20));
     while 19 - log.stats().events as i64 > MARGIN_EVENTS {
         assert_eq!(log.append(&resized()), Appended::Yes);
     }

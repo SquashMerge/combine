@@ -150,6 +150,9 @@ impl Core {
             .filter(|(_, a)| a.connection == Some(connection))
             .map(|(id, _)| *id)
             .collect();
+        // Unbind every attachment before any hand-off runs, so ownership never passes to a
+        // sibling that is leaving on the same connection.
+        let mut unbound = Vec::new();
         for id in bound {
             let Some(attachment) = self.attachments.get_mut(&id) else {
                 continue;
@@ -158,12 +161,21 @@ impl Core {
                 State::Opening => {
                     self.attachments.remove(&id);
                 }
-                State::Ended(LogEnd::Gap) => self.finish(id, now),
+                State::Ended(LogEnd::Gap) => unbound.push((id, true)),
                 _ => {
                     attachment.connection = None;
                     attachment.grace_deadline = Some(now.saturating_add(self.config.grace));
-                    self.refresh_eligibility(id, now);
+                    unbound.push((id, false));
                 }
+            }
+        }
+        // Owners go last: by then every sibling is already ineligible.
+        unbound.sort_by_key(|(id, _)| self.is_owner(*id));
+        for (id, finished) in unbound {
+            if finished {
+                self.finish(id, now);
+            } else {
+                self.refresh_eligibility(id, now);
             }
         }
     }
@@ -497,6 +509,7 @@ impl Core {
             attachment.grace_deadline = None;
         }
         self.refresh_eligibility(id, now);
+        self.grant_credit(id);
         self.push_control(
             connection,
             DaemonMessage::Resumed(Resumed {
