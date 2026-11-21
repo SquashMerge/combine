@@ -7,8 +7,13 @@ use combined::testing::Half;
 use futures::FutureExt;
 
 use crate::common::{display, request_options};
-use crate::contract::client::{Applied, Ending};
-use crate::contract::{Case, Fault, Harness, Outcome, Target};
+use crate::contract::client::{Applied, Ending, View};
+use crate::contract::{Case, ClientSim, Failure, Fault, Harness, Outcome, Target};
+
+fn view_of(c: &ClientSim, attachment: combine_protocol::AttachmentId) -> Result<&View, Failure> {
+    c.view(attachment)
+        .ok_or_else(|| Failure::new("harness", "the client has no view of the attachment"))
+}
 
 pub fn cases<T: Target>() -> Vec<Case<T>> {
     vec![
@@ -63,8 +68,12 @@ pub async fn spawn_attach_write_read_back_resize_kill<T: Target>(t: &mut T) -> O
         .await
         .map_err(|error| crate::contract::Failure::new("list", format!("list failed: {error}")))?;
     let info = listed.iter().find(|info| info.id == term);
-    ensure!("list", info.is_some(), "list() is missing {}", term.0);
-    let info = info.expect("checked above");
+    let Some(info) = info else {
+        return Err(Failure::new(
+            "list",
+            format!("list() is missing {}", term.0),
+        ));
+    };
     ensure!(
         "list",
         info.cwd == cwd && info.argv == argv,
@@ -77,7 +86,7 @@ pub async fn spawn_attach_write_read_back_resize_kill<T: Target>(t: &mut T) -> O
     let att = h
         .attach(&mut c, &term, request_options(80, 24, false))
         .await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     let first = view.started.first();
     ensure!(
         "started",
@@ -90,7 +99,7 @@ pub async fn spawn_attach_write_read_back_resize_kill<T: Target>(t: &mut T) -> O
     h.mark(&term, &mut [&mut c]).await?;
     h.type_input(&mut c, att, b"hello").await?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "ownership",
         view.owns(),
@@ -106,7 +115,7 @@ pub async fn spawn_attach_write_read_back_resize_kill<T: Target>(t: &mut T) -> O
 
     h.resize(&mut c, att, 100, 30).await?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "resized",
         view.resizes() == [(100, 30)] && view.size == (100, 30),
@@ -125,7 +134,7 @@ pub async fn spawn_attach_write_read_back_resize_kill<T: Target>(t: &mut T) -> O
         .await
         .map_err(|error| crate::contract::Failure::new("kill", format!("kill failed: {error}")))?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "closed",
         view.ending == Some(Ending::Closed(CloseReason::Exited))
@@ -198,9 +207,7 @@ pub async fn display_facts_follow_capabilities<T: Target>(t: &mut T) -> Outcome 
     changed.foreground = "#00ff00".to_string();
     h.set_display(&mut c, att, changed.clone()).await?;
     h.settle(&mut [&mut c]).await?;
-    let facts: Vec<&Applied> = c
-        .view(att)
-        .expect("attached")
+    let facts: Vec<&Applied> = view_of(&c, att)?
         .transcript
         .iter()
         .filter(|item| matches!(item, Applied::Facts(_)))
@@ -232,7 +239,7 @@ pub async fn detach_ends_with_a_final_closed<T: Target>(t: &mut T) -> Outcome {
     h.mark(&term, &mut [&mut c]).await?;
     h.detach(&mut c, att).await?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "closed",
         view.transcript.last() == Some(&Applied::Closed(CloseReason::Detached)),
@@ -245,7 +252,7 @@ pub async fn detach_ends_with_a_final_closed<T: Target>(t: &mut T) -> Outcome {
     h.settle(&mut [&mut c]).await?;
     ensure!(
         "after-detach",
-        c.view(att).expect("attached").transcript == before,
+        view_of(&c, att)?.transcript == before,
         "output arrived after Closed(Detached)"
     );
 
@@ -281,7 +288,7 @@ pub async fn program_exit_is_final<T: Target>(t: &mut T) -> Outcome {
         .await
         .map_err(|error| crate::contract::Failure::new("kill", format!("kill failed: {error}")))?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "closed",
         view.ending == Some(Ending::Closed(CloseReason::Exited)),
@@ -291,7 +298,7 @@ pub async fn program_exit_is_final<T: Target>(t: &mut T) -> Outcome {
 
     h.target.restart_backend().await?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(att).expect("attached");
+    let view = view_of(&c, att)?;
     ensure!(
         "no-restart",
         view.started.len() == 1,
@@ -317,7 +324,7 @@ pub async fn adapter_reports_lost_only_after_giving_up<T: Target>(t: &mut T) -> 
     h.target.fail_next_opens(&term, max)?;
     h.target.fail_half(&term, 0, Half::Display)?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(giving_up).expect("attached");
+    let view = view_of(&c, giving_up)?;
     ensure!(
         "lost",
         view.ending == Some(Ending::Lost)
@@ -343,7 +350,7 @@ pub async fn adapter_reports_lost_only_after_giving_up<T: Target>(t: &mut T) -> 
     h.target.fail_next_opens(&term, 1)?;
     h.target.fail_half(&term, 1, Half::Display)?;
     h.settle(&mut [&mut c]).await?;
-    let view = c.view(recovering).expect("attached");
+    let view = view_of(&c, recovering)?;
     ensure!(
         "reopened",
         view.started.len() == 2 && view.ending.is_none(),
