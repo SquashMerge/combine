@@ -1,4 +1,4 @@
-# Combine — Spec (rev 9)
+# Combine — Spec (rev 10)
 
 Updated 2026-11-20
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 9 (review 5):** every backend generation of an attachment starts with a `Started` event, and the daemon starts a new epoch on it; automatic query replies have their own port method, fenced by epoch and ownership generation and never sent from replay; the attachment lifecycle is defined in terms of ownership (watch-only attachments have no input half, a non-owner's input half never takes the PTY size); output history can also have holes at resize boundaries; the replay log always has room for its final `Gap`.
 
 **Changes from rev 8 (M0 findings):** each Combine attachment is a pair of herdr-core viewers, because only watch-only viewers get ordered resize boundaries; a `Resized` event is only ever the backend's own boundary; herdr-core's framed protocol, credit and resync behavior are recorded; withheld credit leads to an in-band resync, not a `Gap`; the first-paint losses Combine accepts are listed, and two are requested from herdr-core; the PTY returns to herdr-core's headless size when the last active viewer leaves; xterm.js uses Unicode 11 widths; every replay log append is bounded; M1's contract tests inherit M0's stricter checks. Details and evidence: `spike/m0/FINDINGS.md`.
 
@@ -248,9 +250,10 @@ pub struct AttachOptions { cols: u16, rows: u16,
 pub trait Attachment: Send {
     fn fidelity(&self) -> Fidelity;                         // Exact | Inexact, as the backend reports it
     fn ordered_resizes(&self) -> bool;                      // Resized events are the backend's own boundaries
-    fn events(&mut self) -> BoxStream<'static, AttachEvent>; // Data(bytes) | Resized | Facts | Resynced | Closed | Lost
-    async fn write(&mut self, bytes: &[u8]) -> Result<()>;   // raw input from xterm.js
-    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>; // a request; the outcome arrives as Resized
+    fn events(&mut self) -> BoxStream<'static, AttachEvent>; // Started | Data(bytes) | Resized | Facts | Resynced | Closed | Lost
+    async fn write(&mut self, bytes: &[u8]) -> Result<()>;   // what the user typed
+    async fn write_automatic(&mut self, bytes: &[u8]) -> Result<()>; // the emulator's own query replies: never takes ownership
+    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>; // a request: Ok means stored, not that the PTY changed
     async fn focus(&mut self) -> Result<()>;
     async fn set_display(&mut self, display: Display) -> Result<()>;
     async fn credit(&mut self, bytes: u32) -> Result<()>;
@@ -261,7 +264,9 @@ pub trait Attachment: Send {
 - Every operation on a viewer goes through its attachment. Terminal identity (`TermId`) and attachment identity are separate, so two panels on one terminal can ask for different sizes and displays and have their own focus.
 - **A terminal has one size.** Each attachment *requests* a size, but the PTY has one, set by the panel that holds input ownership. A panel that isn't the owner shows the PTY's size (letterboxed), and learns it from its `Resized` events. An attachment keeps its latest requested size and display separately from the PTY size it observes, and reapplies them when it is re-created.
 - **`Resized` is the backend's boundary, never Combine's.** It marks the point in the stream where bytes switch from the old size to the new one. An adapter never emits one when it *sends* a resize: output the backend already produced at the old size may still be on its way, and would land after it (M0 reproduced a wrong screen this way). A backend that can't report ordered resizes says so with `ordered_resizes() == false`.
-- `Resynced` means the backend dropped output it couldn't deliver and sent a fresh paint in its place, so the screen is right but history has a hole. Only backends that signal it emit it; herdr-core 0.1.21 doesn't yet (see below).
+- `Resynced` means the backend dropped output it couldn't deliver and a fresh paint **begins** here, so the screen will be right but history has a hole. Only backends that signal it emit it; herdr-core 0.1.21 doesn't yet (see below).
+- **`Started` opens every backend generation of an attachment:** the first attach, and every time the adapter replaces what's behind it (a reconnect, a restart, a pair rebuilt after one half failed). It carries the new generation, the actual size and the fidelity, and comes before any of that generation's `Resized` or `Data`. The daemon starts a new wire epoch on each `Started`, and drops any late event or command from an older generation. `Closed` after an intentional detach or the program's exit is final: no new generation follows.
+- **Capabilities say what's a no-op.** A backend without byte credit or display queries says so in `capabilities()`, and `credit` or `set_display` then do nothing. A successful `resize` means the request was stored; a same-size request, or one from an attachment that doesn't own the terminal, changes nothing and produces no `Resized`.
 - `Data` is opaque: the first paint and live bytes, in order. The daemon never parses or emulates it, but it never reorders `Data` relative to the attachment's other events either: bytes painted at 80 columns must reach xterm.js before the `Resized` to 120 and the replacement paint that follows it.
 - Spaces aren't a backend concept: the daemon derives them from `TermInfo.cwd` (see Core concepts).
 
@@ -285,11 +290,11 @@ pub trait Attachment: Send {
 
 **How the herdr-core adapter builds an attachment: a pair of viewers.**
 
-- **A display viewer** (`observe`, `resize_notifications` requested). Its stream is the attachment's `Data`, and its RESIZE frames become `Resized` events, each followed by the replacement paint. These are the only correct resize boundaries herdr-core offers.
-- **An input viewer** (active). It carries `write`, `resize`, `focus` and `set_display`. Its own output is credited as it arrives and discarded, so it never enters the replay log.
-- **Both halves are supervised together.** If either fails, the adapter replaces both and starts a new epoch.
-- **Re-creation uses current state.** The input viewer is re-opened with the latest requested size and display, with `resumed: true` so it doesn't take the PTY size until the panel is active again.
-- **Cost:** two core connections per attached panel.
+- **A display viewer** (`observe`, `resize_notifications` requested *and confirmed* in the attach reply). Its stream is the attachment's `Data`, and its RESIZE frames become `Resized` events, each followed by the replacement paint. These are the only correct resize boundaries herdr-core offers. If the reply doesn't confirm `resize_notifications`, the attachment reports `ordered_resizes() == false` and the panel shows a warning.
+- **An input viewer** (active), only for attachments that may type: a watch-only attachment (`observe`) has no input half at all. It carries `write`, `write_automatic` (AUTOMATIC_INPUT, when both `hello` and the attach reply confirm `automatic_input`), `resize`, `focus` and `set_display`. Its own output is credited on its own budget as it arrives and discarded; it never enters the replay log, and the client's credit for the display stream never reaches it.
+- **Opening a pair never moves ownership.** The input viewer always opens with `resumed: true`, so attaching takes no size, whether the attachment is new or re-created. The adapter opens the display half first, then the input half, and emits `Started` only when both are ready. A failure halfway tears down whatever opened. Size and display updates requested while a pair is opening are applied once it's ready, in order. Only after that, and only if the daemon confirms the attachment holds the current ownership generation, does it send FOCUS or RESIZE. A non-owner's size and display requests are stored, not forwarded.
+- **Both halves are supervised together.** If either fails, the adapter replaces both, re-created from the latest requested size and display, and emits a new `Started`. An attachment that owned the terminal gets ownership back deliberately, once the new pair is ready, not by whichever panel happens to type or reconnect first.
+- **Cost:** two core connections per attached panel that may type; one for a watch-only panel.
 
 The pair goes back to one viewer if herdr-core grants ordered resizes to active viewers too.
 
@@ -299,13 +304,13 @@ The daemon talks only to its own host's herdr-core, and uses only that host's te
 
 Each client panel gets its own backend attachment, and the daemon relays that attachment's stream as opaque bytes. There is no shared per-terminal stream: each viewer gets its own first paint and replacement paints, so one viewer's bytes are never replay history for another.
 
-- **One ordered event log per attachment.** The daemon relays every `AttachEvent` (`Data`, `Resized`, `Facts`, `Resynced`, `Closed`, `Lost`) in one sequence, each carrying a cursor `(attachment ID, epoch, seq)`. A `Data` chunk split across frames keeps one `seq` per frame, in order. The epoch changes whenever the attachment is replaced (daemon restart, backend loss, re-attach), so a reset is never mistaken for a continuation.
+- **One ordered event log per attachment.** The daemon relays every `AttachEvent` (`Started`, `Data`, `Resized`, `Facts`, `Resynced`, `Closed`, `Lost`) in one sequence, each carrying a cursor `(attachment ID, epoch, seq)`. A `Data` chunk split across frames keeps one `seq` per frame, in order. The epoch changes on every `Started` and whenever the daemon itself restarts, so a reset is never mistaken for a continuation. The first event of every epoch tells the client to discard its xterm.js and start a new instance with that epoch's size.
 - The client acknowledges the last event it has **applied** to xterm.js (bytes written, resize done), not the last frame received. Replay starts after that event. The client resizes its xterm.js when it applies a `Resized` event from the log, never ahead of it, so replay matches what the live client did.
 - If the client's connection drops, it reconnects and resumes from its last acknowledged cursor. The daemon keeps the attachment open for a grace period (about 30 s) and replays the event log from a bounded per-attachment buffer (about 4 MB), or answers `Gap`. Replay carries resizes and facts in their original places, never bytes alone. On `Gap` the client discards its xterm.js parser and screen state (a new instance, not `clear()`) and attaches again, getting a fresh first paint.
 - **The resume cursor belongs to the client's xterm state.** The client resumes from its own last-applied cursor, kept with that xterm.js instance, not from the last acknowledgement the daemon happened to receive (an acknowledgement can be lost). A client that has lost its xterm state (a webview reload, a restarted app) has no cursor to resume from, and attaches fresh.
-- Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer and herdr-core hasn't resynced; after a `Gap` or a resync, only state is restored. Continuous Combine sequence numbers don't prove continuous backend output.
+- Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer and the backend hasn't superseded output. herdr-core supersedes it in two places: a resync after a viewer falls behind, and a resize, where output still pending for the display viewer is replaced by the RESIZE and its paint. After a `Gap`, a resync, or a resize, only state is guaranteed. Continuous Combine sequence numbers don't prove continuous backend output.
 - **Backpressure:** the daemon grants herdr-core CREDIT only while the attachment's log has room, so a slow client never makes the daemon buffer without bound. herdr-core doesn't stall the program in return: past its own ~4 MiB per viewer it drops the backlog and repaints in-band. Combine accepts that as the slow-client path (the screen ends right; the skipped output is gone). It shows "output skipped" only when the backend reports `Resynced`; matching `CAN ESC [ ! p` in the bytes would be a guess, since program output can contain it and frames can split it. M0's 50 MB burst into an xterm.js client hit this 11 times.
-- **Every append is bounded**, whatever its kind: the log caps retained bytes and event count, so a client that stops reading while resizes keep coming still hits the cap. Control and input queues per connection are bounded too. Overflow is a `Gap` in order, never a dropped or reordered event.
+- **Every append is bounded**, whatever its kind: the log caps retained bytes and event count, so a client that stops reading while resizes keep coming still hits the cap. Control and input queues per connection are bounded too. Overflow is a `Gap` in order, never a dropped or reordered event. The log always keeps room for that final `Gap`; after it the attachment's stream stops, and resuming from before it fails rather than replaying a partial log. A peer too blocked to receive even the `Gap` is disconnected under a bounded policy. The bound counts credit already granted to the backend and bytes in flight, not only what the log holds.
 
 **Where the first paint comes from (M0 go/no-go)**
 
@@ -318,7 +323,7 @@ herdr-core keeps each terminal's screen and sends it as the first paint of every
 | State | Effect after a fresh attach | Decision |
 | --- | --- | --- |
 | DECSC saved cursor | A program that restores its cursor before its next full redraw writes at the top-left and overwrites text there | Requested from herdr-core; until then, known limitation |
-| DECSCUSR cursor shape | A block cursor where vim showed a bar, until the program sets it again | Accepted |
+| DECSCUSR cursor shape | The default cursor shape instead of the program's (M0: a steady underline came back as the default), until the program sets it again | Accepted |
 | Soft-wrap flags | Copying a long wrapped line gives line breaks; reflow on resize treats wrapped rows as separate lines | Accepted |
 | OSC 8 links on cells already written | Existing links stop being links; a link still open keeps applying to new text | Accepted |
 | OSC 4 palette and OSC 10/11 colours set by the program | The panel shows its own colours | Accepted |
@@ -338,7 +343,7 @@ herdr-core already arbitrates between viewers: the last active viewer to attach,
 - The daemon decides ownership per terminal and keeps an ownership generation. A keystroke from a non-owner first asks for ownership; the daemon grants it, bumps the generation, notifies all attachments, and only then forwards the input.
 - `resize` messages carry the sender's generation; the daemon rejects any from an older generation, so stale resizes can't fight the owner.
 - When the owner detaches or its connection drops, ownership passes to the attachment that most recently had focus, or none. With no active viewer left, herdr-core returns the PTY to its headless size (default 200x120), and the program redraws for it; the next owner's size applies when it becomes active.
-- **Terminal query replies:** herdr-core answers most queries itself, using the display of the most recently active viewer, and strips them from the stream. Clients report their xterm.js colours and cell size through `set_display`. For the queries herdr-core leaves to viewers, its protocol has AUTOMATIC_INPUT (kind 6): reply bytes that reach the program without taking size or ownership. Only the **owner's** client forwards xterm.js's automatic replies, as AUTOMATIC_INPUT through its input viewer, and only when both `hello.features` and the attach reply confirm `automatic_input`. Other attachments drop theirs, since herdr-core passes duplicates from several viewers straight to the program. In practice that covers DECXCPR (`CSI ? 6 n`); xterm.js doesn't answer the other six, which stay a known limitation: a program that waits for one stalls until its own timeout. OSC 52 clipboard reads stay unanswered on purpose.
+- **Terminal query replies:** herdr-core answers most queries itself, using the display of the most recently active viewer, and strips them from the stream. Clients report their xterm.js colours and cell size through `set_display`. For the queries herdr-core leaves to viewers, its protocol has AUTOMATIC_INPUT (kind 6): reply bytes that reach the program without taking size or ownership. Only the **owner's** client forwards xterm.js's automatic replies, through `write_automatic` (AUTOMATIC_INPUT in herdr-core), never as typed input, so a reply never takes ownership or size. Each reply carries the epoch and ownership generation it was produced under, and the daemon drops one that doesn't match the current ones. A client never forwards replies produced while it applies replayed events. Other attachments drop theirs, since herdr-core passes duplicates from several viewers straight to the program. An `hc attach` outside Combine may answer too; a duplicate reply in that case is accepted. If a backend reports that it answers a query itself, clients don't. In practice that covers DECXCPR (`CSI ? 6 n`); xterm.js doesn't answer the other six, which stay a known limitation: a program that waits for one stalls until its own timeout. OSC 52 clipboard reads stay unanswered on purpose.
 - `hc attach` from an ordinary terminal is another herdr-core viewer, outside Combine; herdr-core arbitrates between it and Combine's attachments. M0 tested both working together.
 
 **Rules for adapters**
@@ -356,7 +361,10 @@ herdr-core already arbitrates between viewers: the last active viewer to attach,
   - **old-size output still in flight when a resize is requested** (delayed between backend and daemon), which must land before the `Resized` boundary;
   - two attachments on one terminal asking for different sizes and displays: each operation is routed to the attachment that sent it, both end showing the PTY's size, and a reconnected attachment reapplies its latest requested size, not its original one;
   - attaching to a full-screen program started before the daemon; restarting the daemon while it runs and attaching again; a backend restart; a backend crash (`Inexact`);
-  - a slow client: the daemon's memory stays bounded for data **and** events (a resize flood while not reading);
+  - a slow client: the daemon's memory stays bounded for data **and** events (a resize flood while not reading), and the final `Gap` always arrives;
+  - pair lifecycle: only the input half fails, only the display half fails, a pair fails halfway through opening; each ends in exactly one new `Started` and epoch, with no late event from the old generation;
+  - ownership: a second panel that merely opens doesn't change the PTY size; a watch-only panel never does; ownership changes while a pair is reopening;
+  - query replies: one reply per query from the owner only, none from replay, and a stale-generation reply dropped;
   - a mutation check: a variant that drops or moves a `Resized` event, or a byte, must fail the suite.
 
   Each test exits non-zero on failure and records the revision it ran against.
@@ -431,7 +439,7 @@ Lifetime is separate from content: a pinned diagram is persistent static content
 **Terminal panel behavior**
 
 - The header shows terminal name, state, host and backend, and marks whether this panel holds input ownership; a dropdown switches terminals without leaving the panel.
-- Output streams only while visible. On show, the panel attaches and writes the stream into a cleared xterm.js: the first paint, then live bytes.
+- Output streams only while visible. On show, the panel either resumes into the xterm.js instance it kept (a valid resume within the grace period), or creates a new instance and attaches fresh: the first paint, then live bytes. Every new epoch gets a new instance, never a `clear()` of the old one.
 - Keyboard input goes straight to the terminal when focused; app shortcuts use Cmd so they don't clash with the shell.
 - Resizing the tile resizes the PTY only when this attachment holds ownership; otherwise the panel letterboxes at the owner's size.
 
