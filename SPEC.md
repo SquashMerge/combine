@@ -1,6 +1,6 @@
-# Combine — Spec (rev 11)
+# Combine — Spec (rev 12)
 
-Updated 2026-11-20
+Updated 2026-11-21
 
 Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 11 (S5, client shell):** the client's `hosts.json` schema and location; two entries never share a host ID; how the client trims daemon text and `ssh` stderr before showing them; reconnect backoff, and which failures stop reconnecting; host state reaches the webview as `hosts-changed` snapshots; every unsigned 64-bit value crosses the Tauri boundary as a decimal string.
 
 **Changes from rev 10 (S1, wire protocol):** the wire protocol is pinned down: big-endian frames capped at 1 MiB with four frame kinds, so typed input and automatic replies are binary, never JSON; memory per decoded control frame bounded by a constant factor of the cap; a `hello`/`welcome` handshake with an integer version; every control message and its fields; which messages travel in an attachment's ordered stream; `gap` answers a resume that can't be served; `replay_through` is `null` when there's nothing to replay; ownership notifications; error codes; and the client's `ack` is its only flow-control signal.
 
@@ -83,11 +85,11 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - **Frames:** at most 1 MiB (2^20 bytes) each, counting the kind byte and the payload; larger terminal output is split. Replies and control messages are queued ahead of terminal output, and output from several attachments is interleaved round-robin, so a noisy terminal can't delay control messages or other terminals. Priority never reorders one attachment's events relative to each other: its data, resizes and other events, and the in-order `gap` that ends them, travel in one ordered stream (see Attach, sequence and epoch).
 - SSH provides authentication (the user's keys and agent), encryption, and server identity (`known_hosts`). Using the system `ssh` means `~/.ssh/config`, `ProxyJump`, and Tailscale SSH all work without app support.
 - The client checks that the host ID reported over the bridge matches the one it stored for that host, so a changed address can't silently point the rail at a different machine.
-- **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client.
+- **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client, trimmed the same way as daemon text (see Wire protocol, Handshake).
 - **Failures are reported, never worked around:** an unknown or changed host key, a key whose passphrase isn't in the agent, or failed authentication each stop the connection with a message saying what to run in a terminal (`ssh <dest>` once, or `ssh-add`). Host-key checking is never disabled.
 - **Remote binary:** non-interactive SSH often lacks Homebrew's `PATH`, so each host entry stores the absolute path to `combined` (default `/opt/homebrew/bin/combined`). A missing binary shows an install hint. M0 confirmed it: a bare command name fails over `ssh -T` (exit 127), and `~/.local/bin`, where `hc` lives, isn't on that `PATH` either.
 - **Finding herdr-core:** the daemon connects to herdr-core's local socket directly, never through `hc`. As a launchd agent it starts with a minimal environment, so the socket path (herdr-core's default `~/.local/state/herdr-core/default/default.sock`, or what `HC_SESSION`, `HC_SOCKET` and the XDG paths select) is daemon configuration, checked at start.
-- Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attachment from its last applied cursor (see Attach, sequence and epoch).
+- Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attachment from its last applied cursor (see Attach, sequence and epoch). The backoff starts at 1 s, doubles to at most 30 s, and resets after a successful handshake. The failures above (host key, passphrase, authentication, missing binary), a host ID mismatch or a host ID another entry already has, a refused or malformed handshake and a `version_mismatch` stop reconnecting: the host shows the message until the user retries it.
 - Latency budget: keystroke echo should stay under about 30 ms on a local network. M0 measured p99 at 0.5 ms or less locally, through the daemon and over ssh to localhost (input to echo received, before xterm.js applies it). The local-network measurement is part of M1.
 
 **Wire protocol** (`crates/combine-protocol`, protocol version 1)
@@ -116,7 +118,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   - Any change an older peer can't safely ignore bumps it: a new message type, frame kind or enum value, or a changed or removed field. A new optional field doesn't.
   - The daemon accepts only its own version, with no negotiation.
   - The frame header, `hello`, `welcome` and the `version_mismatch` error never change, so any two versions can tell each other they differ.
-- **Handshake:** the client's first frame is `hello { protocol_version }`. The daemon answers `welcome { protocol_version, host_id }`. If the versions differ, it instead sends `error` with code `version_mismatch` and the message `protocol version mismatch: client <c>, daemon <d>`, then closes.
+- **Handshake:** the client's first frame is `hello { protocol_version }`. The daemon answers `welcome { protocol_version, host_id }`. If the versions differ, it instead sends `error` with code `version_mismatch` and the message `protocol version mismatch: client <c>, daemon <d>`, then closes. A client never shows the daemon's text raw. Before showing daemon text, or captured `ssh` stderr, it turns control characters and the bidirectional formatting characters U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069 into spaces, collapses each run of whitespace into one space, trims both ends, and cuts the result after 256 characters, marking the cut with `…`. The client's own message, which says what happened and what to do, is shown whole, with that trimmed text beside it. A `version_mismatch` error is shown as `protocol version mismatch: client <c>, daemon <d>`, with both numbers taken from its message; if they can't be read, the daemon's version shows as `unknown`.
 - **Client to daemon:**
   - `attach { request, terminal, options }` is a fresh attach. Its options are `cols`, `rows`, `display`, `observe` and `history`; `resume` takes the place of the trait's `resumed`.
   - `resume { request, cursor }`
@@ -257,6 +259,7 @@ No database: every panel is a directory of plain files on the space's host, so a
 - **Safe writes:** temp file and rename, debounced about 500 ms on layout changes, immediate on space switch and quit.
 - **Scratch panels** survive space switches and daemon restarts; they are deleted when closed, or after 7 days unopened.
 - **Versioning:** every JSON file has a `version` field for later migrations.
+- **`hosts.json` (client):** `<client data>` is the app's data directory, `~/Library/Application Support/com.squashmerge.combine/` on macOS. The file is `{ "version": 1, "hosts": [...] }`; the array order is the rail order. Each entry has a unique `name` (the rail section title) and exactly one of `ssh` (an SSH destination) or `socket` (the absolute path of this machine's daemon socket, never a herdr-core socket). An `ssh` entry may set `combined_path`, the absolute path of `combined` on that host (default `/opt/homebrew/bin/combined`). `host_id` is absent until first contact; the client then records the daemon's host ID with a safe write and never rewrites it. Unknown fields, a duplicate `name` or `host_id`, or a `version` other than 1 make the file invalid: the client shows the error, connects to nothing and never writes it. If a host reports a host ID another entry already has, the client refuses it, so two entries never reach one machine. A missing file means no hosts. The client writes the file only to record a first-contact host ID, and not if it changed on disk since the client loaded it.
 
 ## Navigation
 
@@ -638,6 +641,7 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 **Streaming**
 
 - Control calls (attaching, resizing, ownership requests, spawning, panel CRUD) are JSON control frames on the host connection, and typed input (`write`) and automatic query replies (`write_automatic`) are binary frames, never JSON (see Wire protocol). Inside the client, control calls and input become Tauri commands.
+- Host and connection state reach the webview as `hosts-changed` events, each a full snapshot with a revision; the webview keeps the newest. Every unsigned 64-bit value (attachment IDs, epochs, seqs, generations, request IDs, cursors) crosses the Tauri boundary as a decimal string, never a JSON number, and TypeScript keeps it as a string (`DecimalU64`), using `BigInt` only to compare or compute. The wire format is unchanged.
 - Terminal output is batched in the daemon and flushed about once per display frame (16 ms) as sequence-numbered data frames, one event per wire frame, then handed to xterm.js over Tauri 2 `Channel`s, not `emit` events.
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
