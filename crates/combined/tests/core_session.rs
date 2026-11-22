@@ -844,6 +844,48 @@ fn a_refused_command_that_overflows_the_queue_drops_the_connection() {
 }
 
 #[test]
+fn hand_off_skips_members_on_connections_marked_for_disconnect() {
+    let config = CoreConfig {
+        max_control_messages: 3,
+        ..CoreConfig::default()
+    };
+    let mut rig = Rig::with(config, caps());
+    let (x, y, z) = (rig.core.connect(), rig.core.connect(), rig.core.connect());
+    let a = rig.open(x, 1, false);
+    let b = rig.open(y, 1, false);
+    let c = rig.open(z, 1, false);
+    rig.focus(z, c);
+    rig.focus(y, b);
+    rig.effects();
+    let bad = || {
+        ClientMessage::Attach(Attach {
+            request: RequestId(9),
+            terminal: term(1),
+            options: request_options(0, 0, false),
+        })
+    };
+    for _ in 0..3 {
+        rig.send(x, bad());
+        rig.send(y, bad());
+    }
+    assert!(rig.effects().is_empty());
+
+    rig.request_ownership(x, a);
+
+    assert_eq!(rig.owner(1), Some(c));
+    let effects = rig.effects();
+    assert!(effects.contains(&Effect::Disconnect(x)));
+    assert!(effects.contains(&Effect::Disconnect(y)));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Backend(command) if command.attachment() == b
+        )),
+        "{effects:?}"
+    );
+}
+
+#[test]
 fn overflow_during_announce_never_leaves_a_stale_owner() {
     let config = CoreConfig {
         max_control_messages: 3,

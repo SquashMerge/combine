@@ -73,44 +73,50 @@ impl TerminalOwnership {
     }
 
     /// Marks whether the member may own. Becoming eligible never grants ownership; becoming
-    /// ineligible while owning hands the terminal off.
+    /// ineligible while owning hands the terminal off, skipping members `leaving` names.
     pub fn set_eligible(
         &mut self,
         id: AttachmentId,
         eligible: bool,
+        leaving: &dyn Fn(AttachmentId) -> bool,
         next: &mut dyn FnMut() -> OwnershipGeneration,
     ) -> Option<OwnershipChange> {
         self.members.get_mut(&id)?.eligible = eligible;
         if eligible || self.state.owner != Some(id) {
             return None;
         }
-        Some(self.hand_off(id, next))
+        Some(self.hand_off(id, leaving, next))
     }
 
-    /// Removes the member, handing the terminal off if it owned it.
+    /// Removes the member, handing the terminal off if it owned it, skipping members `leaving`
+    /// names.
     pub fn leave(
         &mut self,
         id: AttachmentId,
+        leaving: &dyn Fn(AttachmentId) -> bool,
         next: &mut dyn FnMut() -> OwnershipGeneration,
     ) -> Option<OwnershipChange> {
         self.members.remove(&id)?;
         if self.state.owner != Some(id) {
             return None;
         }
-        Some(self.hand_off(id, next))
+        Some(self.hand_off(id, leaving, next))
     }
 
-    /// Passes ownership from `leaving` to the most recently focused member that may type, or to
-    /// nobody.
+    /// Passes ownership from `from` to the most recently focused member that may type and that
+    /// `leaving` doesn't name, or to nobody.
     fn hand_off(
         &mut self,
-        leaving: AttachmentId,
+        from: AttachmentId,
+        leaving: &dyn Fn(AttachmentId) -> bool,
         next: &mut dyn FnMut() -> OwnershipGeneration,
     ) -> OwnershipChange {
         let heir = self
             .members
             .iter()
-            .filter(|(id, member)| **id != leaving && member.eligible && !member.watch_only)
+            .filter(|(id, member)| {
+                **id != from && member.eligible && !member.watch_only && !leaving(**id)
+            })
             .filter_map(|(id, member)| member.focus_order.map(|order| (order, *id)))
             .max()
             .map(|(_, id)| id);

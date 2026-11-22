@@ -98,6 +98,19 @@ fn take(counter: &mut u64) -> u64 {
     value
 }
 
+/// Whether the attachment's connection is marked for an overflow disconnect, so a hand-off
+/// must not pick it.
+fn marked(
+    attachments: &BTreeMap<AttachmentId, Attachment>,
+    overflowed: &BTreeSet<ConnectionId>,
+    id: AttachmentId,
+) -> bool {
+    attachments
+        .get(&id)
+        .and_then(|a| a.connection)
+        .is_some_and(|connection| overflowed.contains(&connection))
+}
+
 fn error(
     code: ErrorCode,
     message: &str,
@@ -1012,7 +1025,12 @@ impl Core {
             return;
         };
         let next_id = &mut self.next_id;
-        let change = ownership.leave(id, &mut || OwnershipGeneration(take(next_id)));
+        let (attachments, overflowed) = (&self.attachments, &self.overflowed);
+        let change = ownership.leave(
+            id,
+            &|member| marked(attachments, overflowed, member),
+            &mut || OwnershipGeneration(take(next_id)),
+        );
         if ownership.is_empty() {
             self.ownerships.remove(&key.0);
         }
@@ -1052,8 +1070,13 @@ impl Core {
             return;
         };
         let next_id = &mut self.next_id;
-        let change =
-            ownership.set_eligible(id, eligible, &mut || OwnershipGeneration(take(next_id)));
+        let (attachments, overflowed) = (&self.attachments, &self.overflowed);
+        let change = ownership.set_eligible(
+            id,
+            eligible,
+            &|member| marked(attachments, overflowed, member),
+            &mut || OwnershipGeneration(take(next_id)),
+        );
         if let Some(change) = change {
             self.announce(&key, change);
         }
