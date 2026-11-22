@@ -987,6 +987,110 @@ class GuardTest(unittest.TestCase):
         with mock.patch.object(check, "lex_js", blind):
             self._check_expression_cases(tsx_only=True)
 
+    # --- escaped spellings and generic calls (opencode review 17)
+
+    ESCAPED = {
+        "require": (
+            "require", r"\u0072equire", r"req\u0075ire", r"requir\u0065",
+            r"\u0072eq\u0075ir\u0065", r"r\u{65}quire", r"\u{72}\u{65}\u{71}uire",
+        ),
+        "import": (
+            "import", r"\u0069mport", r"im\u0070ort", r"impor\u0074",
+            r"\u0069mp\u006frt", r"\u{69}mport", r"\u{69}\u{6d}\u{70}ort",
+        ),
+    }
+    PLACEMENTS = (
+        ("child", "export const a = <p>{{{c}}}{{1}}</p>;", "tsx"),
+        ("attr", "export const a = <p a={{{c}}} b={{1}} />;", "tsx"),
+        ("jsx-spread", "export const a = <p>{{({{...{c}}})}}</p>;", "tsx"),
+        ("plain", "export const a = [{c}, 1];", "tsx"),
+        ("plain", "export const a = [{c}, 1];", "ts"),
+        ("spread", "export const a = ({{...{c}}});", "ts"),
+    )
+
+    def _escape_cases(self):
+        for kw, spellings in self.ESCAPED.items():
+            for spelling in spellings:
+                for suffix, tag in (("", "call"), ("<any>", "generic"), ("<Array<string>>", "nested-generic")):
+                    for spec, rule in self.SPECS:
+                        call = f"{spelling}{suffix}({spec})"
+                        for place, shape, ext in self.PLACEMENTS:
+                            yield f"{kw}/{spelling}/{tag}/{place}/{rule}", shape.format(c=call), ext, rule
+
+    def _check_escape_cases(self, tsx_only=False):
+        cfg = check.load_config(CONFIG)
+        count = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in BASE.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            for name, src, ext, rule in self._escape_cases():
+                if tsx_only and ext != "tsx":
+                    continue
+                count += 1
+                found = {v.rule for v in check.check_js_file(f"app/web/src/shell/Probe.{ext}", src, cfg, root)}
+                with self.subTest(case=name, ext=ext):
+                    self.assertTrue(found, f"clean: {src!r}")
+                    self.assertTrue(found <= {rule, "guard-parse"}, (found, src))
+        return count
+
+    def test_escaped_and_generic_calls_are_never_clean(self):
+        self.assertEqual(self._check_escape_cases(), 2 * 7 * 3 * 3 * 6)
+
+    def test_generic_call_reports_the_load_itself(self):
+        for src, rule in (
+            ("export const a = <p>{require<any>('@tauri-apps/api/core')}</p>;\n", "tauri-only-in-ipc"),
+            ("export const a = <p>{require('@tauri-apps/api/core')}</p>;\n", "tauri-only-in-ipc"),
+            ("export const a = <p>{r\\u0065quire<any>('../../test/support/snapshots')}</p>;\n",
+             "no-production-dependency-on-non-production"),
+        ):
+            with self.subTest(src=src):
+                self._tsx(src, rule)
+
+    def test_fully_typed_generic_require_is_flagged(self):
+        src = """\
+        declare function require<T>(id: string): T;
+        declare namespace JSX { interface IntrinsicElements { p: object } interface Element {} }
+        export const a = <p>{require<any>('@tauri-apps/api/core')}</p>;
+        """
+        found = self.guard({self.PROBE: src})
+        self.assertTrue(found and found <= {("tauri-only-in-ipc", self.PROBE), ("guard-parse", self.PROBE)}, found)
+
+    def test_unbalanced_type_arguments_fail_closed(self):
+        for ext in ("ts", "tsx"):
+            with self.subTest(ext=ext):
+                src = "declare const x: number;\nexport const a = require < x;\n"
+                self.assertFlags({f"app/web/src/shell/Probe.{ext}": src}, ("guard-parse", f"app/web/src/shell/Probe.{ext}"))
+
+    def test_ts_keeps_its_non_load_forms(self):
+        src = """\
+        declare const o: any;
+        export const a = o.import, b = o?.require, c = import.meta, d = { import: 1, require: 2 };
+        export function require2() {}
+        declare function require(id: string): void;
+        import fs = require('node:fs');
+        export const m = { import(x: string) { return x; } };
+        """
+        self.assertFlags({"app/web/src/shell/probe.ts": src})
+
+    def test_escaped_and_generic_calls_with_a_blind_reader(self):
+        real = check.lex_js
+
+        def blind(src, jsx=False):
+            out = []
+            for t in real(src, jsx=jsx):
+                if t.kind == "ident":
+                    raw = check._J_IDENT.match(src, t.start)
+                    t = check.Tok("ident", raw.group(0) if raw else t.text, t.start)
+                out.append(t)
+            return out
+
+        with mock.patch.object(check, "lex_js", blind), mock.patch.object(
+            check, "_type_args_end", lambda toks, k: len(toks)
+        ):
+            self._check_escape_cases(tsx_only=True)
+
     def test_member_access_named_import_fails_closed_in_tsx(self):
         src = "declare const o: any;\nexport const a = o.import('x');\n"
         self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))

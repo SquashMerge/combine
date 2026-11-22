@@ -1027,11 +1027,33 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
     return toks
 
 
+def _type_args_end(toks: list[Tok], k: int) -> int:
+    """toks[k] is the `<` of a TypeScript type-argument list; the index after its
+    matching `>`. An unbalanced list raises `LexError`, so it fails closed."""
+    depth = 0
+    for j in range(k, len(toks)):
+        t = toks[j]
+        if t.kind == "punct" and t.text == "<":
+            depth += 1
+        elif t.kind == "punct" and t.text == ">":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    raise LexError(toks[k].start, "unbalanced type arguments after import or require")
+
+
 def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
     """(offset, kind, specifier) for each module load. kind is "literal", "computed"
     (an `import()`/`require()` argument that isn't a literal) or "unsupported" (an
     `import`/`export ... from` declaration this grammar doesn't follow)."""
+    return _read_loads(toks)[0]
+
+
+def _read_loads(toks: list[Tok]) -> tuple[list[tuple[int, str, str | None]], set[int]]:
+    """The loads, and the offsets of `import(`/`require(` shapes skipped as method
+    definitions."""
     out: list[tuple[int, str, str | None]] = []
+    methods: set[int] = set()
     n = len(toks)
 
     def tok(k: int) -> Tok:
@@ -1051,6 +1073,10 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
         call = None
         if t.text in ("import", "require") and nxt.is_("punct", "("):
             call = i + 1
+        elif t.text in ("import", "require") and nxt.is_("punct", "<"):
+            end = _type_args_end(toks, i + 1)  # `require<any>("x")`
+            if tok(end).is_("punct", "("):
+                call = end
         elif t.text == "require" and nxt.is_("punct", "?.") and tok(i + 2).is_("punct", "("):
             call = i + 2  # require?.("x")
         if call is not None:
@@ -1058,6 +1084,7 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
             member_head = prev is None or (prev.kind == "punct" and prev.text in ("{", "}", ";", ",", "*")) or (
                 prev.kind == "ident" and prev.text in _METHOD_PREFIXES)
             if after_args.is_("punct", "{") or (after_args.is_("punct", ":") and member_head):
+                methods.add(t.start)
                 continue  # a method definition: import(value) { ... }
             arg, after = tok(call + 1), tok(call + 2)
             if arg.kind in ("str", "template") and after.kind == "punct" and after.text in (")", ","):
@@ -1100,7 +1127,7 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
             out.append((t.start, "literal", tok(j + 1).text))
         elif t.text == "import" or star:
             out.append((t.start, "unsupported", None))
-    return out
+    return out, methods
 
 
 def js_package(spec: str) -> str:
@@ -1109,8 +1136,45 @@ def js_package(spec: str) -> str:
 
 
 _GAP = r"(?:\s|/\*[\s\S]*?\*/|//[^\n\r]*)*"  # whitespace and comments
-_RAW_KEYWORD = re.compile(r"(?<![\w$])(?:import|require)(?![\w$])")
+_RAW_IDENT = re.compile(rf"(?:[\w$]|{_J_UESC})+")
 _RAW_FROM = re.compile(r"(?<![\w$.])from(?![\w$])" + _GAP + r"['\"`]")
+
+
+_LOAD_WORDS = ("import", "require")
+
+
+def keyword_idents_are_loads(toks: list[Tok], loads: list[tuple[int, str, str | None]],
+                             methods: set[int], jsx: bool) -> None:
+    """Every identifier token whose decoded value is `import` or `require` must be part
+    of a reported load. In `.ts` files a few forms that are not loads stay allowed: member
+    access after one `.` or `?.`, `function require() {}`, `import.meta`, a key or label
+    (`import:`), `import x = require(...)` and a method definition the reader skipped.
+    In `.tsx` files there are none. Anything else raises `LexError`, which the caller
+    reports as `guard-parse`, so an `import` or `require` the reader doesn't understand
+    (escaped, generic or otherwise) can't pass silently."""
+    loaded = {offset for offset, _, _ in loads}
+    n = len(toks)
+    for k, t in enumerate(toks):
+        if t.kind != "ident" or t.text not in _LOAD_WORDS or t.start in loaded:
+            continue
+        if not jsx:
+            prev = toks[k - 1] if k else None
+            nxt = toks[k + 1] if k + 1 < n else None
+            if prev is not None and (
+                (prev.kind == "punct" and prev.text in (".", "?.")) or prev.is_("ident", "function")
+            ):
+                continue
+            if nxt is not None and nxt.kind == "punct" and nxt.text in (".", ":"):
+                continue
+            if t.start in methods:
+                continue
+            j = k + 1
+            if t.text == "import":
+                if j < n and toks[j].is_("ident", "type") and j + 1 < n and toks[j + 1].kind == "ident":
+                    j += 1
+                if j + 1 < n and toks[j].kind == "ident" and toks[j + 1].is_("punct", "="):
+                    continue
+        raise LexError(t.start, f"`{t.text}` here is not read as a load")
 
 
 def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | None]]) -> None:
@@ -1136,8 +1200,11 @@ def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | No
             if toks[j].is_("ident", "from") and j + 1 < len(toks) and toks[j + 1].kind == "str":
                 consumed.add(toks[j].start)
                 break
-    for m in _RAW_KEYWORD.finditer(src):
-        if m.start() not in loaded:
+    for m in _RAW_IDENT.finditer(src):
+        word = m.group(0)
+        if "\\" in word:
+            word = _js_unescape(word)
+        if word in _LOAD_WORDS and m.start() not in loaded:
             raise LexError(m.start(), f"`{m.group(0)}` here is not read as a load; JSX or the lexer hid it")
     for m in _RAW_FROM.finditer(src):
         if m.start() not in consumed:
@@ -1150,12 +1217,13 @@ def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> 
         toks = lex_js(src, jsx=rel.endswith(".tsx"))
     except LexError as e:
         return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
-    loads = js_imports(toks)
-    if rel.endswith(".tsx"):
-        try:
+    try:
+        loads, methods = _read_loads(toks)
+        keyword_idents_are_loads(toks, loads, methods, jsx=rel.endswith(".tsx"))
+        if rel.endswith(".tsx"):
             tsx_backstop(src, toks, loads)
-        except LexError as e:
-            return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
+    except LexError as e:
+        return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
     found: list[Violation] = []
     for offset, kind, spec in loads:
         line = lines.line(offset)
