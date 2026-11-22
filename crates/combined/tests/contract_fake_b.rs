@@ -29,5 +29,6 @@ contract!(
         event_flood_ends_with_a_final_gap_once_drained,
         blocked_client_is_disconnected_and_resume_gets_gap,
         backend_without_byte_credit_is_still_bounded,
+        exit_with_output_waiting_for_credit_still_finishes,
     ]
 );

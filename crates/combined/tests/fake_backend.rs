@@ -790,6 +790,55 @@ fn capabilities_gate_facts_and_automatic_replies() {
 }
 
 #[test]
+fn an_exited_terminal_with_credit_blocked_output_still_finishes() {
+    let (backend, control) = fake(FakeConfig::default());
+    let term = spawn(&backend);
+    let mut att = attach(&backend, &term);
+    let mut events = att.events();
+    drain(&mut events);
+    let allowance = FakeConfig::default().capabilities.initial_credit as usize;
+
+    control.emit(&term, &vec![b'q'; allowance + 1_000]);
+    let before = drain(&mut events);
+    let waiting = control.pending_output(&term);
+    assert!(waiting > 0);
+    assert_eq!(program_output(&before).len() + waiting, allowance + 1_000);
+
+    control.exit(&term, Some(0));
+    let after_exit = drain(&mut events);
+    assert!(after_exit.is_empty());
+    assert!(!has_ended(&mut events));
+    assert_eq!(
+        block_on(att.write(b"late")),
+        Err(BackendError::Closed),
+        "a program that ended takes no input"
+    );
+
+    let half = u32::try_from(waiting / 2).unwrap();
+    block_on(att.credit(half)).unwrap();
+    let first = drain(&mut events);
+    assert_eq!(program_output(&first).len(), waiting / 2);
+    assert!(!first
+        .iter()
+        .any(|(_, e)| matches!(e, AttachEvent::Closed(_))));
+
+    block_on(att.credit(half + 10)).unwrap();
+    let rest = drain(&mut events);
+    assert_eq!(program_output(&rest).len(), waiting - waiting / 2);
+    let closed: Vec<_> = rest
+        .iter()
+        .filter(|(_, e)| matches!(e, AttachEvent::Closed(_)))
+        .collect();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        rest.last(),
+        Some(&(1, AttachEvent::Closed(CloseReason::Exited)))
+    );
+    assert!(has_ended(&mut events));
+    assert_eq!(block_on(att.credit(1)), Err(BackendError::Closed));
+}
+
+#[test]
 fn an_automatic_write_for_another_generation_is_dropped() {
     let (backend, control) = fake(FakeConfig::default());
     let term = spawn(&backend);

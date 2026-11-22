@@ -1,7 +1,7 @@
-//! Cases 22-28: a client that reads slowly, or not at all, never makes the daemon's memory
+//! Cases 22-28 and 44: a client that reads slowly, or not at all, never makes the daemon's memory
 //! grow past its bounds, and a stream that does overflow ends cleanly.
 
-use combine_protocol::{AttachmentId, ClientMessage, Resume, TermId};
+use combine_protocol::{AttachmentId, ClientMessage, CloseReason, Resume, TermId};
 use combined::core::{BackendCommand, CoreConfig, LogEnd, LogStats};
 use futures::FutureExt;
 
@@ -58,6 +58,12 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
             needs: &[Fault::NoByteCredit],
             heavy: false,
             run: |t| backend_without_byte_credit_is_still_bounded(t).boxed_local(),
+        },
+        Case {
+            name: "exit_with_output_waiting_for_credit_still_finishes",
+            needs: &[],
+            heavy: false,
+            run: |t| exit_with_output_waiting_for_credit_still_finishes(t).boxed_local(),
         },
     ]
 }
@@ -437,6 +443,52 @@ pub async fn backend_without_byte_credit_is_still_bounded<T: Target>(t: &mut T) 
         stats.ended == Some(LogEnd::Gap),
         "output beyond the log's bounds should end it with a gap; it ended {:?}",
         stats.ended
+    );
+    h.finish(&[&c])
+}
+
+/// Case 44: the program exits while the client has not yet taken its output, so output is
+/// still waiting for byte credit. Once the client reads again, all of it arrives, then exactly
+/// one `Closed(Exited)` and no more.
+pub async fn exit_with_output_waiting_for_credit_still_finishes<T: Target>(t: &mut T) -> Outcome {
+    let mut h = Harness::new(t, Harness::<T>::small_caps())?;
+    let term = h.spawn("p", 80, 24).await?;
+    let (mut c, att) = marked_client(&mut h, &term).await?;
+    c.read = ReadPolicy::Paused;
+    c.ack = AckPolicy::Never;
+
+    let payload = Payload::new(44, 1_048_576);
+    for chunk in payload.pieces(PIECE) {
+        h.emit(&term, chunk).await?;
+        h.settle(&mut [&mut c]).await?;
+    }
+    h.driver
+        .backend()
+        .kill(&term)
+        .await
+        .map_err(|error| Failure::new("kill", format!("kill failed: {error}")))?;
+    h.settle(&mut [&mut c]).await?;
+    not_gapped(&stats_of(&h, att)?)?;
+
+    resume_reading(&mut c);
+    h.settle(&mut [&mut c]).await?;
+    let view = view_of(&c, att)?;
+    ensure!(
+        "closed",
+        view.ending == Some(Ending::Closed(CloseReason::Exited)),
+        "the stream should end with Closed(Exited); it ended with {:?}",
+        view.ending
+    );
+    exact(view, &payload)?;
+    let closes = view
+        .transcript
+        .iter()
+        .filter(|item| matches!(item, Applied::Closed(_)))
+        .count();
+    ensure!(
+        "closed-once",
+        closes == 1 && view.transcript.last() == Some(&Applied::Closed(CloseReason::Exited)),
+        "the transcript should end with exactly one Closed(Exited); it has {closes} Closed items"
     );
     h.finish(&[&c])
 }

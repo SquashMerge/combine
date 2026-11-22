@@ -84,6 +84,9 @@ impl Terminal {
 enum State {
     Ready,
     Reopening,
+    /// The program ended. Output waiting for credit still drains, then `Closed(Exited)` and
+    /// the end of the stream follow. It takes no requests but display credit.
+    Draining,
     Closed,
 }
 
@@ -383,11 +386,13 @@ impl World {
         self.terminals[index].active = None;
         for id in self.attachment_ids(&address) {
             let att = self.attachments.get_mut(&id).expect("attachment");
-            if att.state == State::Closed {
+            if matches!(att.state, State::Closed | State::Draining) {
                 continue;
             }
             att.close_halves();
-            att.state = State::Closed;
+            att.state = State::Draining;
+            att.queue.clear();
+            att.queued_input = 0;
             let generation = att.generation;
             att.pipe(generation, AttachEvent::Closed(CloseReason::Exited), false);
             self.deliver(id);
@@ -471,6 +476,9 @@ impl World {
                 }
             }
             att.push_out(generation, item.event);
+        }
+        if att.state == State::Draining && att.pipe.is_empty() {
+            att.state = State::Closed;
         }
     }
 
@@ -701,7 +709,7 @@ impl World {
         if let Some(item) = att.outbox.pop_front() {
             return Some(Some(item));
         }
-        if att.state == State::Closed && att.pipe.is_empty() {
+        if matches!(att.state, State::Closed | State::Draining) && att.pipe.is_empty() {
             return Some(None);
         }
         att.waker = Some(waker.clone());
@@ -712,7 +720,7 @@ impl World {
     fn gate(&self, id: u64) -> BackendResult<Gate> {
         let att = &self.attachments[&id];
         match att.state {
-            State::Closed => Err(BackendError::Closed),
+            State::Closed | State::Draining => Err(BackendError::Closed),
             _ if att.observe => Ok(Gate::Skip),
             State::Reopening => Ok(Gate::Queue),
             State::Ready => Ok(Gate::Apply),
@@ -856,10 +864,11 @@ impl World {
             att: FakeAttachmentRef(att),
             bytes,
         });
-        if self.attachments[&att].state == State::Closed {
+        let state = self.attachments[&att].state;
+        if state == State::Closed {
             return Err(BackendError::Closed);
         }
-        if self.attachments[&att].state == State::Ready && self.config.capabilities.byte_credit {
+        if matches!(state, State::Ready | State::Draining) && self.config.capabilities.byte_credit {
             let entry = self.attachments.get_mut(&att).expect("attachment");
             entry.credit += u64::from(bytes);
             self.deliver(att);
