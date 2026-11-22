@@ -319,6 +319,7 @@ impl Shared {
         if let Some(permits) = permits {
             // `frames_needed` bounds what `Fence::apply` can send for a request, so every
             // frame has a slot.
+            debug_assert!(frames.len() <= permits.len());
             for (permit, bytes) in permits.zip(frames) {
                 permit.send(bytes);
             }
@@ -716,8 +717,10 @@ async fn rebuild(
         };
         match pair::open(&shared.env, &params).await {
             Ok(halves) => {
-                install(shared, &halves);
-                return Some(halves);
+                if install(shared, &halves) {
+                    return Some(halves);
+                }
+                halves.close();
             }
             Err(OpenError::Finished) => {
                 finish(shared, None, Some(AttachEvent::Closed(CloseReason::Exited)));
@@ -732,19 +735,16 @@ async fn rebuild(
 
 /// Swaps in a rebuilt pair under one lock: the next generation, `Started`, the late events a
 /// test asked for, then the queued requests in order. The replay's frames are reserved in the
-/// new writer queue first. If they can't be, the pair is not installed: the queue stays, and
-/// the supervisor rebuilds again.
-fn install(shared: &Shared, halves: &Halves) {
+/// new writer queue first. If they can't be, the pair is not installed and this returns
+/// false: the queue stays, and the caller counts the attempt and tries again.
+fn install(shared: &Shared, halves: &Halves) -> bool {
     let mut state = lock(&shared.state);
     let writers = writers_of(halves);
     let input = writers.input.clone();
     let permits = match &input {
         Some(writer) => match writer.try_reserve_many(state.fence.queued_frames_bound()) {
             Ok(permits) => Some(permits),
-            Err(_) => {
-                let _ = shared.commands.send(Command::Fail);
-                return;
-            }
+            Err(_) => return false,
         },
         None => None,
     };
@@ -785,10 +785,12 @@ fn install(shared: &Shared, halves: &Halves) {
     let frames = shared.frames_of(&state, effects);
     if let Some(permits) = permits {
         // The bound counted at enqueue covers every frame the replay can send.
+        debug_assert!(frames.len() <= permits.len());
         for (permit, bytes) in permits.zip(frames) {
             permit.send(bytes);
         }
     }
+    true
 }
 
 #[async_trait]
@@ -834,6 +836,7 @@ impl Attachment for HerdrCoreAttachment {
                     .env
                     .control
                     .record_automatic(&self.shared.address, bytes);
+                debug_assert!(frames.len() <= permits.len());
                 for (permit, bytes) in permits.zip(frames) {
                     permit.send(bytes);
                 }
@@ -1026,7 +1029,73 @@ mod queue_tests {
     const INPUT_CHANNEL: u32 = 2;
     const QUIET: Duration = Duration::from_millis(400);
 
-    type Core = (ReadHalf<DuplexStream>, WriteHalf<DuplexStream>);
+    /// The core's end of one connection. A task of its own reads whole frames, so a timeout
+    /// on `next` never drops half a frame. It starts only on `resume`, so a test can leave
+    /// the core not reading while the client's writer queue fills.
+    struct Core {
+        frames: mpsc::UnboundedReceiver<Frame>,
+        write: WriteHalf<DuplexStream>,
+        go: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Core {
+        fn new(mut read: ReadHalf<DuplexStream>, write: WriteHalf<DuplexStream>) -> Core {
+            let (tx, frames) = mpsc::unbounded_channel();
+            let (go, wait) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                if wait.await.is_err() {
+                    return;
+                }
+                while let Some(frame) = read_frame(&mut read).await {
+                    if tx.send(frame).is_err() {
+                        return;
+                    }
+                }
+            });
+            Core {
+                frames,
+                write,
+                go: Some(go),
+            }
+        }
+
+        fn resume(&mut self) {
+            if let Some(go) = self.go.take() {
+                let _ = go.send(());
+            }
+        }
+
+        async fn next(&mut self, wait: Duration) -> Option<Frame> {
+            self.resume();
+            tokio::time::timeout(wait, self.frames.recv())
+                .await
+                .ok()
+                .flatten()
+        }
+
+        /// Frames until `done` holds for what has arrived (at most 30 s), then whatever
+        /// else comes before the line is quiet.
+        async fn drain_until(&mut self, done: impl Fn(&[Frame]) -> bool) -> Vec<Frame> {
+            let mut frames = Vec::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while !done(&frames) {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self.next(left).await {
+                    Some(frame) => frames.push(frame),
+                    None => return frames,
+                }
+            }
+            while let Some(frame) = self.next(QUIET).await {
+                frames.push(frame);
+            }
+            frames
+        }
+
+        /// What arrives until the line is quiet.
+        async fn drain(&mut self) -> Vec<Frame> {
+            self.drain_until(|_| true).await
+        }
+    }
 
     fn display(tag: &str) -> Display {
         Display {
@@ -1077,14 +1146,14 @@ mod queue_tests {
             (read, write)
         });
         let (connection, frames) = Connection::from_stream(client).await.expect("open");
-        let core = answer.await.expect("core");
+        let (read, write) = answer.await.expect("core");
         (
             Half {
                 connection,
                 frames,
                 channel,
             },
-            core,
+            Core::new(read, write),
         )
     }
 
@@ -1139,15 +1208,6 @@ mod queue_tests {
         })
     }
 
-    /// Everything the core reads until the line is quiet.
-    async fn drain(read: &mut ReadHalf<DuplexStream>) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        while let Ok(Some(frame)) = tokio::time::timeout(QUIET, read_frame(read)).await {
-            frames.push(frame);
-        }
-        frames
-    }
-
     fn credited(frames: &[Frame]) -> u64 {
         frames
             .iter()
@@ -1156,6 +1216,14 @@ mod queue_tests {
                 let bytes = &frame.payload;
                 u64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
             })
+            .sum()
+    }
+
+    fn typed_len(frames: &[Frame]) -> usize {
+        frames
+            .iter()
+            .filter(|frame| frame.kind == Kind::Data)
+            .map(|frame| frame.payload.len())
             .sum()
     }
 
@@ -1178,22 +1246,23 @@ mod queue_tests {
     /// while it bursts and the writer queue overflows.
     #[tokio::test(flavor = "multi_thread")]
     async fn every_input_half_output_byte_is_credited_back() {
-        let (_attachment, _shared, _display, (mut read, mut write)) = attach(64).await;
+        let (_attachment, _shared, _display, mut input) = attach(64).await;
         let total = WRITER_QUEUE_FRAMES * 3;
         for _ in 0..total {
-            write
+            input
+                .write
                 .write_all(&frame::encode(INPUT_CHANNEL, Kind::Data, b"x"))
                 .await
                 .expect("burst");
         }
         let mut credit = 0u64;
         while credit < total as u64 {
-            match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut read)).await {
-                Ok(Some(frame)) if frame.kind == Kind::Credit => {
+            match input.next(Duration::from_secs(10)).await {
+                Some(frame) if frame.kind == Kind::Credit => {
                     credit += credited(&[frame]);
                 }
-                Ok(Some(_)) => {}
-                _ => break,
+                Some(_) => {}
+                None => break,
             }
         }
         assert_eq!(credit, total as u64, "input-half credit was dropped");
@@ -1202,7 +1271,7 @@ mod queue_tests {
     /// Display credit the daemon grants while the display queue is full is owed, not refused.
     #[tokio::test(flavor = "multi_thread")]
     async fn display_credit_is_never_refused_for_a_full_queue() {
-        let (halves, (mut read, _write), _input) = {
+        let (halves, mut display_core, _input) = {
             let (display_half, display_core) = connect(64, DISPLAY_CHANNEL).await;
             let (input_half, input_core) = connect(65_536, INPUT_CHANNEL).await;
             let halves = Halves {
@@ -1224,9 +1293,9 @@ mod queue_tests {
         }
         let mut credit = 0u64;
         while credit < grants as u64 {
-            match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut read)).await {
-                Ok(Some(frame)) => credit += credited(&[frame]),
-                _ => break,
+            match display_core.next(Duration::from_secs(10)).await {
+                Some(frame) => credit += credited(&[frame]),
+                None => break,
             }
         }
         assert_eq!(credit, grants as u64);
@@ -1237,10 +1306,12 @@ mod queue_tests {
     /// the queue. Some writes span several frames.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_accepted_write_is_never_dropped_while_credit_competes() {
-        let (mut attachment, _shared, _display, (mut read, mut write)) = attach(64).await;
+        let (mut attachment, _shared, _display, input) = attach(64).await;
+        let Core { frames, write, go } = input;
+        let mut flood_write = write;
         let flood = tokio::spawn(async move {
             for _ in 0..WRITER_QUEUE_FRAMES * 2 {
-                if write
+                if flood_write
                     .write_all(&frame::encode(INPUT_CHANNEL, Kind::Data, b"y"))
                     .await
                     .is_err()
@@ -1248,7 +1319,7 @@ mod queue_tests {
                     break;
                 }
             }
-            write
+            flood_write
         });
         let mut accepted = Vec::new();
         let mut refused = 0usize;
@@ -1266,8 +1337,13 @@ mod queue_tests {
                 tokio::task::yield_now().await;
             }
         }
-        let _write = flood.await.expect("flood");
-        let frames = drain(&mut read).await;
+        let mut input = Core {
+            frames,
+            write: flood.await.expect("flood"),
+            go,
+        };
+        let want = accepted.len();
+        let frames = input.drain_until(|frames| typed_len(frames) >= want).await;
         assert!(refused > 0, "the queue never filled");
         assert!(
             typed(&frames) == accepted,
@@ -1280,7 +1356,7 @@ mod queue_tests {
     /// At a full queue `write_automatic` is refused, never dropped.
     #[tokio::test(flavor = "multi_thread")]
     async fn write_automatic_at_a_full_queue_fails() {
-        let (mut attachment, _shared, _display, (mut read, _write)) = attach(64).await;
+        let (mut attachment, _shared, _display, mut input) = attach(64).await;
         let mut accepted = 0usize;
         for _ in 0..WRITER_QUEUE_FRAMES * 2 {
             if attachment
@@ -1298,7 +1374,9 @@ mod queue_tests {
                 .await,
             Err(BackendError::Failed("input queue full".to_string()))
         );
-        let frames = drain(&mut read).await;
+        let frames = input
+            .drain_until(|frames| typed_len(frames) >= accepted * 5)
+            .await;
         assert_eq!(typed(&frames).len(), accepted * 5);
         assert!(frames
             .iter()
@@ -1307,7 +1385,9 @@ mod queue_tests {
             .write_automatic(BackendGeneration(1), b"reply")
             .await
             .expect("room again");
-        let frames = drain(&mut read).await;
+        let frames = input
+            .drain_until(|frames| frames.iter().any(|f| f.kind == Kind::AutomaticInput))
+            .await;
         let replies: Vec<&Frame> = frames
             .iter()
             .filter(|frame| frame.kind == Kind::AutomaticInput)
@@ -1352,9 +1432,10 @@ mod queue_tests {
             Err(BackendError::Failed("reopen queue full".to_string()))
         );
 
-        let (next, _display, (mut read, _write)) = halves(64).await;
-        install(&shared, &next);
-        let frames = drain(&mut read).await;
+        let (next, _display, mut input) = halves(64).await;
+        assert!(install(&shared, &next));
+        let want = 3 + (REOPEN_QUEUE_REQUESTS - 4) + 3;
+        let frames = input.drain_until(|frames| frames.len() >= want).await;
         let kinds: Vec<Kind> = frames.iter().map(|frame| frame.kind).collect();
         assert_eq!(
             kinds.len(),
@@ -1369,5 +1450,140 @@ mod queue_tests {
             typed(&frames) == sent,
             "every typed byte goes out once, in order"
         );
+    }
+
+    /// Makes the input writer closed, as when its connection died.
+    fn close_input_writer(shared: &Shared) {
+        let (dead, queue) = mpsc::channel(8);
+        drop(queue);
+        lock(&shared.state).writers.input = Some(dead);
+    }
+
+    /// Waits until the supervisor has begun rebuilding (both halves marked closed).
+    async fn rebuilding(shared: &Shared) {
+        for _ in 0..500 {
+            if shared.halves_open() == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the supervisor never began the rebuild");
+    }
+
+    /// A request that finds the input writer closed is accepted, the reopen begins, and the
+    /// bytes go out once, in order, to the next pair.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_to_a_closed_writer_is_queued_for_the_reopen() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        close_input_writer(&shared);
+        attachment
+            .write(OwnershipGeneration(1), b"one")
+            .await
+            .expect("accepted");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+        attachment
+            .write(OwnershipGeneration(1), b"two")
+            .await
+            .expect("queued");
+        rebuilding(&shared).await;
+        let (next, _display, mut input) = halves(65_536).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| frames.len() >= 2).await;
+        assert_eq!(frames.len(), 2, "each write goes out once");
+        assert_eq!(typed(&frames), b"onetwo");
+    }
+
+    /// An automatic reply that finds the writer closed is not an error, and the reopen begins.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_automatic_to_a_closed_writer_begins_the_reopen() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        close_input_writer(&shared);
+        attachment
+            .write_automatic(BackendGeneration(1), b"reply")
+            .await
+            .expect("not an error");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+    }
+
+    /// One 64 KiB write (4 frames) and 1,023 resizes make 1,027 frames: more than one per
+    /// request. All of them go out, in order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reopen_queue_of_split_writes_replays_every_frame() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        lock(&shared.state).fence.begin_reopen();
+        let big: Vec<u8> = (0..65_536u32).map(|n| (n % 251) as u8).collect();
+        attachment
+            .write(OwnershipGeneration(5), &big)
+            .await
+            .expect("queued");
+        for n in 0..REOPEN_QUEUE_REQUESTS - 1 {
+            let cols = 100 + u16::try_from(n % 50).unwrap_or(0);
+            attachment
+                .resize(OwnershipGeneration(5), cols, 30)
+                .await
+                .expect("queued");
+        }
+        let (next, _display, mut input) = halves(64).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| frames.len() >= 1_027).await;
+        assert_eq!(frames.len(), 1_027);
+        assert!(frames[..4].iter().all(|frame| frame.kind == Kind::Data));
+        assert!(typed(&frames) == big, "the write arrives whole, in order");
+        for (n, frame) in frames[4..].iter().enumerate() {
+            let cols = 100 + u16::try_from(n % 50).unwrap_or(0);
+            assert_eq!(frame.kind, Kind::Resize);
+            assert_eq!(frame::parse_resize(&frame.payload), Some((cols, 30)));
+        }
+    }
+
+    /// A new pair whose writer can't take the replay is not installed: the attempt fails, the
+    /// queue stays, and the next pair gets it once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pair_that_cannot_take_the_replay_is_not_installed() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        lock(&shared.state).fence.begin_reopen();
+        attachment
+            .write(OwnershipGeneration(1), b"kept")
+            .await
+            .expect("queued");
+        let (full, _display, _core) = halves(64).await;
+        let writer = full
+            .input
+            .as_ref()
+            .and_then(|half| half.connection.sender())
+            .expect("a writer");
+        while writer.try_send(frame::credit(INPUT_CHANNEL, 1)).is_ok() {}
+        assert!(!install(&shared, &full), "the queue is full");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+        assert_eq!(lock(&shared.state).fence.generation, 1);
+        let (next, _display, mut input) = halves(65_536).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| !frames.is_empty()).await;
+        assert_eq!(typed(&frames), b"kept");
+        assert_eq!(frames.len(), 1);
+    }
+
+    /// A frame the core's line stalls in the middle of arrives whole: reading it is not
+    /// cancelled by the quiet timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_stalled_mid_way_is_read_whole() {
+        let (pair, _display, mut input) = halves(65_536).await;
+        let writer = pair
+            .input
+            .as_ref()
+            .and_then(|half| half.connection.sender())
+            .expect("a writer");
+        let second = frame::encode(INPUT_CHANNEL, Kind::Data, b"second frame");
+        let cut = second.len() - 4;
+        writer
+            .send(frame::encode(INPUT_CHANNEL, Kind::Data, b"first"))
+            .await
+            .expect("first");
+        writer.send(second[..cut].to_vec()).await.expect("part");
+        let first = input.drain().await;
+        assert_eq!(typed(&first), b"first");
+        writer.send(second[cut..].to_vec()).await.expect("rest");
+        let rest = input.drain_until(|frames| !frames.is_empty()).await;
+        assert_eq!(typed(&rest), b"second frame");
     }
 }

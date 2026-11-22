@@ -532,19 +532,26 @@ mod tests {
         }
         let mut fence = fence(false, true);
         let mut highest = 0;
-        fence.requested.size = (90, 30);
-        fence.requested.display = display("bb");
-        for request in [
-            Request::Write(vec![0; 40_000]),
-            Request::Write(Vec::new()),
-            Request::Resize(100, 30),
-            Request::SetDisplay(display("cc")),
-            Request::Focus,
+        let mut seen = Vec::new();
+        for (generation, request) in [
+            (5, Request::Write(vec![0; 40_000])),
+            (5, Request::Write(Vec::new())),
+            (1, Request::Resize(100, 30)),
+            (1, Request::SetDisplay(display("cc"))),
+            (5, Request::Focus),
         ] {
             let needed = Fence::frames_needed(&request);
-            let effects = fence.request(&mut highest, 1, request).expect("applied");
+            let effects = fence
+                .request(&mut highest, generation, request)
+                .expect("applied");
             assert!(frames(&effects) <= needed, "{effects:?}");
+            seen.push(frames(&effects));
         }
+        assert_eq!(
+            seen.last(),
+            Some(&3),
+            "the Focus after a superseded resize and display catches up with 3 frames"
+        );
     }
 
     #[test]
