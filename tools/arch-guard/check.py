@@ -50,6 +50,11 @@ Known limits, by design:
   generic function type written `<T>(x: T) => T` in type position after `=` reads as an
   element and fails closed, and type arguments on a JSX tag (`<Foo<string> />`) fail
   closed too. `.ts`, `.mts` and `.cts` files lex with no JSX rule.
+  As a backstop, a `.tsx` file is also checked against its raw source: every
+  `import(`, `require(`, `import x` or `export ... from` must line up with a code token
+  and a load the import reader reported, and every `from "` with a code token. So a
+  `.tsx` comment, string or JSX text that spells an import (`// import x from "y"`) is a
+  `guard-parse`, and so is a method named `import(` or `require(`.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -975,6 +980,7 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
                 i = end
                 continue
             if kind in ("jsx_child", "jsx_attr"):
+                push("punct", c, i, False)  # keep `{ ... }` balanced for the import reader
                 mode = "children" if kind == "jsx_child" else "tag"
                 i += 1
                 continue
@@ -1097,14 +1103,52 @@ def js_package(spec: str) -> str:
     return "/".join(parts[:2]) if spec.startswith("@") else parts[0]
 
 
+_RAW_CALL = re.compile(r"\b(?:import|require)\s*\(")
+_RAW_IMPORT = re.compile(r"\bimport\s+[\w{*'\"]")
+_RAW_FROM = re.compile(r"\bfrom\s*['\"]")
+_RAW_EXPORT_FROM = re.compile(r"\bexport\b[^;]*?\bfrom\b")
+
+
+def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | None]]) -> None:
+    """A check on a `.tsx` file that doesn't trust the JSX model. Every raw occurrence
+    of an import-shaped pattern must line up with what the lexer and the import reader
+    produced: `import(`, `require(`, `import x`, and `export ... from` with a reported
+    load at that offset, and each keyword with an identifier token at its offset.
+    Anything else (JSX text, a string or a comment spelling an import, or a load the
+    reader skipped) raises `LexError`, so a file can't hide an import by confusing the
+    lexer. Spelling an import in a `.tsx` comment or string therefore fails closed."""
+    idents = {(t.start, t.text) for t in toks if t.kind == "ident"}
+    loaded = {offset for offset, _, _ in loads}
+
+    def require(offset: int, word: str, load: bool) -> None:
+        if (offset, word) not in idents or (load and offset not in loaded):
+            raise LexError(offset, f"`{word}` here is not read as code; JSX or the lexer hid it")
+
+    for m in _RAW_CALL.finditer(src):
+        require(m.start(), m.group(0).split("(")[0].strip(), True)
+    for m in _RAW_IMPORT.finditer(src):
+        require(m.start(), "import", True)
+    for m in _RAW_FROM.finditer(src):
+        require(m.start(), "from", False)
+    for m in _RAW_EXPORT_FROM.finditer(src):
+        require(m.start(), "export", False)
+        require(m.end() - 4, "from", False)
+
+
 def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> list[Violation]:
     lines = Lines(src)
     try:
         toks = lex_js(src, jsx=rel.endswith(".tsx"))
     except LexError as e:
         return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
+    loads = js_imports(toks)
+    if rel.endswith(".tsx"):
+        try:
+            tsx_backstop(src, toks, loads)
+        except LexError as e:
+            return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
     found: list[Violation] = []
-    for offset, kind, spec in js_imports(toks):
+    for offset, kind, spec in loads:
         line = lines.line(offset)
         if kind == "unsupported":
             found.append(Violation(PARSE_RULE, rel, line, "unsupported import/export declaration syntax"))

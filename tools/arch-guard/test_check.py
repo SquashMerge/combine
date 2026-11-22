@@ -13,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -793,6 +794,69 @@ class GuardTest(unittest.TestCase):
                 self.assertFlags(
                     {"app/web/src/shell/Probe.tsx": src}, ("guard-parse", "app/web/src/shell/Probe.tsx")
                 )
+
+    # --- JSX expression boundaries and the .tsx backstop (opencode review 13)
+
+    PROBE = "app/web/src/shell/Probe.tsx"
+    ADJACENT = (
+        ("import('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("import('../../test/support/snapshots')", "no-production-dependency-on-non-production"),
+        ("import('../ipc/' + 'tauri')", "frontend-imports-are-literal"),
+    )
+
+    def _tsx(self, src, rule):
+        self.assertFlags({self.PROBE: src}, (rule, self.PROBE))
+
+    def test_adjacent_jsx_expressions_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p>{{{first}}}{{1}}</p>; export const q = /x/;\n", rule)
+
+    def test_adjacent_jsx_attributes_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p a={{{first}}} b={{1}} />; export const q = /x/;\n", rule)
+
+    def test_nested_adjacent_expressions_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                src = f"declare const cond: boolean, x: number;\nexport const a = <p>{{cond && <b>{{{first}}}{{x}}</b>}}{{x}}</p>;\n"
+                self._tsx(src, rule)
+
+    def test_template_specifiers_do_not_hide_a_load(self):
+        for first, rule in (
+            ("import(`@tauri-apps/api/core`)", "tauri-only-in-ipc"),
+            ("import(`../ipc/${'tauri'}`)", "frontend-imports-are-literal"),
+        ):
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p>{{{first}}}{{1}}</p>;\n", rule)
+            with self.subTest(first=first, nested="template"):
+                self._tsx(f"export const a = <p>{{`${{{first}}}`}}{{1}}</p>;\n", rule)
+
+    def test_backstop_import_spelled_in_jsx_text_fails_closed(self):
+        src = "export const a = <p>import('@tauri-apps/api/core')</p>;\n"
+        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    def test_backstop_import_spelled_in_a_comment_fails_closed(self):
+        for src in (
+            "// import x from 'y'\nexport const a = 1;\n",
+            "export const a = \"import('x')\";\n",
+            "/* export { a } from './a' */\nexport const a = 1;\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    def test_backstop_holds_when_the_lexer_drops_jsx_braces(self):
+        real = check.lex_js
+
+        def broken(src, jsx=False):
+            toks = real(src, jsx=jsx)
+            return [t for t in toks if not t.is_("punct", "}")] if jsx else toks
+
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first), mock.patch.object(check, "lex_js", broken):
+                src = f"export const a = <p>{{{first}}}{{1}}</p>; export const q = /x/;\n"
+                self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
 
     def test_clean_tsx_lexes_clean(self):
         src = """\
