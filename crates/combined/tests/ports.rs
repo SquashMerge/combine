@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use combine_protocol::{AttachRequestOptions, TermId};
 use combined::model::{
-    Millis, RootKind, Space, SpaceId, SpawnSpec, TermEvent, TermInfo, TermState,
+    ContentHash, Millis, RootKind, Space, SpaceId, SpawnSpec, TermEvent, TermInfo, TermState,
 };
 use combined::ports::{
     AttachOptions, Attachment, BackendError, FileStore, GitEntry, GitProbe, StoreError,
@@ -310,6 +310,8 @@ fn model_types_construct() {
     let file = StoredFile {
         bytes: vec![1],
         revision: StoreRevision(0),
+        hash: ContentHash([0; 32]),
+        read_only: false,
     };
     assert!(file.revision < StoreRevision(1));
     assert_ne!(StoreError::InvalidPath, StoreError::Unavailable("x".into()));
