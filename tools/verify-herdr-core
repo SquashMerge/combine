@@ -1,0 +1,298 @@
+#!/bin/sh
+# The herdr-core contract suite against an isolated core of its own.
+#
+#   sh tools/verify-herdr-core              the whole lane, with the 46-line audit
+#   sh tools/verify-herdr-core FILTER       only the tests whose names contain FILTER
+#   sh tools/verify-herdr-core --capture    refresh crates/combined/src/adapters/herdr_core/fixtures
+#
+# It starts a core under /tmp/chc.XXXXXX with its own HC_SESSION and XDG paths, pins that
+# core's id, and runs the test binary against it. herdr-core slows each restart of a core that
+# was restarted a moment before (the delays grow: about 4 s, 6 s, 12 s, 24 s, then minutes),
+# and the adapter gives up after 10 s, so the tests that restart or crash the core each get a
+# core of their own, in their own root and session; every other test shares one. Nothing here
+# ever touches the default core:
+# every `hc` call goes through lane_hc (one `env -i` allowlist), the only socket used is the
+# lane's own, and the only signals are the test binary's crash of the lane core (see
+# lane_safety.rs) and teardown's stop of the lane's own test binary (lane_check_own_child).
+# Needs `hc` (COMBINE_HC_BIN, else the one on PATH) and python3. ./tools/verify needs neither.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+heavy=${COMBINE_HEAVY_SH:-/Users/jcarreira/projects/squashmerge/trellis-evidence/heavy-lock/heavy-medium.sh}
+if [ -z "${MIMIR_HEAVY_LOCK_HELD:-}" ] && [ -x "$heavy" ]; then
+  exec "$heavy" sh "$root/tools/verify-herdr-core" "$@"
+fi
+
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  targets=${COMBINE_TARGETS:-}
+  if [ -z "$targets" ]; then
+    shared="$HOME/projects/squashmerge/combine-targets"
+    if [ -d "$shared" ]; then targets=$shared; else targets="$(dirname "$root")/combine-targets"; fi
+  fi
+  case $root in
+    */.factory-sandboxes/*) name="factory-$(basename "$root")" ;;
+    *) name=$(basename "$root") ;;
+  esac
+  CARGO_TARGET_DIR="$targets/$name"
+  export CARGO_TARGET_DIR
+fi
+
+. "$root/tools/herdr-core-lane.sh"
+
+step() { printf '\n== %s\n' "$*"; }
+
+LANE_HC=${COMBINE_HC_BIN:-$(command -v hc || true)}
+python=$(command -v python3 || true)
+if [ -z "$LANE_HC" ] || [ ! -x "$LANE_HC" ] || [ -z "$python" ]; then
+  echo "verify-herdr-core: needs hc (COMBINE_HC_BIN) and python3" >&2
+  exit 2
+fi
+
+# Tests that restart or crash the core. Each runs alone against a core of its own.
+restart_tests="backend_crash_starts_one_new_inexact_epoch backend_restart_starts_one_new_exact_epoch inexact_terminal_stays_inexact program_exit_is_final stale_replies_are_dropped_silently watch_reports_real_core_changes"
+
+LANE_ROOT=
+LANE_SESSION=
+LANE_SOCKET=
+started=0
+pinned=
+bin_pid=
+bin_exe=
+status=0
+
+core_id() {
+  lane_hc_socket server status --json | "$python" -I -c 'import json,sys;print(json.load(sys.stdin)["core"]["id"])'
+}
+
+# Stops the lane's own core (only when its id is the pinned one) and removes the lane root.
+lane_down() {
+  if [ -z "$LANE_ROOT" ]; then return 0; fi
+  if [ "$started" = 1 ]; then
+    # A core that was restarting when the run ended is still coming back: give it its socket.
+    waited=0
+    while [ "$waited" -lt 300 ] && ! lane_check_kind "$LANE_SOCKET" socket; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+  fi
+  if [ "$started" = 1 ] && lane_check_kind "$LANE_SOCKET" socket; then
+    id=$(core_id 2>/dev/null || true)
+    if [ -z "$pinned" ]; then pinned=$id; fi
+    if [ "$id" != "$(lane_default_core_id)" ] && lane_check_core_id "$id" "$pinned"; then
+      lane_hc_socket server stop --json >/dev/null 2>&1 || true
+      # Not `server status`: asked while no core runs, hc starts a new one. The stopped core
+      # removes its socket.
+      waited=0
+      while [ "$waited" -lt 100 ] && [ -e "$LANE_SOCKET" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+      done
+    else
+      echo "verify-herdr-core: refusing to stop a core that is not the lane's own" >&2
+      status=1
+    fi
+  elif [ "$started" = 1 ]; then
+    echo "verify-herdr-core: the lane core's socket never returned; its core may still run (root $LANE_ROOT, session $LANE_SESSION)" >&2
+    status=1
+  fi
+  if lane_check_root "$LANE_ROOT"; then
+    rm -rf -- "$LANE_ROOT"
+  fi
+  LANE_ROOT=
+  started=0
+  pinned=
+}
+
+# Stops the lane's own test binary (only while this script still owns it), then the lane.
+teardown() {
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ "$status" -eq 0 ]; then status=$rc; fi
+  trap - EXIT INT TERM
+  if [ -n "$bin_pid" ]; then
+    obs=$(ps -o ppid=,comm= -p "$bin_pid" 2>/dev/null | sed 's/^ *//' || true)
+    if lane_check_own_child "$bin_pid" "$bin_exe" "${obs%% *}" "${obs#* }" "$$"; then
+      kill -TERM -- "$bin_pid"
+      waited=0
+      while [ "$waited" -lt 100 ] && [ -n "$(ps -o pid= -p "$bin_pid" 2>/dev/null)" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+      done
+      if [ -n "$(ps -o pid= -p "$bin_pid" 2>/dev/null)" ]; then
+        obs=$(ps -o ppid=,comm= -p "$bin_pid" 2>/dev/null | sed 's/^ *//' || true)
+        if lane_check_own_child "$bin_pid" "$bin_exe" "${obs%% *}" "${obs#* }" "$$"; then
+          kill -KILL -- "$bin_pid"
+        else
+          status=1
+        fi
+      fi
+    else
+      echo "verify-herdr-core: refusing to signal $bin_pid: not this script's own test binary" >&2
+      status=1
+    fi
+  fi
+  lane_down
+  exit "$status"
+}
+trap teardown EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Creates the lane root and starts the lane's core.
+lane_up() {
+  LANE_ROOT=$(mktemp -d /tmp/chc.XXXXXX)
+  chmod 700 "$LANE_ROOT"
+  lane_check_root "$LANE_ROOT"
+  lane_check_kind "$LANE_ROOT" dir
+  [ "$(stat -f %Lp "$LANE_ROOT")" = 700 ]
+  LANE_SESSION=c$(lane_root_suffix "$LANE_ROOT")
+  LANE_SOCKET=$(lane_expected_socket "$LANE_ROOT" "$LANE_SESSION")
+  lane_check_session "$LANE_SESSION" "$LANE_ROOT"
+  lane_check_socket_path "$LANE_SOCKET" "$LANE_ROOT" "$LANE_SESSION" "$HOME"
+  mkdir -m 700 "$LANE_ROOT/state" "$LANE_ROOT/config" "$LANE_ROOT/run"
+  mkdir -m 700 "$LANE_ROOT/config/herdr-core"
+  printf 'headless = "200x120"\nnotes = false\n' >"$LANE_ROOT/config/herdr-core/config.toml"
+  started=1
+  lane_hc server start --json >/dev/null
+  lane_check_kind "$LANE_SOCKET" socket
+  pinned=$(core_id)
+  if [ -z "$pinned" ] || [ "$pinned" = "$(lane_default_core_id)" ]; then
+    echo "verify-herdr-core: the lane core's id is empty or the default core's" >&2
+    exit 1
+  fi
+  echo "lane: $LANE_ROOT, session $LANE_SESSION, core $pinned"
+}
+
+step "lane: build the contract test binary"
+build_log=$(mktemp "${TMPDIR:-/tmp}/combine-lane-build.XXXXXX")
+cargo test -p combined --all-features --locked --test contract_herdr_core --no-run \
+  --message-format=json >"$build_log"
+bin_exe=$("$python" -I -c '
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    target = message.get("target", {})
+    if message.get("reason") == "compiler-artifact" and target.get("name") == "contract_herdr_core" and message.get("executable"):
+        print(message["executable"])
+' "$build_log")
+rm -f "$build_log"
+if [ -z "$bin_exe" ] || [ ! -x "$bin_exe" ]; then
+  echo "verify-herdr-core: no test binary built" >&2
+  exit 1
+fi
+
+results="$CARGO_TARGET_DIR/tmp/contract-results.log"
+before=0
+if [ -f "$results" ]; then before=$(wc -l <"$results"); fi
+
+capture=
+filter=
+if [ "${1:-}" = "--capture" ]; then
+  capture=1
+  filter=capture_event_fixtures
+elif [ -n "${1:-}" ]; then
+  filter=$1
+fi
+
+# Runs the test binary, in the background and from crates/combined, under its own `env -i`
+# allowlist, against the current lane. Arguments are the binary's. Sets `tests`.
+run_binary() {
+  cd "$root/crates/combined"
+  set +e
+  env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" TMPDIR="${TMPDIR:-/tmp}" \
+    RUST_BACKTRACE=1 ${COMBINE_REVISION:+"COMBINE_REVISION=$COMBINE_REVISION"} \
+    COMBINE_HC_LANE=1 COMBINE_HC_SOCKET="$LANE_SOCKET" COMBINE_HC_ROOT="$LANE_ROOT" \
+    COMBINE_HC_SESSION="$LANE_SESSION" COMBINE_HC_CORE_ID="$pinned" COMBINE_HC_BIN="$LANE_HC" \
+    COMBINE_HC_PYTHON="$python" ${capture:+"COMBINE_HC_CAPTURE=1"} \
+    "$bin_exe" --test-threads=1 --nocapture "$@" &
+  bin_pid=$!
+  wait "$bin_pid"
+  tests=$?
+  bin_pid=
+  set -e
+  cd "$root"
+  if [ "$tests" -eq 124 ]; then
+    echo "lane: the test binary hit its 22-minute deadline" >&2
+  fi
+}
+
+# One lane, one run of the binary.
+segment() {
+  lane_up
+  run_binary "$@"
+  lane_down
+  if [ "$tests" -ne 0 ] && [ "$status" -eq 0 ]; then status=$tests; fi
+}
+
+if [ -n "$filter" ]; then
+  step "lane: run $filter"
+  # shellcheck disable=SC2086
+  segment $filter
+else
+  step "lane: run the contract suite against the lane core"
+  skips=
+  for name in $restart_tests; do skips="$skips --skip $name"; done
+  # shellcheck disable=SC2086
+  segment $skips
+  for name in $restart_tests; do
+    step "lane: $name, on a core of its own"
+    segment --exact "$name"
+  done
+fi
+
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+if [ -n "$filter" ]; then
+  exit 0
+fi
+
+step "lane: audit"
+audit_log=$(mktemp "${TMPDIR:-/tmp}/combine-lane-audit.XXXXXX")
+tail -n +$((before + 1)) "$results" >"$audit_log"
+audit=0
+"$python" -I - "$audit_log" <<'PY' || audit=$?
+import re
+import sys
+
+SKIPS = {
+    "remote_terminals_never_appear_and_are_rejected",
+    "event_flood_ends_with_a_final_gap_once_drained",
+    "blocked_client_is_disconnected_and_resume_gets_gap",
+    "backend_without_byte_credit_is_still_bounded",
+}
+lines = [l for l in open(sys.argv[1]).read().splitlines() if re.search(r"target=herdr-core-[0-9]", l)]
+problems = []
+if len(lines) != 46:
+    problems.append("expected 46 result lines, found %d" % len(lines))
+seen = set()
+for line in lines:
+    case = re.search(r"case=(\S+)", line).group(1)
+    result = re.search(r"result=(\w+)", line).group(1)
+    if case in seen:
+        problems.append("%s ran twice" % case)
+    seen.add(case)
+    if case in SKIPS and result != "skip":
+        problems.append("%s should be a recorded skip, was %s" % (case, result))
+    if case not in SKIPS and result != "pass":
+        problems.append("%s is %s, not pass" % (case, result))
+for case in SKIPS - seen:
+    problems.append("%s never ran" % case)
+for line in lines:
+    print(line)
+if problems:
+    print("audit FAILED:")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+print("audit ok: 46 lines, 4 recorded skips, the rest pass")
+PY
+rm -f "$audit_log"
+if [ "$audit" -ne 0 ]; then
+  exit "$audit"
+fi
+printf '\nverify-herdr-core: all checks passed\n'
