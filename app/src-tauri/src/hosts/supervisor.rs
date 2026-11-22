@@ -151,9 +151,8 @@ pub trait SessionPhase: Send {
     fn run(&mut self, io: SessionIo<'_>) -> SessionEnd;
 }
 
-/// Reads daemon messages until the link ends and ignores them. This is the resume hook: S6
-/// replaces it with a phase that first resumes each attachment from its last applied cursor,
-/// and S4 adds the v2 list requests that call [`HostEvents::spaces`].
+/// Reads daemon messages until the link ends and ignores them. The service runs
+/// [`LivePhase`](super::session::LivePhase); this one stands in for it in tests.
 #[derive(Default)]
 pub struct IdlePhase;
 

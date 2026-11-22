@@ -78,7 +78,6 @@ mod tests {
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::sync::Mutex;
-    use std::thread::JoinHandle;
     use std::time::Instant;
 
     use combine_protocol::{HostId, RequestId, SpaceInfo, SpaceKind, TermId, Terminals};
@@ -93,7 +92,7 @@ mod tests {
     struct Rig {
         outbound: Arc<Outbound>,
         daemon: UnixStream,
-        session: JoinHandle<SessionEnd>,
+        ended: mpsc::Receiver<SessionEnd>,
     }
 
     fn watch_request(message: ClientMessage) -> RequestId {
@@ -111,23 +110,26 @@ mod tests {
 
     fn start(events: Arc<dyn HostEvents>) -> Rig {
         let (client, daemon) = UnixStream::pair().expect("socket pair");
+        daemon.set_read_timeout(Some(WAIT)).expect("read timeout");
+        let (done, ended) = mpsc::channel();
         let outbound = Arc::new(Outbound::default());
         let mut phase = LivePhase::new(Arc::clone(&outbound));
-        let session = thread::spawn(move || {
+        thread::spawn(move || {
             let id = host_id(HOST_A);
             let mut reader = client.try_clone().expect("clone");
             let mut writer = client;
-            phase.run(SessionIo {
+            let end = phase.run(SessionIo {
                 host_id: &id,
                 reader: &mut reader,
                 writer: &mut writer,
                 events: &*events,
-            })
+            });
+            let _ = done.send(end);
         });
         Rig {
             outbound,
             daemon,
-            session,
+            ended,
         }
     }
 
@@ -145,14 +147,17 @@ mod tests {
 
     fn end_session(rig: Rig) -> SessionEnd {
         rig.daemon.shutdown(Shutdown::Both).expect("close");
-        rig.session.join().expect("the session thread")
+        rig.ended
+            .recv_timeout(WAIT)
+            .expect("the session ends and joins its writer")
     }
 
     #[test]
     fn live_phase_sends_watch_terminals_first() {
-        let (events, _rx) = RecordingEvents::new();
+        let (events, published) = RecordingEvents::new();
         let mut rig = start(events);
         let request = watch_request(read_client(&mut rig.daemon));
+        assert!(published.try_recv().is_err());
         assert_eq!(request, RequestId(1));
         assert_eq!(
             rig.outbound.kind_of(&host_id(HOST_A), request),
@@ -232,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn spaces_unregisters_and_joins_writer() {
+    fn session_end_unregisters_and_joins_writer() {
         let (events, _rx) = RecordingEvents::new();
         let mut rig = start(events);
         read_client(&mut rig.daemon);
