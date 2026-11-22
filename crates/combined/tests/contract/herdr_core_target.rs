@@ -678,14 +678,7 @@ impl Target for HerdrCoreTarget {
         }
     }
 
-    /// Fails when a late-event fault was switched on and the adapter has delivered none: the
-    /// cases that ask for old-generation events judge their client only if they were sent.
     fn pty_size(&self, term: &TermId) -> Result<(u16, u16), Unsupported> {
-        if self.late && self.control.late_events_delivered() < 2 {
-            return Err(Unsupported(
-                "the adapter delivered no old-generation events after the rebuild",
-            ));
-        }
         let address = Self::address_of(term)?;
         let terminals = self
             .probe
@@ -815,6 +808,17 @@ impl Target for HerdrCoreTarget {
         self.control
             .set_late_old_generation_events(on, LATE_DATA, LATE_RESIZED);
         self.late = on;
+        Ok(())
+    }
+
+    /// The cases that ask for old-generation events judge their client only if those events
+    /// were sent: both the late output and the late `Resized`.
+    fn late_events_delivered(&self) -> Result<(), Unsupported> {
+        if self.late && self.control.late_events_delivered() < 2 {
+            return Err(Unsupported(
+                "the adapter delivered no old-generation events after the rebuild",
+            ));
+        }
         Ok(())
     }
 

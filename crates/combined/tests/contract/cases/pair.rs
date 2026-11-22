@@ -152,6 +152,8 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
         !sizes.contains(&LATE_RESIZED),
         "the old generation's late Resized {LATE_RESIZED:?} reached the client; got {sizes:?}"
     );
+    // After the late checks, so a late event that leaked is reported as a failure first.
+    h.target.late_events_delivered()?;
     let pty = h.target.pty_size(&term)?;
     ensure!(
         "reapplied-size",

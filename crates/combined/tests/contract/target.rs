@@ -67,9 +67,8 @@ pub trait Target: Sized + 'static {
     async fn emit(&mut self, term: &TermId, bytes: &[u8]) -> Result<(), Unsupported>;
 
     /// Gives the backend up to one quiet interval to make progress, and returns true while the
-    /// backend reports work in progress. Fake: runs `control.step()` until it returns false and reports whether any
-    /// step ran, with no waiting. A real target sleeps its quiet interval on its runtime and
-    /// returns false.
+    /// backend reports work in progress. Fake: runs `control.step()` until it returns false and
+    /// reports whether any step ran, with no waiting.
     async fn idle(&mut self) -> bool;
 
     /// Rounds with nothing moving that count as settled. Fake: 1.
@@ -106,6 +105,12 @@ pub trait Target: Sized + 'static {
     async fn restart_backend(&mut self) -> Result<(), Unsupported>;
     async fn crash_backend(&mut self) -> Result<(), Unsupported>;
     fn set_late_old_generation_events(&mut self, on: bool) -> Result<(), Unsupported>;
+
+    /// Fails when `set_late_old_generation_events(true)` is on and the backend hasn't yet
+    /// delivered the late events it asked for, so a case's "no late event reached the client"
+    /// checks would prove nothing. Cases 29-31 call it. Fake: always `Ok`, because it sends
+    /// them as part of the rebuild.
+    fn late_events_delivered(&self) -> Result<(), Unsupported>;
     fn set_paint_after_resize(&mut self, on: bool) -> Result<(), Unsupported>;
 
     /// Rebuilds the backend without byte credit. Only before the first `backend()` call.
