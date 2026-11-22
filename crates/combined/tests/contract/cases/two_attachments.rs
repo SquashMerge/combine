@@ -1,7 +1,7 @@
 //! Cases 16-17: two attachments on one terminal. Each operation goes to the attachment that
 //! sent it, and a rebuilt attachment comes back at the size it last asked for.
 
-use combine_protocol::{AttachRequestOptions, AttachmentId, Display};
+use combine_protocol::{AttachRequestOptions, AttachmentId, Display, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
 use combined::testing::Half;
 use futures::FutureExt;
@@ -57,16 +57,22 @@ fn takeover(
 ) -> Vec<BackendCommand> {
     vec![
         BackendCommand::SetDisplay {
+            ownership: OwnershipGeneration(0),
             attachment,
             display,
         },
         BackendCommand::Resize {
+            ownership: OwnershipGeneration(0),
             attachment,
             cols: size.0,
             rows: size.1,
         },
-        BackendCommand::Focus { attachment },
+        BackendCommand::Focus {
+            attachment,
+            ownership: OwnershipGeneration(0),
+        },
         BackendCommand::Write {
+            ownership: OwnershipGeneration(0),
             attachment,
             bytes: typed.to_vec(),
         },

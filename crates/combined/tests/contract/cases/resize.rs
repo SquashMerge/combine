@@ -1,7 +1,9 @@
 //! Cases 12-15: a resize is a boundary in the stream. Output sent at the old size comes before
 //! it, output at the new size comes after it, and a replay keeps that order.
 
-use combine_protocol::{AttachmentId, ClientMessage, DaemonMessage, Resize, TermId};
+use combine_protocol::{
+    AttachmentId, ClientMessage, DaemonMessage, OwnershipGeneration, Resize, TermId,
+};
 use combined::core::{BackendCommand, CoreConfig};
 use futures::FutureExt;
 
@@ -187,6 +189,7 @@ pub async fn old_size_output_in_flight_lands_before_resized<T: Target>(t: &mut T
     h.resize(&mut a, att_a, 120, 40).await?;
     h.emit(&term, &token("new", 1)).await?;
     let sent = BackendCommand::Resize {
+        ownership: OwnershipGeneration(0),
         attachment: att_a,
         cols: 120,
         rows: 40,

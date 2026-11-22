@@ -1,6 +1,6 @@
 //! What core asks its caller to do.
 
-use combine_protocol::{AttachmentId, BackendGeneration, Display, TermId};
+use combine_protocol::{AttachmentId, BackendGeneration, Display, OwnershipGeneration, TermId};
 
 use crate::ports::AttachOptions;
 
@@ -15,8 +15,11 @@ pub enum BackendCommand {
         terminal: TermId,
         options: AttachOptions,
     },
+    /// `ownership` on this and the next three variants is the generation core authorized the
+    /// command under. The adapter uses it to tell a stale deferred request from a current one.
     Write {
         attachment: AttachmentId,
+        ownership: OwnershipGeneration,
         bytes: Vec<u8>,
     },
     /// `generation` is the backend generation of the `Started` that opened the reply's epoch.
@@ -28,14 +31,17 @@ pub enum BackendCommand {
     },
     Resize {
         attachment: AttachmentId,
+        ownership: OwnershipGeneration,
         cols: u16,
         rows: u16,
     },
     Focus {
         attachment: AttachmentId,
+        ownership: OwnershipGeneration,
     },
     SetDisplay {
         attachment: AttachmentId,
+        ownership: OwnershipGeneration,
         display: Display,
     },
     Credit {
@@ -55,7 +61,7 @@ impl BackendCommand {
             | BackendCommand::Write { attachment, .. }
             | BackendCommand::WriteAutomatic { attachment, .. }
             | BackendCommand::Resize { attachment, .. }
-            | BackendCommand::Focus { attachment }
+            | BackendCommand::Focus { attachment, .. }
             | BackendCommand::SetDisplay { attachment, .. }
             | BackendCommand::Credit { attachment, .. }
             | BackendCommand::Detach { attachment } => *attachment,

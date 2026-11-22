@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Waker;
 
-use combine_protocol::{BackendGeneration, CloseReason, Display, Fidelity, TermId};
+use combine_protocol::{
+    BackendGeneration, CloseReason, Display, Fidelity, OwnershipGeneration, TermId,
+};
 
 use super::{
     FakeAttachmentRef, FakeCall, FakeConfig, Half, Mutation, ResyncMode, FAKE_PAINT_END,
@@ -56,8 +58,8 @@ struct Terminal {
     delayed: bool,
     failing_opens: u32,
     active: Option<u64>,
-    /// How many times any attachment has become the active viewer.
-    activations: u64,
+    /// The highest ownership generation any command for this terminal has carried.
+    highest_generation: u64,
     typed: Vec<u8>,
     automatic: Vec<Vec<u8>>,
 }
@@ -90,10 +92,10 @@ enum State {
     Closed,
 }
 
-/// A request held for the reopen, with the terminal's activation count when it was queued.
+/// A request held for the reopen, with the ownership generation it was issued under.
 struct Queued {
     request: Request,
-    activations: u64,
+    generation: u64,
 }
 
 enum Request {
@@ -320,7 +322,7 @@ impl World {
             delayed: false,
             failing_opens: 0,
             active: None,
-            activations: 0,
+            highest_generation: 0,
             typed: Vec::new(),
             automatic: Vec::new(),
         };
@@ -352,7 +354,7 @@ impl World {
             delayed: false,
             failing_opens: 0,
             active: None,
-            activations: 0,
+            highest_generation: 0,
             typed: Vec::new(),
             automatic: Vec::new(),
         };
@@ -629,7 +631,6 @@ impl World {
         let ((cols, rows), _) = att.requested;
         let index = self.index(&att.address).expect("terminal");
         self.terminals[index].active = Some(id);
-        self.terminals[index].activations += 1;
         self.set_pty(index, cols, rows);
     }
 
@@ -727,12 +728,9 @@ impl World {
         }
     }
 
-    fn queue_request(&mut self, id: u64, request: Request) -> BackendResult<()> {
+    fn queue_request(&mut self, id: u64, generation: u64, request: Request) -> BackendResult<()> {
         let limit = self.config.reopen_queue_limit;
         let input_limit = self.config.reopen_input_limit;
-        let att = self.attachments.get(&id).expect("attachment");
-        let index = self.index(&att.address).expect("terminal");
-        let activations = self.terminals[index].activations;
         let att = self.attachments.get_mut(&id).expect("attachment");
         let input = match &request {
             Request::Write(bytes) => bytes.len(),
@@ -744,7 +742,7 @@ impl World {
         att.queued_input += input;
         att.queue.push_back(Queued {
             request,
-            activations,
+            generation,
         });
         Ok(())
     }
@@ -782,37 +780,68 @@ impl World {
         }
     }
 
-    /// A request queued before another attachment became the active viewer. Typed bytes were
-    /// accepted while this attachment owned the terminal, so they are still written, without
-    /// making it active. Every other request would change the size, display or focus the new
-    /// owner holds, and is dropped.
-    fn apply_superseded(&mut self, id: u64, request: Request) {
-        if let Request::Write(bytes) = request {
-            let index = self
-                .index(&self.attachments[&id].address)
-                .expect("terminal");
-            self.terminals[index].typed.extend_from_slice(&bytes);
-            self.emit_at(index, &bytes);
+    /// Applies a request, unless a command under a newer ownership generation has reached the
+    /// terminal since it was issued. A superseded request keeps the attachment's latest
+    /// requested size and display but changes nothing the new owner holds: it neither
+    /// activates the attachment nor touches the PTY. Typed bytes were accepted while the
+    /// attachment owned the terminal, so they are still written, once.
+    fn apply_current_or_superseded(&mut self, id: u64, generation: u64, request: Request) {
+        let index = self
+            .index(&self.attachments[&id].address)
+            .expect("terminal");
+        if generation >= self.terminals[index].highest_generation {
+            self.apply(id, request);
+            return;
+        }
+        match request {
+            Request::Write(bytes) => {
+                self.terminals[index].typed.extend_from_slice(&bytes);
+                self.emit_at(index, &bytes);
+            }
+            Request::Focus => {}
+            Request::Resize(cols, rows) => {
+                if let Some(att) = self.attachments.get_mut(&id) {
+                    att.requested.0 = (cols, rows);
+                }
+            }
+            Request::SetDisplay(display) => {
+                if let Some(att) = self.attachments.get_mut(&id) {
+                    att.requested.1 = display;
+                }
+            }
         }
     }
 
-    fn request(&mut self, id: u64, request: Request) -> BackendResult<()> {
-        match self.gate(id)? {
+    fn request(&mut self, id: u64, generation: u64, request: Request) -> BackendResult<()> {
+        let gate = self.gate(id)?;
+        if gate != Gate::Skip {
+            let index = self
+                .index(&self.attachments[&id].address)
+                .expect("terminal");
+            let highest = &mut self.terminals[index].highest_generation;
+            *highest = (*highest).max(generation);
+        }
+        match gate {
             Gate::Skip => Ok(()),
-            Gate::Queue => self.queue_request(id, request),
+            Gate::Queue => self.queue_request(id, generation, request),
             Gate::Apply => {
-                self.apply(id, request);
+                self.apply_current_or_superseded(id, generation, request);
                 Ok(())
             }
         }
     }
 
-    pub(crate) fn write(&mut self, att: u64, bytes: &[u8]) -> BackendResult<()> {
+    pub(crate) fn write(
+        &mut self,
+        att: u64,
+        ownership: OwnershipGeneration,
+        bytes: &[u8],
+    ) -> BackendResult<()> {
         self.calls.push(FakeCall::Write {
             att: FakeAttachmentRef(att),
             bytes: bytes.to_vec(),
         });
-        self.request(att, Request::Write(bytes.to_vec()))
+        self.request(att, ownership.0, Request::Write(bytes.to_vec()))
     }
 
     pub(crate) fn write_automatic(
@@ -835,28 +864,39 @@ impl World {
         Ok(())
     }
 
-    pub(crate) fn resize(&mut self, att: u64, cols: u16, rows: u16) -> BackendResult<()> {
+    pub(crate) fn resize(
+        &mut self,
+        att: u64,
+        ownership: OwnershipGeneration,
+        cols: u16,
+        rows: u16,
+    ) -> BackendResult<()> {
         self.calls.push(FakeCall::Resize {
             att: FakeAttachmentRef(att),
             cols,
             rows,
         });
-        self.request(att, Request::Resize(cols, rows))
+        self.request(att, ownership.0, Request::Resize(cols, rows))
     }
 
-    pub(crate) fn focus(&mut self, att: u64) -> BackendResult<()> {
+    pub(crate) fn focus(&mut self, att: u64, ownership: OwnershipGeneration) -> BackendResult<()> {
         self.calls.push(FakeCall::Focus {
             att: FakeAttachmentRef(att),
         });
-        self.request(att, Request::Focus)
+        self.request(att, ownership.0, Request::Focus)
     }
 
-    pub(crate) fn set_display(&mut self, att: u64, display: Display) -> BackendResult<()> {
+    pub(crate) fn set_display(
+        &mut self,
+        att: u64,
+        ownership: OwnershipGeneration,
+        display: Display,
+    ) -> BackendResult<()> {
         self.calls.push(FakeCall::SetDisplay {
             att: FakeAttachmentRef(att),
             display: display.clone(),
         });
-        self.request(att, Request::SetDisplay(display))
+        self.request(att, ownership.0, Request::SetDisplay(display))
     }
 
     pub(crate) fn credit(&mut self, att: u64, bytes: u32) -> BackendResult<()> {
@@ -1053,13 +1093,8 @@ impl World {
         let queued: Vec<Queued> = att.queue.drain(..).collect();
         att.queued_input = 0;
         self.deliver(id);
-        let activations = self.terminals[index].activations;
         for queued in queued {
-            if queued.activations == activations {
-                self.apply(id, queued.request);
-            } else {
-                self.apply_superseded(id, queued.request);
-            }
+            self.apply_current_or_superseded(id, queued.generation, queued.request);
         }
         self.deliver(id);
     }

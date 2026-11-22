@@ -551,7 +551,10 @@ fn the_entry_points_the_wave_four_cases_use_work() {
         let commands = h.journal();
         ensure!(
             "test",
-            commands.contains(&BackendCommand::Focus { attachment: att }),
+            commands.contains(&BackendCommand::Focus {
+                attachment: att,
+                ownership: OwnershipGeneration(0)
+            }),
             "no focus in {commands:?}"
         );
 

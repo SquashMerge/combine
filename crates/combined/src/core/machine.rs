@@ -660,8 +660,10 @@ impl Core {
             attachment.rows = rows;
         }
         if owner {
+            let ownership = self.ownership_of(id);
             self.command(BackendCommand::Resize {
                 attachment: id,
+                ownership,
                 cols,
                 rows,
             });
@@ -681,7 +683,11 @@ impl Core {
         };
         ownership.focus(id, order);
         if ownership.is_owner(id) {
-            self.command(BackendCommand::Focus { attachment: id });
+            let ownership = ownership.state().generation;
+            self.command(BackendCommand::Focus {
+                attachment: id,
+                ownership,
+            });
         }
     }
 
@@ -694,11 +700,21 @@ impl Core {
         };
         attachment.display = display.clone();
         if self.is_owner(id) && self.capabilities.display_queries {
+            let ownership = self.ownership_of(id);
             self.command(BackendCommand::SetDisplay {
                 attachment: id,
+                ownership,
                 display,
             });
         }
+    }
+
+    /// The ownership generation now current for the attachment's terminal.
+    fn ownership_of(&self, id: AttachmentId) -> OwnershipGeneration {
+        self.attachments
+            .get(&id)
+            .and_then(|a| self.ownerships.get(&a.terminal.0))
+            .map_or(OwnershipGeneration(0), |o| o.state().generation)
     }
 
     fn is_owner(&self, id: AttachmentId) -> bool {
@@ -725,8 +741,10 @@ impl Core {
             return;
         }
         if self.is_owner(id) {
+            let ownership = self.ownership_of(id);
             self.command(BackendCommand::Write {
                 attachment: id,
+                ownership,
                 bytes,
             });
         } else {
@@ -929,7 +947,11 @@ impl Core {
                         held.state = State::Live { generation, epoch };
                     }
                     if !first && self.is_owner(attachment) {
-                        self.command(BackendCommand::Focus { attachment });
+                        let ownership = self.ownership_of(attachment);
+                        self.command(BackendCommand::Focus {
+                            attachment,
+                            ownership,
+                        });
                     }
                     self.grant_credit(attachment);
                 }
@@ -1098,6 +1120,7 @@ impl Core {
             if self.is_owner(id) {
                 self.command(BackendCommand::Write {
                     attachment: id,
+                    ownership: generation,
                     bytes,
                 });
             }
@@ -1136,17 +1159,23 @@ impl Core {
             return;
         };
         let (cols, rows, display) = (attachment.cols, attachment.rows, attachment.display.clone());
+        let ownership = change.state.generation;
         if self.capabilities.display_queries {
             self.command(BackendCommand::SetDisplay {
                 attachment: owner,
+                ownership,
                 display,
             });
         }
         self.command(BackendCommand::Resize {
             attachment: owner,
+            ownership,
             cols,
             rows,
         });
-        self.command(BackendCommand::Focus { attachment: owner });
+        self.command(BackendCommand::Focus {
+            attachment: owner,
+            ownership,
+        });
     }
 }

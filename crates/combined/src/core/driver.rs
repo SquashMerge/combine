@@ -121,9 +121,13 @@ impl Driver {
                     let _ = held.detach().await;
                 }
             }
-            BackendCommand::Write { attachment, bytes } => {
+            BackendCommand::Write {
+                attachment,
+                ownership,
+                bytes,
+            } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.write(&bytes).await;
+                    let result = held.write(ownership, &bytes).await;
                     self.refused(attachment, RefusedCommand::Input, result, now);
                 }
             }
@@ -138,26 +142,31 @@ impl Driver {
             }
             BackendCommand::Resize {
                 attachment,
+                ownership,
                 cols,
                 rows,
             } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.resize(cols, rows).await;
+                    let result = held.resize(ownership, cols, rows).await;
                     self.refused(attachment, RefusedCommand::Resize, result, now);
                 }
             }
-            BackendCommand::Focus { attachment } => {
+            BackendCommand::Focus {
+                attachment,
+                ownership,
+            } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.focus().await;
+                    let result = held.focus(ownership).await;
                     self.refused(attachment, RefusedCommand::Focus, result, now);
                 }
             }
             BackendCommand::SetDisplay {
                 attachment,
+                ownership,
                 display,
             } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.set_display(display).await;
+                    let result = held.set_display(ownership, display).await;
                     self.refused(attachment, RefusedCommand::SetDisplay, result, now);
                 }
             }

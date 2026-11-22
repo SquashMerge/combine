@@ -1,7 +1,7 @@
 //! Cases 29-33: an attachment's input and display halves fail, or fail to open, and the
 //! daemon still gives each client one clean new epoch.
 
-use combine_protocol::{DaemonMessage, Epoch, ErrorCode};
+use combine_protocol::{DaemonMessage, Epoch, ErrorCode, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
 use combined::testing::Half;
 use futures::FutureExt;
@@ -152,7 +152,10 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
     let journal = h.journal();
     ensure!(
         "focus",
-        journal.contains(&BackendCommand::Focus { attachment: att }),
+        journal.contains(&BackendCommand::Focus {
+            attachment: att,
+            ownership: OwnershipGeneration(0)
+        }),
         "the owner's rebuilt pair was not focused; journal {journal:?}"
     );
 
@@ -255,20 +258,24 @@ pub async fn requests_while_reopening_apply_in_order<T: Target>(t: &mut T) -> Ou
         .collect();
     let expected = [
         BackendCommand::Resize {
+            ownership: OwnershipGeneration(0),
             attachment: att,
             cols: 100,
             rows: 30,
         },
         BackendCommand::Resize {
+            ownership: OwnershipGeneration(0),
             attachment: att,
             cols: 110,
             rows: 35,
         },
         BackendCommand::SetDisplay {
+            ownership: OwnershipGeneration(0),
             attachment: att,
             display: changed,
         },
         BackendCommand::Write {
+            ownership: OwnershipGeneration(0),
             attachment: att,
             bytes: b"x".to_vec(),
         },

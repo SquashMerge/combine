@@ -1,6 +1,6 @@
 //! Cases 18-21: what a client sees when the daemon or the backend restarts.
 
-use combine_protocol::{Epoch, Fidelity};
+use combine_protocol::{Epoch, Fidelity, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
 use futures::FutureExt;
 
@@ -158,7 +158,10 @@ async fn one_new_epoch<T: Target>(t: &mut T, crash: bool, fidelity: Fidelity) ->
     let journal = h.journal();
     ensure!(
         "focus",
-        journal.contains(&BackendCommand::Focus { attachment: att }),
+        journal.contains(&BackendCommand::Focus {
+            attachment: att,
+            ownership: OwnershipGeneration(0)
+        }),
         "the owner's new pair was not focused; journal {journal:?}"
     );
 

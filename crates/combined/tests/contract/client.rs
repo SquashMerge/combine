@@ -71,6 +71,8 @@ pub struct View {
     pub last_applied: Option<Cursor>,
     pub replay_through: Option<Cursor>,
     pub ownership: Option<(OwnershipGeneration, Option<AttachmentId>)>,
+    /// The display of the last `Facts` applied, in any epoch.
+    pub last_facts: Option<Display>,
     /// The current epoch, from the measured marker on, with consecutive `Bytes` coalesced.
     pub transcript: Vec<Applied>,
     pub measured_len: u64,
@@ -94,6 +96,7 @@ impl View {
             last_applied: None,
             replay_through: None,
             ownership: None,
+            last_facts: None,
             transcript: Vec::new(),
             measured_len: 0,
             ending: None,
@@ -427,7 +430,10 @@ impl ClientSim {
                 view.size = (resized.cols, resized.rows);
                 view.note(Applied::Resized(resized.cols, resized.rows));
             }
-            DaemonMessage::Facts(facts) => view.note(Applied::Facts(facts.display.clone())),
+            DaemonMessage::Facts(facts) => {
+                view.last_facts = Some(facts.display.clone());
+                view.note(Applied::Facts(facts.display.clone()));
+            }
             DaemonMessage::Resynced(_) => view.note(Applied::Resynced),
             DaemonMessage::Closed(closed) => {
                 view.ending = Some(Ending::Closed(closed.reason));

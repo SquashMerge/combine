@@ -7,8 +7,8 @@ use std::fmt;
 
 use combine_protocol::{
     Attach, AttachRequestOptions, AttachmentId, ClientMessage, Cursor, DaemonMessage, Detach,
-    Display, ErrorMessage, Focus, Input, RequestOwnership, Resize, Resume, SetDisplay, TermId,
-    MAX_INPUT_CHUNK,
+    Display, ErrorMessage, Focus, Input, OwnershipGeneration, RequestOwnership, Resize, Resume,
+    SetDisplay, TermId, MAX_INPUT_CHUNK,
 };
 use combined::core::{BackendCommand, ConnectionId, Core, CoreConfig, Driver, LogStats};
 use combined::model::Millis;
@@ -572,8 +572,47 @@ impl<'t, T: Target> Harness<'t, T> {
     }
 
     /// The backend commands run since the last call.
+    /// The backend commands since the last call. The ownership generation on the commands that
+    /// carry one is zeroed, so a case compares what was asked, not which generation it was.
     pub fn journal(&mut self) -> Vec<BackendCommand> {
-        self.driver.take_journal()
+        self.driver
+            .take_journal()
+            .into_iter()
+            .map(|command| match command {
+                BackendCommand::Write {
+                    attachment, bytes, ..
+                } => BackendCommand::Write {
+                    attachment,
+                    ownership: OwnershipGeneration(0),
+                    bytes,
+                },
+                BackendCommand::Resize {
+                    attachment,
+                    cols,
+                    rows,
+                    ..
+                } => BackendCommand::Resize {
+                    attachment,
+                    ownership: OwnershipGeneration(0),
+                    cols,
+                    rows,
+                },
+                BackendCommand::Focus { attachment, .. } => BackendCommand::Focus {
+                    attachment,
+                    ownership: OwnershipGeneration(0),
+                },
+                BackendCommand::SetDisplay {
+                    attachment,
+                    display,
+                    ..
+                } => BackendCommand::SetDisplay {
+                    attachment,
+                    ownership: OwnershipGeneration(0),
+                    display,
+                },
+                other => other,
+            })
+            .collect()
     }
 
     /// Fails with check `client-invariant` if any client saw the stream break an invariant.

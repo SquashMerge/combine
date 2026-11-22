@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use combine_protocol::{BackendGeneration, Display, Fidelity};
+use combine_protocol::{BackendGeneration, Display, Fidelity, OwnershipGeneration};
 use futures::stream::{Stream, StreamExt};
 
 use super::world::{lock, Shared};
@@ -71,8 +71,8 @@ impl Attachment for FakeAttachment {
         .boxed()
     }
 
-    async fn write(&mut self, bytes: &[u8]) -> BackendResult<()> {
-        lock(&self.world).write(self.id, bytes)
+    async fn write(&mut self, ownership: OwnershipGeneration, bytes: &[u8]) -> BackendResult<()> {
+        lock(&self.world).write(self.id, ownership, bytes)
     }
 
     async fn write_automatic(
@@ -83,16 +83,25 @@ impl Attachment for FakeAttachment {
         lock(&self.world).write_automatic(self.id, generation, bytes)
     }
 
-    async fn resize(&mut self, cols: u16, rows: u16) -> BackendResult<()> {
-        lock(&self.world).resize(self.id, cols, rows)
+    async fn resize(
+        &mut self,
+        ownership: OwnershipGeneration,
+        cols: u16,
+        rows: u16,
+    ) -> BackendResult<()> {
+        lock(&self.world).resize(self.id, ownership, cols, rows)
     }
 
-    async fn focus(&mut self) -> BackendResult<()> {
-        lock(&self.world).focus(self.id)
+    async fn focus(&mut self, ownership: OwnershipGeneration) -> BackendResult<()> {
+        lock(&self.world).focus(self.id, ownership)
     }
 
-    async fn set_display(&mut self, display: Display) -> BackendResult<()> {
-        lock(&self.world).set_display(self.id, display)
+    async fn set_display(
+        &mut self,
+        ownership: OwnershipGeneration,
+        display: Display,
+    ) -> BackendResult<()> {
+        lock(&self.world).set_display(self.id, ownership, display)
     }
 
     async fn credit(&mut self, bytes: u32) -> BackendResult<()> {

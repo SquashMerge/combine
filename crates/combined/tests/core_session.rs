@@ -947,6 +947,7 @@ fn overflow_during_announce_never_leaves_a_stale_owner() {
     assert_eq!(
         rig.commands().last(),
         Some(&BackendCommand::Resize {
+            ownership: rig.generation(1),
             attachment: c,
             cols: 100,
             rows: 30
@@ -1153,6 +1154,7 @@ fn stale_or_future_resize_is_stale_generation() {
     assert_eq!(
         rig.commands(),
         [BackendCommand::Resize {
+            ownership: rig.generation(1),
             attachment: id,
             cols: 100,
             rows: 30
@@ -1224,16 +1226,22 @@ fn non_owner_input_grants_then_forwards() {
         rig.commands(),
         [
             BackendCommand::SetDisplay {
+                ownership: rig.generation(1),
                 attachment: a,
                 display: display()
             },
             BackendCommand::Resize {
+                ownership: rig.generation(1),
                 attachment: a,
                 cols: 80,
                 rows: 24
             },
-            BackendCommand::Focus { attachment: a },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: a
+            },
             BackendCommand::Write {
+                ownership: rig.generation(1),
                 attachment: a,
                 bytes: b"hi".to_vec()
             },
@@ -1247,6 +1255,7 @@ fn non_owner_input_grants_then_forwards() {
     assert_eq!(
         rig.commands(),
         [BackendCommand::Write {
+            ownership: rig.generation(1),
             attachment: a,
             bytes: b"more".to_vec()
         }]
@@ -1260,6 +1269,7 @@ fn non_owner_input_grants_then_forwards() {
     assert_eq!(
         commands[3],
         BackendCommand::Write {
+            ownership: rig.generation(1),
             attachment: b,
             bytes: b"mine".to_vec()
         }
@@ -1293,12 +1303,17 @@ fn grants_skip_set_display_without_display_queries() {
         rig.commands(),
         [
             BackendCommand::Resize {
+                ownership: rig.generation(1),
                 attachment: a,
                 cols: 80,
                 rows: 24
             },
-            BackendCommand::Focus { attachment: a },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: a
+            },
             BackendCommand::Write {
+                ownership: rig.generation(1),
                 attachment: a,
                 bytes: b"x".to_vec()
             },
@@ -1330,13 +1345,18 @@ fn hand_off_to_most_recently_focused_or_none() {
     let after_a = rig.generation(1);
     assert!(after_a > owned);
     let commands = rig.commands();
-    assert!(commands.contains(&BackendCommand::Focus { attachment: c }));
+    assert!(commands.contains(&BackendCommand::Focus {
+        ownership: rig.generation(1),
+        attachment: c
+    }));
     assert!(commands.contains(&BackendCommand::Resize {
+        ownership: rig.generation(1),
         attachment: c,
         cols: 80,
         rows: 24
     }));
     assert!(commands.contains(&BackendCommand::SetDisplay {
+        ownership: rig.generation(1),
         attachment: c,
         display: display()
     }));
@@ -1381,15 +1401,20 @@ fn connection_drop_hands_off_ownership() {
         rig.commands(),
         [
             BackendCommand::SetDisplay {
+                ownership: rig.generation(1),
                 attachment: b,
                 display: display()
             },
             BackendCommand::Resize {
+                ownership: rig.generation(1),
                 attachment: b,
                 cols: 80,
                 rows: 24
             },
-            BackendCommand::Focus { attachment: b },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: b
+            },
         ]
     );
     assert_eq!(rig.pull(c2), [ownership_msg(b, handed.0, Some(b))]);
@@ -1422,10 +1447,22 @@ fn owner_rebuild_reasserts_focus_only() {
     rig.started(b, 2);
     assert!(rig.effects().is_empty());
     rig.started(a, 2);
-    assert_eq!(rig.commands(), [BackendCommand::Focus { attachment: a }]);
+    assert_eq!(
+        rig.commands(),
+        [BackendCommand::Focus {
+            ownership: rig.generation(1),
+            attachment: a
+        }]
+    );
     rig.pull(c1);
     rig.started(a, 3);
-    assert_eq!(rig.commands(), [BackendCommand::Focus { attachment: a }]);
+    assert_eq!(
+        rig.commands(),
+        [BackendCommand::Focus {
+            ownership: rig.generation(1),
+            attachment: a
+        }]
+    );
 }
 
 #[test]
@@ -1466,15 +1503,20 @@ fn non_owner_requests_are_stored_not_forwarded() {
         rig.commands(),
         [
             BackendCommand::SetDisplay {
+                ownership: rig.generation(1),
                 attachment: b,
                 display: other
             },
             BackendCommand::Resize {
+                ownership: rig.generation(1),
                 attachment: b,
                 cols: 132,
                 rows: 50
             },
-            BackendCommand::Focus { attachment: b },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: b
+            },
         ]
     );
     rig.request_ownership(c2, b);
@@ -1503,8 +1545,12 @@ fn owner_requests_are_forwarded() {
     assert_eq!(
         rig.commands(),
         [
-            BackendCommand::Focus { attachment: a },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: a
+            },
             BackendCommand::SetDisplay {
+                ownership: rig.generation(1),
                 attachment: a,
                 display: other
             }
@@ -1720,15 +1766,20 @@ fn disconnect_hands_ownership_to_a_member_on_another_connection() {
         rig.commands(),
         [
             BackendCommand::SetDisplay {
+                ownership: rig.generation(1),
                 attachment: z,
                 display: display()
             },
             BackendCommand::Resize {
+                ownership: rig.generation(1),
                 attachment: z,
                 cols: 80,
                 rows: 24
             },
-            BackendCommand::Focus { attachment: z },
+            BackendCommand::Focus {
+                ownership: rig.generation(1),
+                attachment: z
+            },
         ]
     );
     assert_eq!(

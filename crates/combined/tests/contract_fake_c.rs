@@ -28,6 +28,7 @@ contract!(
         owner_leaving_hands_off_to_most_recently_focused,
         ownership_changes_while_a_pair_is_reopening,
         queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen,
+        two_pairs_reopening_keep_the_new_owners_latest_size_and_display,
         only_the_owners_reply_is_forwarded_once,
         replayed_then_live_query_gets_one_reply_for_the_live_one,
         stale_replies_are_dropped_silently,

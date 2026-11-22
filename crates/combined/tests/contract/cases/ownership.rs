@@ -1,7 +1,7 @@
-//! Cases 34-39 and 43: who owns a terminal's size and input when several attachments share it.
+//! Cases 34-39, 43 and 45: who owns a terminal's size and input when several attachments share it.
 
 use combine_protocol::{
-    AttachmentId, ClientMessage, ErrorCode, OwnershipGeneration, Resize, TermId,
+    AttachmentId, ClientMessage, DaemonMessage, ErrorCode, OwnershipGeneration, Resize, TermId,
 };
 use combined::core::{BackendCommand, CoreConfig};
 use combined::testing::Half;
@@ -54,6 +54,14 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
             heavy: false,
             run: |t| {
                 queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen(t).boxed_local()
+            },
+        },
+        Case {
+            name: "two_pairs_reopening_keep_the_new_owners_latest_size_and_display",
+            needs: &[Fault::HalfFailure, Fault::Observation],
+            heavy: false,
+            run: |t| {
+                two_pairs_reopening_keep_the_new_owners_latest_size_and_display(t).boxed_local()
             },
         },
     ]
@@ -285,15 +293,20 @@ pub async fn non_owner_input_takes_ownership_before_it_is_forwarded<T: Target>(
     let for_b = commands_for(&journal, b);
     let at = |wanted: &BackendCommand| for_b.iter().position(|command| *command == wanted);
     let write = at(&BackendCommand::Write {
+        ownership: OwnershipGeneration(0),
         attachment: b,
         bytes: b"x".to_vec(),
     });
     let resize = at(&BackendCommand::Resize {
+        ownership: OwnershipGeneration(0),
         attachment: b,
         cols: 100,
         rows: 30,
     });
-    let focus = at(&BackendCommand::Focus { attachment: b });
+    let focus = at(&BackendCommand::Focus {
+        attachment: b,
+        ownership: OwnershipGeneration(0),
+    });
     ensure!(
         "order",
         matches!((resize, focus, write), (Some(r), Some(f), Some(w)) if r < w && f < w),
@@ -396,7 +409,10 @@ pub async fn ownership_changes_while_a_pair_is_reopening<T: Target>(t: &mut T) -
     let journal = h.journal();
     ensure!(
         "focus",
-        !journal.contains(&BackendCommand::Focus { attachment: a }),
+        !journal.contains(&BackendCommand::Focus {
+            attachment: a,
+            ownership: OwnershipGeneration(0)
+        }),
         "A was focused after it lost ownership; journal {journal:?}"
     );
     let size = h.target.pty_size(&term)?;
@@ -436,6 +452,63 @@ pub async fn queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen<T:
         "pty-size",
         size == (100, 30),
         "the PTY is {size:?}: A's queued requests took B's size back, expected (100, 30)"
+    );
+    ensure!(
+        "owner",
+        heard(&ca, a)?.1 == Some(b) && heard(&cb, b)?.1 == Some(b),
+        "core and the clients should agree that B owns; A heard {:?}, B heard {:?}",
+        heard(&ca, a),
+        heard(&cb, b)
+    );
+    let mut typed = h.target.typed_input(&term)?;
+    typed.sort_unstable();
+    ensure!(
+        "typed-once",
+        typed == b"ab",
+        "each typed byte should be written exactly once; got {:?}",
+        String::from_utf8_lossy(&typed)
+    );
+    h.finish(&[&ca, &cb])
+}
+
+/// Case 45: both attachments' pairs are reopening when ownership moves from A to B. A's old
+/// queued focus does not count against B's newer resize and display, which both land, and each
+/// attachment's typed bytes are written once.
+pub async fn two_pairs_reopening_keep_the_new_owners_latest_size_and_display<T: Target>(
+    t: &mut T,
+) -> Outcome {
+    let mut h = Harness::new(t, CoreConfig::default())?;
+    let term = h.spawn("p", 80, 24).await?;
+    let mut ca = h.client();
+    let mut cb = h.client();
+    let (a, b) = owner_and_second(&mut h, &term, &mut ca, &mut cb, (120, 24)).await?;
+
+    h.target.fail_half(&term, 0, Half::Input)?;
+    h.type_input(&mut ca, a, b"a").await?;
+    h.focus(&mut ca, a).await?;
+    h.target.fail_half(&term, 1, Half::Input)?;
+    h.type_input(&mut cb, b, b"b").await?;
+    h.read_until(&mut cb, |message| {
+        matches!(message, DaemonMessage::Ownership(o) if o.attachment == b && o.owner == Some(b))
+    })
+    .await?;
+    h.resize(&mut cb, b, 140, 24).await?;
+    let mut changed = display();
+    changed.foreground = "#00ff00".to_string();
+    h.set_display(&mut cb, b, changed.clone()).await?;
+    h.settle(&mut [&mut ca, &mut cb]).await?;
+
+    let size = h.target.pty_size(&term)?;
+    ensure!(
+        "pty-size",
+        size == (140, 24),
+        "the PTY is {size:?}, expected B's latest size (140, 24)"
+    );
+    let facts = cb.view(b).and_then(|view| view.last_facts.clone());
+    ensure!(
+        "display",
+        facts == Some(changed),
+        "B's latest display should be the last one the backend applied; got {facts:?}"
     );
     ensure!(
         "owner",

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use combine_protocol::{BackendGeneration, CloseReason, Fidelity, TermId};
+use combine_protocol::{BackendGeneration, CloseReason, Fidelity, OwnershipGeneration, TermId};
 use combined::model::{SpaceId, TermEvent};
 use combined::ports::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, Capabilities, FileStore,
@@ -20,6 +20,8 @@ use combined::testing::{
 use common::{display, request_options, spawn_spec};
 use futures::executor::block_on;
 use futures::{FutureExt, StreamExt};
+
+const OWN: OwnershipGeneration = OwnershipGeneration(1);
 
 type Seen = Vec<(u64, AttachEvent)>;
 
@@ -154,12 +156,12 @@ fn watch_only_has_no_input_half() {
     assert_eq!(control.open_halves(&term), 1);
 
     block_on(async {
-        att.write(b"typed").await.unwrap();
+        att.write(OWN, b"typed").await.unwrap();
         att.write_automatic(BackendGeneration(1), b"reply")
             .await
             .unwrap();
-        att.resize(120, 40).await.unwrap();
-        att.focus().await.unwrap();
+        att.resize(OWN, 120, 40).await.unwrap();
+        att.focus(OWN).await.unwrap();
     });
     assert!(control.typed_input(&term).is_empty());
     assert!(control.automatic_input(&term).is_empty());
@@ -238,7 +240,7 @@ fn delayed_output_and_boundary_release_in_order() {
 
     control.delay_output(&term);
     control.emit(&term, b"old");
-    block_on(att.focus()).unwrap();
+    block_on(att.focus(OWN)).unwrap();
     assert_eq!(control.pty_size(&term), Some((100, 30)));
     assert!(drain(&mut events).is_empty());
     assert!(control.pending_output(&term) > 0);
@@ -374,17 +376,17 @@ fn half_failures_rebuild_from_latest_requested_size() {
     let mut att = attach(&backend, &term);
     let mut events = att.events();
     drain(&mut events);
-    block_on(att.focus()).unwrap();
+    block_on(att.focus(OWN)).unwrap();
     assert_eq!(control.pty_size(&term), Some((100, 30)));
     drain(&mut events);
 
     control.fail_half(FakeAttachmentRef(1), Half::Input);
     assert_eq!(control.pty_size(&term), Some((200, 120)));
     block_on(async {
-        att.resize(120, 40).await.unwrap();
-        att.set_display(display()).await.unwrap();
-        att.focus().await.unwrap();
-        att.write(b"ls").await.unwrap();
+        att.resize(OWN, 120, 40).await.unwrap();
+        att.set_display(OWN, display()).await.unwrap();
+        att.focus(OWN).await.unwrap();
+        att.write(OWN, b"ls").await.unwrap();
     });
     assert_eq!(control.pty_size(&term), Some((200, 120)));
     assert!(control.typed_input(&term).is_empty());
@@ -447,7 +449,7 @@ fn opening_failure_halfway_tears_down() {
     assert!(control.step());
     assert_eq!(drain(&mut events), vec![(1, AttachEvent::Lost)]);
     assert!(has_ended(&mut events));
-    assert_eq!(block_on(att.write(b"x")), Err(BackendError::Closed));
+    assert_eq!(block_on(att.write(OWN, b"x")), Err(BackendError::Closed));
     assert!(!control.step());
 }
 
@@ -539,20 +541,20 @@ fn reopen_queue_is_bounded() {
     control.fail_half(FakeAttachmentRef(1), Half::Display);
 
     block_on(async {
-        att.write(b"abcde").await.unwrap();
+        att.write(OWN, b"abcde").await.unwrap();
         assert_eq!(
-            att.write(b"fghij").await,
+            att.write(OWN, b"fghij").await,
             Err(BackendError::Failed("reopen queue full".to_string()))
         );
-        att.write(b"fgh").await.unwrap();
+        att.write(OWN, b"fgh").await.unwrap();
         att.write_automatic(BackendGeneration(1), b"dropped")
             .await
             .unwrap();
         att.credit(10).await.unwrap();
-        att.resize(90, 20).await.unwrap();
-        att.focus().await.unwrap();
+        att.resize(OWN, 90, 20).await.unwrap();
+        att.focus(OWN).await.unwrap();
         assert_eq!(
-            att.set_display(display()).await,
+            att.set_display(OWN, display()).await,
             Err(BackendError::Failed("reopen queue full".to_string()))
         );
     });
@@ -581,14 +583,14 @@ fn mutations_change_the_stream() {
     let mut att = attach(&backend, &term);
     let mut events = att.events();
     drain(&mut events);
-    block_on(att.focus()).unwrap();
+    block_on(att.focus(OWN)).unwrap();
     assert_eq!(control.pty_size(&term), Some((100, 30)));
     let seen = drain(&mut events);
     assert!(!seen
         .iter()
         .any(|(_, e)| matches!(e, AttachEvent::Resized { .. })));
     assert_eq!(paints(&seen).len(), 1);
-    block_on(att.resize(90, 20)).unwrap();
+    block_on(att.resize(OWN, 90, 20)).unwrap();
     assert!(drain(&mut events).contains(&(1, resized(90, 20))));
 
     // MoveResized: the first Resized overtakes the latest Data still waiting.
@@ -599,12 +601,12 @@ fn mutations_change_the_stream() {
     drain(&mut events);
     control.delay_output(&term);
     control.emit(&term, b"old");
-    block_on(att.focus()).unwrap();
+    block_on(att.focus(OWN)).unwrap();
     control.release_output(&term);
     let seen = drain(&mut events);
     assert_eq!(seen[0], (1, resized(100, 30)));
     assert_eq!(seen[1], (1, AttachEvent::Data(b"old".to_vec())));
-    block_on(att.resize(90, 20)).unwrap();
+    block_on(att.resize(OWN, 90, 20)).unwrap();
     assert_eq!(drain(&mut events)[0], (1, resized(90, 20)));
 
     // MoveResized with nothing waiting is sent in place, and stays armed.
@@ -613,11 +615,11 @@ fn mutations_change_the_stream() {
     let mut att = attach(&backend, &term);
     let mut events = att.events();
     drain(&mut events);
-    block_on(att.focus()).unwrap();
+    block_on(att.focus(OWN)).unwrap();
     assert_eq!(drain(&mut events)[0], (1, resized(100, 30)));
     control.delay_output(&term);
     control.emit(&term, b"later");
-    block_on(att.resize(90, 20)).unwrap();
+    block_on(att.resize(OWN, 90, 20)).unwrap();
     control.release_output(&term);
     assert_eq!(drain(&mut events)[0], (1, resized(90, 20)));
 
@@ -675,10 +677,10 @@ fn last_active_leaving_returns_pty_to_headless_size() {
     drain(&mut b_events);
     assert_eq!(control.pty_size(&term), Some((80, 24)));
 
-    block_on(a.focus()).unwrap();
+    block_on(a.focus(OWN)).unwrap();
     assert_eq!(control.pty_size(&term), Some((100, 30)));
     assert!(drain(&mut b_events).contains(&(1, resized(100, 30))));
-    block_on(b.resize(70, 10)).unwrap();
+    block_on(b.resize(OWN, 70, 10)).unwrap();
     assert_eq!(control.pty_size(&term), Some((100, 30)));
 
     block_on(b.detach()).unwrap();
@@ -720,11 +722,11 @@ fn spawn_kill_and_calls_follow_the_rules() {
     drain(&mut events);
 
     block_on(async {
-        att.write(b"echo me").await.unwrap();
+        att.write(OWN, b"echo me").await.unwrap();
         att.write_automatic(BackendGeneration(1), b"\x1b[0n")
             .await
             .unwrap();
-        att.set_display(display()).await.unwrap();
+        att.set_display(OWN, display()).await.unwrap();
     });
     assert_eq!(control.typed_input(&term), b"echo me");
     assert_eq!(control.automatic_input(&term), vec![b"\x1b[0n".to_vec()]);
@@ -739,7 +741,7 @@ fn spawn_kill_and_calls_follow_the_rules() {
         vec![(1, AttachEvent::Closed(CloseReason::Exited))]
     );
     assert!(has_ended(&mut events));
-    assert_eq!(block_on(att.focus()), Err(BackendError::Closed));
+    assert_eq!(block_on(att.focus(OWN)), Err(BackendError::Closed));
     assert!(block_on(backend.list()).unwrap().is_empty());
     assert!(matches!(
         block_on(backend.kill(&term)),
@@ -772,7 +774,7 @@ fn capabilities_gate_facts_and_automatic_replies() {
     let mut events = att.events();
     drain(&mut events);
     block_on(async {
-        att.set_display(display()).await.unwrap();
+        att.set_display(OWN, display()).await.unwrap();
         att.write_automatic(BackendGeneration(1), b"reply")
             .await
             .unwrap();
@@ -809,7 +811,7 @@ fn an_exited_terminal_with_credit_blocked_output_still_finishes() {
     assert!(after_exit.is_empty());
     assert!(!has_ended(&mut events));
     assert_eq!(
-        block_on(att.write(b"late")),
+        block_on(att.write(OWN, b"late")),
         Err(BackendError::Closed),
         "a program that ended takes no input"
     );

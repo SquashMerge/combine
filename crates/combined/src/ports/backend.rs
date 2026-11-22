@@ -7,7 +7,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use combine_protocol::{
-    AttachRequestOptions, BackendGeneration, CloseReason, Display, Fidelity, TermId,
+    AttachRequestOptions, BackendGeneration, CloseReason, Display, Fidelity, OwnershipGeneration,
+    TermId,
 };
 use futures::stream::BoxStream;
 
@@ -141,11 +142,13 @@ pub trait TerminalBackend: Send + Sync {
 ///   in order once it is ready. `write_automatic` and `credit` are dropped. The queue is
 ///   bounded by the adapter; a request beyond the bound returns `Err(BackendError::Failed(..))`
 ///   and is not applied.
-/// - A queued owner-affecting request (`focus`, `resize`, `set_display` and the activation a
-///   `write` brings) is not applied on reopen if another attachment of the terminal became the
-///   active viewer after it was queued: it must not make this attachment active or change the
-///   terminal's size or display. Typed bytes in such a `write` were accepted while the
-///   attachment owned the terminal, so they are still written, once, without activating it.
+/// - `write`, `resize`, `focus` and `set_display` carry the `OwnershipGeneration` core
+///   authorized them under. Per terminal, the adapter keeps the highest generation it has
+///   received in any such call, queued ones included. A request whose generation is lower
+///   than that when it is applied, live or from a reopen queue, is superseded: it must not
+///   activate its attachment or change the terminal's size or display, but it still updates
+///   the attachment's latest requested size and display. A superseded `write` still writes its
+///   bytes, once, without activating. A request at the highest generation applies normally.
 #[async_trait]
 pub trait Attachment: Send {
     /// Of the current generation.
@@ -153,7 +156,7 @@ pub trait Attachment: Send {
     fn ordered_resizes(&self) -> bool;
     /// Taken once; a second call returns an empty stream.
     fn events(&mut self) -> AttachEvents;
-    async fn write(&mut self, bytes: &[u8]) -> BackendResult<()>;
+    async fn write(&mut self, ownership: OwnershipGeneration, bytes: &[u8]) -> BackendResult<()>;
     /// `generation` is the one core authorized: that of the `Started` which opened the reply's
     /// epoch. A reply for any other generation is dropped and returns `Ok`, even if the pair
     /// was rebuilt before core saw the new `Started`.
@@ -162,9 +165,18 @@ pub trait Attachment: Send {
         generation: BackendGeneration,
         bytes: &[u8],
     ) -> BackendResult<()>;
-    async fn resize(&mut self, cols: u16, rows: u16) -> BackendResult<()>;
-    async fn focus(&mut self) -> BackendResult<()>;
-    async fn set_display(&mut self, display: Display) -> BackendResult<()>;
+    async fn resize(
+        &mut self,
+        ownership: OwnershipGeneration,
+        cols: u16,
+        rows: u16,
+    ) -> BackendResult<()>;
+    async fn focus(&mut self, ownership: OwnershipGeneration) -> BackendResult<()>;
+    async fn set_display(
+        &mut self,
+        ownership: OwnershipGeneration,
+        display: Display,
+    ) -> BackendResult<()>;
     async fn credit(&mut self, bytes: u32) -> BackendResult<()>;
     async fn detach(self: Box<Self>) -> BackendResult<()>;
 }

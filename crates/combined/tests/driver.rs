@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use combine_protocol::{
     Attach, AttachmentId, BackendGeneration, ClientMessage, CloseReason, DaemonMessage, Detach,
-    Display, ErrorCode, Fidelity, Input, RequestId, RequestOwnership, TermId,
+    Display, ErrorCode, Fidelity, Input, OwnershipGeneration, RequestId, RequestOwnership, TermId,
 };
 use combined::core::{BackendCommand, ConnectionId, Core, CoreConfig, Driver};
 use combined::model::{Millis, SpawnSpec, TermEvent, TermInfo};
@@ -162,7 +162,7 @@ impl Attachment for StubAttachment {
         }
     }
 
-    async fn write(&mut self, bytes: &[u8]) -> BackendResult<()> {
+    async fn write(&mut self, _ownership: OwnershipGeneration, bytes: &[u8]) -> BackendResult<()> {
         self.note(format!("write {}", String::from_utf8_lossy(bytes)));
         Ok(())
     }
@@ -176,17 +176,26 @@ impl Attachment for StubAttachment {
         Ok(())
     }
 
-    async fn resize(&mut self, cols: u16, rows: u16) -> BackendResult<()> {
+    async fn resize(
+        &mut self,
+        _ownership: OwnershipGeneration,
+        cols: u16,
+        rows: u16,
+    ) -> BackendResult<()> {
         self.note(format!("resize {cols}x{rows}"));
         Ok(())
     }
 
-    async fn focus(&mut self) -> BackendResult<()> {
+    async fn focus(&mut self, _ownership: OwnershipGeneration) -> BackendResult<()> {
         self.note("focus".to_string());
         Ok(())
     }
 
-    async fn set_display(&mut self, _display: Display) -> BackendResult<()> {
+    async fn set_display(
+        &mut self,
+        _ownership: OwnershipGeneration,
+        _display: Display,
+    ) -> BackendResult<()> {
         self.note("set_display".to_string());
         Ok(())
     }
