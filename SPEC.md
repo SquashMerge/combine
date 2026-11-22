@@ -1,4 +1,4 @@
-# Combine — Spec (rev 14)
+# Combine — Spec (rev 15)
 
 Updated 2026-11-22
 
@@ -18,7 +18,24 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
 
-**Changes from rev 13 (panel kinds and the view language):** panel kinds are data, not code. A kind is a file in the host's kind library. It holds a record JSON Schema, a selection contract, optional paging, and a view written in Combine's view language. Any service's group fills a kind, so an issue list from GitHub, Jira or Linear is the same panel. The view language is a small declarative tree of built-in nodes, rendered by React. It supports actions on elements and on visibility, keyboard collection navigation with virtualized scrolling, pagination, named animations, timers and tooltips, and it runs no code. Kind content is part of a run's identity, and one validation pipeline covers loader, source and static data. Two fallbacks follow: sanitized logic-less templates, then a scripted sandbox behind trust approval. The GitHub group gains issue list and issue detail panels, and M4's done criterion covers issues and a second issue backend.
+**Changes from rev 14 (panel kinds and the view language):** panel kinds are data, not code. A kind is a file in the host's kind library. It holds a record JSON Schema, a selection contract, optional paging, and a view written in Combine's view language. Any service's group fills a kind, so an issue list from GitHub, Jira or Linear is the same panel. The view language is a small declarative tree of built-in nodes, rendered by React. It supports actions on elements and on visibility, keyboard collection navigation with virtualized scrolling, pagination, named animations, timers and tooltips, and it runs no code. Kind content is part of a run's identity, and one validation pipeline covers loader, source and static data. Two fallbacks follow: sanitized logic-less templates, then a scripted sandbox behind trust approval. The GitHub group gains issue list and issue detail panels, and M4's done criterion covers issues and a second issue backend.
+
+**Changes from rev 13 (S4, daemon entry):**
+
+- `combined serve` runs the daemon and `combined connect` bridges stdio to its socket.
+- `<daemon config>` is `~/.config/combine/`, with `daemon.json` for the start-up settings (backend, herdr-core socket, data directory, socket). `<daemon data>` is `~/Library/Application Support/com.squashmerge.combined/`, mode 0700, holding `host.json`, `ids.json`, `combined.lock` and the socket `combined.sock`. The default socket, `<daemon data>/combined.sock`, is the path a `hosts.json` `socket` entry gives for this machine.
+- The socket is 0600 inside a directory only the user can open. A daemon serves it only while it holds `<socket>.lock`, and it replaces an existing socket file only while holding that lock and only if nothing answers on it, so a live daemon is never displaced.
+- At most 64 client connections. A connection that is closing, such as after a malformed frame, still counts until its writer has closed the socket, so closing connections can't exceed the cap. A write stuck for 10 s closes its connection. A stop is handled like a crash.
+- The 10 s for the `hello` runs from admission to the completed `hello`, so a client sending a byte at a time doesn't extend it.
+- The file store on disk refuses a symlink at `<space>/.workspace`, at any folder under it or at the file, for reads and writes. The check isn't race-free against a process changing the folder during a call.
+- `host.json` is identity only, and a corrupt one stops the start.
+- Attachment IDs and ownership generations never repeat across restarts, because each incarnation reserves them in blocks of 2^20 in `ids.json` before issuing them.
+- The herdr-core socket comes from `daemon.json`, else from `HC_SOCKET`, `HC_SESSION` and the XDG paths, else from herdr-core's default. A missing one stops the start, and launchd retries.
+- Output is flushed at most once per 16 ms, at once after an idle frame, up to 1 MiB per connection per flush.
+- Protocol version 2 adds `watch_terminals` and the `terminals` snapshot of a host's terminals and spaces.
+- A first frame that can't be decoded gets `malformed`, and a first message that isn't `hello` gets `invalid_request`, before the close.
+- The protocol crate's `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. It is applied before a peer's error text is logged or put in the `Display` of `HandshakeError::Refused`. It is not the client's display rule (see Wire protocol, Handshake), which it neither replaces nor restates.
+- The launchd plist ships in `crates/combined/launchd/` and is installed by hand (`docs/daemon.md`).
 
 **Changes from rev 12 (S5, client shell):** the client's `hosts.json` schema and location; two entries never share a host ID; how the client trims daemon text and `ssh` stderr before showing them; reconnect backoff, and which failures stop reconnecting; host state reaches the webview as `hosts-changed` snapshots; every unsigned 64-bit value crosses the Tauri boundary as a decimal string.
 
@@ -77,6 +94,13 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - Hosts the MCP server the local agents call, runs panel loaders, and is the authority for the space's files.
 - Keeps working with no client attached: loaders refresh, agents get render feedback, state is saved.
 - Generates a stable host ID (a UUID in `<daemon data>/host.json`) on first start. Clients key everything about a host by this ID, never by its address.
+- **Commands:** `combined serve [--config <path>]` runs the daemon, `combined connect [--socket <path>] [--config <path>]` is the stdio bridge, and `combined --version` prints the version.
+- **Socket:** by default `<daemon data>/combined.sock`, mode 0600 in a parent directory with no group or other access (the daemon creates the parent 0700 if it is missing, and refuses an existing other parent that is open to group or other). A socket path is at most 103 bytes. A daemon serves its socket only while it holds `<socket>.lock`. It replaces an existing socket file only while holding that lock and only if nothing answers on it. The connect probe is a second check, not proof, because macOS refuses connections when a backlog is full. `<daemon data>/combined.lock` allows one daemon per data directory, so `host.json` and `ids.json` each have one writer.
+- **Connections:** at most 64 client connections; another is closed without a reply. A connection closing after a malformed frame counts until its socket is closed. A write that makes no progress for 10 s closes the connection.
+- **No SIGTERM handler.** A stop is handled like a crash: the OS releases both locks, the next start replaces the stale socket, and clients reconnect and get `gap` for attachments the new incarnation doesn't know.
+- **`host.json`** is `{ "version": 1, "host_id": "<uuid>" }`, mode 0600, written once with a safe write. The ID is a random (version 4) UUID read from `/dev/urandom`. A file that is unreadable, not valid JSON, another version, missing the field or holding something that isn't a lowercase UUID stops the start, and the daemon never rewrites it.
+- **herdr-core down:** the daemon checks at start that the herdr-core socket path is absolute, at most 103 bytes and an existing socket, without connecting. If not, it exits 3 with the path, where the path came from and a hint, and launchd retries every 10 s. If the backend's watch ends while the daemon runs, it also exits 3; clients reconnect and get `gap`, and attach fresh. Exit codes: 0 for a `connect` that ends cleanly, 1 for a runtime failure or a `connect` that can't reach a daemon, 2 for a usage, configuration or lock error, 3 for herdr-core.
+- **launchd:** the agent's label is `com.squashmerge.combined`. The plist ships in `crates/combined/launchd/` and is installed by hand (`docs/daemon.md`); Combine never writes `~/Library/LaunchAgents`.
 
 **Client** (the Tauri app)
 
@@ -85,22 +109,22 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 
 **Transport**
 
-- The client runs the system `ssh` with `combined connect`, a stdio bridge to the daemon's Unix socket (like the MCP shim). One SSH session per host carries everything.
+- The client runs the system `ssh` with `combined connect`, a stdio bridge to the daemon's Unix socket (like the MCP shim). One SSH session per host carries everything. `combined connect` finds the socket from `--socket`, else from `daemon.json` (its `socket`, else its `data_dir` plus `combined.sock`), else from the default; with no daemon it exits 1 and writes only to stderr.
 - The protocol over the bridge, and over a local socket, is the same: length-prefixed frames, JSON for control messages, and binary for terminal output, typed input and automatic query replies (see Wire protocol).
-- **Handshake:** the client's first frame is `hello` with its protocol version; the daemon answers `welcome` with its version and host ID. A version mismatch closes the connection with a message naming both versions (`protocol version mismatch: client 2, daemon 1`).
+- **Handshake:** the client's first frame is `hello` with its protocol version; the daemon answers `welcome` with its version and host ID. A version mismatch closes the connection with a message naming both versions (`protocol version mismatch: client 1, daemon 2`).
 - **Frames:** at most 1 MiB (2^20 bytes) each, counting the kind byte and the payload; larger terminal output is split. Replies and control messages are queued ahead of terminal output, and output from several attachments is interleaved round-robin, so a noisy terminal can't delay control messages or other terminals. Priority never reorders one attachment's events relative to each other: its data, resizes and other events, and the in-order `gap` that ends them, travel in one ordered stream (see Attach, sequence and epoch). Within one pull of a connection's output, all queued control messages go before stream messages.
 - SSH provides authentication (the user's keys and agent), encryption, and server identity (`known_hosts`). Using the system `ssh` means `~/.ssh/config`, `ProxyJump`, and Tailscale SSH all work without app support.
 - The client checks that the host ID reported over the bridge matches the one it stored for that host, so a changed address can't silently point the rail at a different machine.
 - **SSH invocation:** `ssh -T -o BatchMode=yes <dest> <path>/combined connect`. No PTY is allocated; stdout carries only protocol frames; stderr is captured and shown in the client, trimmed the same way as daemon text (see Wire protocol, Handshake).
 - **Failures are reported, never worked around:** an unknown or changed host key, a key whose passphrase isn't in the agent, or failed authentication each stop the connection with a message saying what to run in a terminal (`ssh <dest>` once, or `ssh-add`). Host-key checking is never disabled.
 - **Remote binary:** non-interactive SSH often lacks Homebrew's `PATH`, so each host entry stores the absolute path to `combined` (default `/opt/homebrew/bin/combined`). A missing binary shows an install hint. M0 confirmed it: a bare command name fails over `ssh -T` (exit 127), and `~/.local/bin`, where `hc` lives, isn't on that `PATH` either.
-- **Finding herdr-core:** the daemon connects to herdr-core's local socket directly, never through `hc`. As a launchd agent it starts with a minimal environment, so the socket path (herdr-core's default `~/.local/state/herdr-core/default/default.sock`, or what `HC_SESSION`, `HC_SOCKET` and the XDG paths select) is daemon configuration, checked at start.
+- **Finding herdr-core:** the daemon connects to herdr-core's local socket directly, never through `hc`. As a launchd agent it starts with a minimal environment, so the socket path is daemon configuration, checked at start. It comes, in order, from `herdr_core_socket` in `daemon.json`; else from `HC_SOCKET`; else, with the session taken from `HC_SESSION` or `default`, from `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` when `XDG_RUNTIME_DIR` is set, or `${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/<session>/<session>.sock` (for the default session, `~/.local/state/herdr-core/default/default.sock`). Empty variables count as unset. Tests always pass explicit, isolated paths, and test helpers refuse herdr-core's default.
 - Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attachment from its last applied cursor (see Attach, sequence and epoch). The backoff starts at 1 s, doubles to at most 30 s, and resets after a successful handshake. The failures above (host key, passphrase, authentication, missing binary), a host ID mismatch or a host ID another entry already has, a refused or malformed handshake and a `version_mismatch` stop reconnecting: the host shows the message until the user retries it.
 - Latency budget: keystroke echo should stay under about 30 ms on a local network. M0 measured p99 at 0.5 ms or less locally, through the daemon and over ssh to localhost (input to echo received, before xterm.js applies it). The local-network measurement is part of M1.
 
-**Wire protocol** (`crates/combine-protocol`, protocol version 1)
+**Wire protocol** (`crates/combine-protocol`, protocol version 2)
 
-- **Scope:** version 1 covers the handshake and terminal attachments. Terminal lists and state events, spawning and panels arrive as new message types, with a version bump, in the work that needs them.
+- **Scope:** version 1 covered the handshake and terminal attachments; version 2 adds the terminal list (`watch_terminals`, `terminals`). Spawning and panels arrive as new message types, with a version bump, in the work that needs them.
 - **Frames:** `u32 length | u8 kind | payload`. Every integer on the wire is big-endian. The length counts the kind byte and the payload, and is between 1 and 2^20 (1 MiB). So a frame is at most 1 MiB plus its 4-byte prefix. A reader checks the length before allocating. Memory per decoded control frame is bounded by a constant factor of the 1 MiB cap: within the 32 MiB bound; the frame buffer for unknown values and unescaped keys. Unknown fields are skipped, never stored. There is one message per frame; batching (see Streaming) writes several frames per flush.
 - **Kinds:**
 
@@ -128,6 +152,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - **Client to daemon:**
   - `attach { request, terminal, options }` is a fresh attach. Its options are `cols`, `rows`, `display`, `observe` and `history`; `resume` takes the place of the trait's `resumed`.
   - `resume { request, cursor }`
+  - `watch_terminals { request }` subscribes the connection to the host's terminals and spaces. Asking again answers with a fresh snapshot carrying the new `request`; there is no unwatch. A connection that leaves more than 16 answers unflushed is disconnected.
   - `detach { attachment }`
   - `ack { cursor }`
   - `resize { attachment, cols, rows, ownership_generation }`
@@ -141,6 +166,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   - `welcome`.
   - `attached { request, attachment }`, sent before the attachment's first `started`.
   - `resumed { request, attachment, replay_through }` and `gap { attachment, request }`.
+  - `terminals { request, terminals, spaces }`, always a full snapshot, never a delta. The answer to `watch_terminals` carries its `request`; after any change, a snapshot is pushed with `request: null`, at most one per flush per watching connection. Each `terminals` entry is `{ id, cwd, argv, state, exit_code, labels, cols, rows }`, with `state` `running` or `exited` and `exit_code` `null` unless the terminal exited with a code; each `spaces` entry is `{ id, kind, terminals }`, where `id` is the space's folder path, `kind` is `repository`, `worktree` or `folder`, and `terminals` lists its terminal IDs. Both lists are sorted by ID. A snapshot too large for one frame is answered with an `internal` error, `the terminal list is larger than one frame`, in its place. Example: `{"type":"terminals","request":7,"terminals":[{"id":"hc:t8","cwd":"/Users/me/src/trellis/crates","argv":["claude"],"state":"running","exit_code":null,"labels":{},"cols":120,"rows":40}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["hc:t8"]}]}`.
   - `ownership { attachment, ownership_generation, owner }`, where `owner` is an attachment ID, or `null` for no owner.
   - `error { code, message, request, attachment }`.
   - The attachment events, each with its `cursor`:
@@ -154,11 +180,13 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 
   `detach` is answered by the attachment's final `closed` with reason `detached`.
 
-  An attachment's ordered stream carries its attachment events. If the stream ends with an in-order `gap` (`request: null`), that gap comes after the last event. Everything else here is control traffic, queued ahead of output (see Transport): `welcome`, `attached`, `resumed`, a `gap` that answers a resume, `ownership` and `error`.
+  An attachment's ordered stream carries its attachment events. If the stream ends with an in-order `gap` (`request: null`), that gap comes after the last event. Everything else here is control traffic, queued ahead of output (see Transport): `welcome`, `attached`, `resumed`, a `gap` that answers a resume, `terminals`, `ownership` and `error`.
 - **Flow control:** no credit message crosses the wire. The client's `ack` of the last event it applied is its only flow-control signal; the daemon's credit to the backend stays inside the daemon.
 - **Errors:**
   - `code` is one of `version_mismatch`, `malformed`, `unknown_terminal`, `attach_failed`, `unknown_attachment`, `stale_generation`, `watch_only`, `invalid_request` (including a `hello` after the handshake) and `internal`. `message` is for people. `request` or `attachment` names what the error answers.
   - A frame that can't be decoded is a protocol error: truncated, over the cap, an unknown kind or message type, or bad JSON. The receiver closes the connection, and the daemon sends `malformed` first. The codec returns each of these as a typed error and never panics.
+  - The daemon answers a first frame that can't be decoded with `malformed`, and a first message that isn't `hello` with `invalid_request`, before it closes. It waits 10 s in total, from admission, for the `hello` to arrive in full, and closes without a reply when the time runs out.
+  - `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. It is applied before a peer's error text is logged or put in the `Display` of `HandshakeError::Refused`. It is not the client's display rule (see Handshake), which it neither replaces nor restates.
 - **Neutrality:** protocol types name nothing from a particular backend:
   - no backend name;
   - none of herdr-core's frame-kind spellings (`AUTOMATIC_INPUT`, `CREDIT` and the rest) or kind numbers;
@@ -181,6 +209,7 @@ A space is one project folder on one host: the herdr-core terminals started in i
 
 - A terminal joins the space of the git root containing its starting `cwd` (or that folder itself outside git), and stays there: a program that later changes directory doesn't move it. The navigator can reassign a terminal explicitly; the assignment is daemon runtime state. The daemon finds the git root through a `GitProbe` port: the nearest ancestor of the starting `cwd` holding `.git` (a directory: a repository; a file: a worktree or submodule) is the space's folder; with none, the `cwd` itself. A space's ID is that folder's path.
 - A git worktree has its own root, so it is its own space.
+- The daemon watches the backend's terminals, then lists them, and keeps them with their spaces in core's `TerminalList`; `terminals` snapshots report it.
 - Only the host's own terminals count. herdr-core also lists terminals on machines it has linked (`work/t7`); those never join a space here (see Terminal backends).
 - The daemon keeps one in-memory file store per project path, with a single revision counter, so every reader of a `.workspace/` sees one copy (the `FileStore` port: read, write and the revision).
 
@@ -240,7 +269,8 @@ No database: every panel is a directory of plain files on the space's host, so a
     loader.js                         optional; runs in the daemon
     view.html                         optional; Template or CustomHtml views only
 
-<daemon config>/                      per host, e.g. ~/.config/combine/
+<daemon config>/                      per host: ~/.config/combine/
+  daemon.json                         start-up settings: backend, herdr-core socket, data dir, socket
   settings.json                       CLI allowlist, approved MCP servers and tools, limits
   kinds/<kind-id>/kind.json           kind library: record schema, selection, paging, view
   groups/<group>/                     group library: github, jira, trellis, ...
@@ -248,12 +278,16 @@ No database: every panel is a directory of plain files on the space's host, so a
     lib.js                            helpers shared by the group's loaders
     panels/<name>/{panel.json, loader.js}
 
-<daemon data>/
+<daemon data>/                        ~/Library/Application Support/com.squashmerge.combined/, mode 0700
   host.json                           stable host ID
+  ids.json                            attachment ID reservation
+  combined.lock                       held by the running daemon, one per data dir
+  combined.sock                       the daemon's socket (default path)
+  combined.sock.lock                  held by the daemon serving that socket
   state.json                          SpaceBinding per space, pins and recents
   scratch/<space-id>/<panel-id>/      scratch panels until pinned or closed
 
-<daemon cache>/sources/               last good data per source key
+<daemon cache>/sources/               last good data per source key; ~/Library/Caches/com.squashmerge.combined/
 
 <client data>/
   hosts.json                          host IDs, SSH destinations, rail order
@@ -269,6 +303,8 @@ No database: every panel is a directory of plain files on the space's host, so a
 - **Safe writes:** temp file and rename, debounced about 500 ms on layout changes, immediate on space switch and quit.
 - **Scratch panels** survive space switches and daemon restarts; they are deleted when closed, or after 7 days unopened.
 - **Versioning:** every JSON file has a `version` field for later migrations.
+- **`daemon.json`:** `{ "version": 1, "backend"?, "herdr_core_socket"?, "data_dir"?, "socket"? }`. It is read before anything else, which is why it isn't part of `settings.json` (the allowlists and approvals of later milestones). Paths must be absolute. `backend` is `"herdr-core"` (the default), or `"fake"` in a build with the `test-support` feature only. An unknown field, another version, bad JSON or a relative path stops the start. A missing default file means every default applies; a missing file named with `--config` stops the start.
+- **`ids.json`:** `{ "version": 1, "ids_reserved_through": <u64> }`, mode 0600, written only by the daemon holding `combined.lock`. An invalid one stops the start and is never reset, since resetting would reuse attachment IDs.
 - **`hosts.json` (client):** `<client data>` is the app's data directory, `~/Library/Application Support/com.squashmerge.combine/` on macOS. The file is `{ "version": 1, "hosts": [...] }`; the array order is the rail order. Each entry has a unique `name` (the rail section title) and exactly one of `ssh` (an SSH destination) or `socket` (the absolute path of this machine's daemon socket, never a herdr-core socket). An `ssh` entry may set `combined_path`, the absolute path of `combined` on that host (default `/opt/homebrew/bin/combined`). `host_id` is absent until first contact; the client then records the daemon's host ID with a safe write and never rewrites it. Unknown fields, a duplicate `name` or `host_id`, or a `version` other than 1 make the file invalid: the client shows the error, connects to nothing and never writes it. If a host reports a host ID another entry already has, the client refuses it, so two entries never reach one machine. A missing file means no hosts. The client writes the file only to record a first-contact host ID, and not if it changed on disk since the client loaded it.
 
 ## Navigation
@@ -413,6 +449,7 @@ Each client panel gets its own backend attachment, and the daemon relays that at
 - **The resume cursor belongs to the client's xterm state.** The client resumes from its own last-applied cursor, kept with that xterm.js instance, not from the last acknowledgement the daemon happened to receive (an acknowledgement can be lost). A client that has lost its xterm state (a webview reload, a restarted app) has no cursor to resume from, and attaches fresh.
 - Two guarantees, kept separate. **State fidelity:** a fresh attach shows the current screen as the backend has it. The attachment carries the backend's fidelity (`Exact`, or `Inexact` when herdr-core reports `screen: "inexact"`); Combine never upgrades `Inexact`, and the panel header shows it. **Output history:** bytes are delivered in order only while the client stays within the replay buffer and the backend hasn't superseded output. herdr-core supersedes it in two places: a resync after a viewer falls behind, and a resize, where output still pending for the display viewer is replaced by the RESIZE and its paint. After a `Gap`, a resync, or a resize, only state is guaranteed. Continuous Combine sequence numbers don't prove continuous backend output.
 - **Backpressure:** the daemon grants herdr-core CREDIT only while the attachment's log has room, so a slow client never makes the daemon buffer without bound. herdr-core doesn't stall the program in return: past its own ~4 MiB per viewer it drops the backlog and repaints in-band. Combine accepts that as the slow-client path (the screen ends right; the skipped output is gone). It shows "output skipped" only when the backend reports `Resynced`; matching `CAN ESC [ ! p` in the bytes would be a guess, since program output can contain it and frames can split it. M0's 50 MB burst into an xterm.js client hit this 11 times. On the wire, the client's `ack` is its only flow-control signal; there is no client credit message.
+- **IDs survive restarts.** The daemon reserves IDs in blocks of 2^20 in `ids.json`. Before it serves, it writes a reservation one block above the last incarnation's and starts its counter just above the old one. It extends the reservation (temp file, `fsync`, rename) whenever fewer than half a block remain. If it can't write, it exits rather than issue an ID it hasn't reserved.
 - **Every append is bounded**, whatever its kind: the log caps retained bytes and event count, so a client that stops reading while resizes keep coming still hits the cap. Control and input queues per connection are bounded too. Overflow is a `Gap` in order, never a dropped or reordered event. The log always keeps room for that final `Gap`; after it the attachment's stream stops, and resuming from before it fails rather than replaying a partial log. A peer too blocked to receive even the `Gap` is disconnected under a bounded policy. The bound counts credit already granted to the backend and bytes in flight, not only what the log holds. Defaults: 4 MiB and 16,384 events per log; each event costs its payload plus 64 bytes; the final `Gap`'s 64 bytes and one event are always reserved; 64 KiB is never granted as credit, and credit goes out in grants of at least 64 KiB; the grace period is 30 s. The bound is retained events plus credit granted but not yet received. Output within that credit never overflows the log: events other than output must leave a small Data margin (room for the few output events the outstanding credit can still create), and while the log is live, the newest output is held back from a client that has stopped acknowledging once half the 64 KiB reserve is in use. When the log ends (a final event or the `Gap`), everything it holds is sent. A new `Started` is checked against its fresh allowance. Only other events (a resize flood), output beyond credit, or a new generation that can't fit end a stream with the final `Gap`. A connection that hasn't received an attachment's final `Gap` within 10 s is disconnected, and that attachment is finished. A connection's queue of control messages holds 1,024, and overflowing it disconnects the connection. The disconnect takes effect when the step that caused it finishes, never in the middle of it, and the message that caused it is still applied. While a connection is marked, a hand-off skips its members. The newest output is held back for a client that has stopped acknowledging on either condition: less than half the 64 KiB reserve free, or fewer than half of the log's event slots free.
 
 **Where the first paint comes from (M0 go/no-go)**
@@ -841,11 +878,11 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 
 - Control calls (attaching, resizing, ownership requests, spawning, panel CRUD) are JSON control frames on the host connection, and typed input (`write`) and automatic query replies (`write_automatic`) are binary frames, never JSON (see Wire protocol). Inside the client, control calls and input become Tauri commands.
 - Host and connection state reach the webview as `hosts-changed` events, each a full snapshot with a revision; the webview keeps the newest. Every unsigned 64-bit value (attachment IDs, epochs, seqs, generations, request IDs, cursors) crosses the Tauri boundary as a decimal string, never a JSON number, and TypeScript keeps it as a string (`DecimalU64`), using `BigInt` only to compare or compute. The wire format is unchanged.
-- Terminal output is batched in the daemon and flushed about once per display frame (16 ms) as sequence-numbered data frames, one event per wire frame, then handed to xterm.js over Tauri 2 `Channel`s, not `emit` events.
+- Terminal output is batched in the daemon and flushed at most once per display frame (16 ms): the first output after an idle frame goes at once, and while output keeps coming it goes every 16 ms. Each flush takes up to 1 MiB of a connection's output (at least one event), control first, then attachments round-robin. A connection whose previous flush hasn't been written yet is skipped, so a slow client's output waits in its attachment logs, inside their bounds. It goes out as sequence-numbered data frames, one event per wire frame, then handed to xterm.js over Tauri 2 `Channel`s, not `emit` events.
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
 
-**Suggested stack:** daemon in Rust with `tokio`, `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+**Suggested stack:** daemon in Rust with `tokio` (one task owns core; each client connection has a blocking reader and writer thread over `combine-protocol`'s codec), `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
 
 ## Security model
 
@@ -859,7 +896,7 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 
 **Rules**
 
-- **Network:** the daemon opens no network port. Remote clients come in through SSH, which handles authentication, encryption and server identity. There is no WebSocket or HTTP endpoint for a browser page to reach. Never start Rex's TCP listener with `--allow-anonymous`.
+- **Network:** the daemon opens no network port; its one listener is a Unix socket, mode 0600 in a 0700 directory. `tools/arch-guard` checks the code, a test runs `lsof` where it exists, and `docs/daemon.md` has the manual check. Remote clients come in through SSH, which handles authentication, encryption and server identity. There is no WebSocket or HTTP endpoint for a browser page to reach. Never start Rex's TCP listener with `--allow-anonymous`.
 - **Host identity:** the client stores each host's ID and refuses a connection whose daemon reports a different one, on top of SSH's `known_hosts` check.
 - **MCP server (for agents):** a Unix socket with user-only permissions. Its tools change panels and run loaders in the sandbox. Through loaders and `run_loader` they can cause approved CLIs and MCP tools to run, never anything else.
 - **Loaders:** an isolate with no filesystem, network or process access. All I/O goes through `ctx`, which enforces the CLI allowlist, approved MCP servers and tools, and file containment. Time and memory limits apply.
@@ -913,18 +950,19 @@ Cargo.toml                          workspace
 crates/
   combine-protocol/                 wire frames and messages (library, shared by every Rust app)
   combined/                         daemon binary
-    src/main.rs, src/wiring/        entry: builds the adapters and hands them to core
+    src/main.rs, src/wiring/        entry: builds the adapters and the backend factory seam, and hands them to core
     src/rpc/                        entry: client connections, the `combined connect` bridge
     src/mcp_server/                 entry: the agents' MCP tools
     src/adapters/herdr_core/        TerminalBackend for herdr-core
     src/adapters/sources/           CLI runner, MCP client
     src/adapters/loader/            JS isolate
-    src/adapters/fs/                file store, watcher, safe writes
+    src/adapters/fs/                file store, git probe, daemon config, host ID, ID reservation, safe writes, watcher
     src/core/                       spaces, attachment logs, ownership, panels, layout, trust, scheduler, cache, generations
     src/ports/                      traits core needs: TerminalBackend, GitProbe, SourceRunner, LoaderEngine, FileStore
     src/model/                      plain data shared by core, ports and adapters
     src/testing/                    in-memory fake backend (test-support feature)
     tests/
+    launchd/                        the launchd agent plist (installed by hand)
   combine/                          `combine` CLI: the `combine mcp` shim
 app/
   src-tauri/                        Tauri backend
@@ -959,7 +997,7 @@ Each rule says what checks it today. `rules.toml` checks layer direction between
 | Core, ports and model do no I/O (`std::fs`, `std::process`, `std::net`, their tokio versions) | `tools/arch-guard` |
 | Only the loader adapter uses a JS engine; only `ipc/` imports Tauri packages | `tools/arch-guard` (`rules.toml` alone allows higher layers too) |
 | No network listener, no PTY, no Tauri shell or fs plugin, in any production code | `rules.toml` bans the TypeScript and JavaScript plugin packages. `tools/arch-guard` bans the Rust crates and reserves a list of listener and PTY spellings (`TcpListener`, `TcpSocket`, `UdpSocket`, `openpty`, `libc::listen`, ...). The list is conservative, not proof: any other way to open a socket or PTY needs review |
-| No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the `tools/arch-guard` |
+| No production code depends on the spike, tests or the fake backend, in any app | `rules.toml` within one app; across apps, the `tools/arch-guard`. `tools/verify` also lints `combined` and runs `tests/shipped_build.rs` without `test-support` |
 | Frontend sources are TypeScript | `tools/arch-guard` |
 
 **`tools/arch-guard`** is a supplemental checker for what `rules.toml` can't express: member-crate dependencies, source-scoped package and API use, cross-app path imports and the frontend's source language. Its rules are in `tools/arch-guard/guard.toml`, and its tests cover every case the review found trellis letting through. It tokenizes Rust and TypeScript and reads every workspace manifest, but it is not a compiler: it removes test-gated items, expands `use` trees, decodes literals and maps dependency renames, but doesn't expand macros or follow re-exports (limits are listed in `check.py`). Text it can't tokenize, and a `skip` glob that would hide production source, are reported, never passed as clean. A non-literal frontend `import()` is a violation. It is a stopgap: each rule retires as trellis milestone 0.3 lands (SquashMerge/trellis #1263–#1272); `docs/trellis-feature-request.md` maps each guard rule to its issue, and lists the parts that stay in the guard.
@@ -1006,12 +1044,16 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 - [ ] Should remote terminals use herdr-core's own machine links (`machine.add`, `mini/t7`) instead of Combine's SSH bridge? A daemon is still needed on each host for loaders and panel files, so v1 keeps one bridge for everything.
 - [x] Work MBP access. Decided: the work MBP is usually its own client. A personal MBP can reach it over SSH but rarely does. Commands and credential storage stay on the work MBP. A remote client receives terminal output and panel results, which may contain source code, file contents, secrets or other work data, so remote access to the work MBP must comply with work policy. Keeping computation remote is not a data-loss boundary.
 
+**New in rev 14**
+
+- [ ] The herdr-core socket for a non-default `HC_SESSION` without `XDG_RUNTIME_DIR` is inferred from the default's layout; #23 checks it against an isolated core.
+
 **From rev 3**
 
 - [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirmed it for terminals that predate the daemon and across planned restarts.
 - [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
 
-**New in rev 14**
+**New in rev 15**
 
 - [ ] Which second issue backend ships in M4, Jira or Linear? It depends on which approved MCP server is available on the hosts.
 - [ ] Should a space be able to show one merged issue list across backends, with one selection? It is out of scope for M4.

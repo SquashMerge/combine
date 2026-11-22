@@ -78,7 +78,7 @@ fn decode_both<M: WireMessage>(wire: &[u8]) -> [(Result<M, DecodeError>, usize);
 #[test]
 fn decoding_stays_within_its_allocation_bounds() {
     let hello = ClientMessage::Hello(Hello {
-        protocol_version: 1,
+        protocol_version: PROTOCOL_VERSION,
     });
     let frame_cap = 1usize << 20;
 
@@ -106,7 +106,7 @@ fn decoding_stays_within_its_allocation_bounds() {
     }
 
     let unknown_array = full_control_frame(
-        r#"{"type":"hello","protocol_version":1,"x":["#,
+        &format!(r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION},"x":["#),
         |_| "0,".to_owned(),
         "0]",
     );
@@ -116,7 +116,7 @@ fn decoding_stays_within_its_allocation_bounds() {
     }
 
     let many_keys = full_control_frame(
-        r#"{"type":"hello","protocol_version":1,"#,
+        &format!(r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION},"#),
         |i| format!(r#""u{i}":0,"#),
         r#""last":0"#,
     );
