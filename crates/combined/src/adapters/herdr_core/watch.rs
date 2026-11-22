@@ -216,9 +216,13 @@ mod tests {
         Some((channel, header[4], body))
     }
 
+    /// How long the model core waits for a burst's credit. Only a failing run reaches it: a
+    /// passing one returns every byte's credit and the core stops reading as soon as it has.
+    const CREDIT_DEADLINE: Duration = Duration::from_secs(10);
+
     /// A core that answers hello and `events.subscribe`, then sends one-byte DATA frames within
     /// a credit window of `window` bytes, never reading while it sends. After each burst it
-    /// reads credit until the line goes quiet.
+    /// reads credit until the whole burst is credited back, or until [`CREDIT_DEADLINE`].
     async fn model_core(mut server: DuplexStream, window: usize, total: usize) -> Outcome {
         read_line(&mut server).await;
         let hello = json!({"jsonrpc": "2.0", "id": 0, "result": {
@@ -252,10 +256,16 @@ mod tests {
             }
             sent += burst;
             window -= burst;
+            // The pump sends owed credit as soon as its writer queue has room, so a burst is
+            // fully credited without more DATA: wait for exactly that, not for a quiet line.
+            let deadline = tokio::time::Instant::now() + CREDIT_DEADLINE;
             let mut got = 0usize;
-            while let Ok(Some((channel, kind, body))) =
-                tokio::time::timeout(Duration::from_millis(300), read_frame(&mut server)).await
-            {
+            while got < burst {
+                let Ok(Some((channel, kind, body))) =
+                    tokio::time::timeout_at(deadline, read_frame(&mut server)).await
+                else {
+                    break;
+                };
                 if channel == CHANNEL && kind == Kind::Credit as u8 {
                     got += u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                 }
