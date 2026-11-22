@@ -4,6 +4,7 @@ mod config;
 mod driver;
 mod effects;
 mod layout;
+mod layout_sync;
 mod log;
 mod machine;
 mod ownership;
@@ -16,6 +17,10 @@ pub use layout::{
     apply_ops, default_layout, diff_fields, encode_layout, identity_origins, parse_layout,
     touched_with_origins, validate_layout, AppliedOps, FieldPath, LayoutError, LayoutOp, Origins,
     SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
+};
+pub use layout_sync::{
+    DroppedBatch, LayoutEffect, LayoutRead, LayoutReply, LayoutTiming, LayoutWritten, Layouts,
+    MutateError, SpaceLayoutStatus, WatchError,
 };
 pub use log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats, ResumeError};
 pub use machine::{Core, OwnershipState};
