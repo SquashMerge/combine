@@ -688,6 +688,42 @@ class GuardTest(unittest.TestCase):
         """
         self.assertFlags({"app/web/src/shell/A.tsx": src})
 
+    def test_jsx_rule_does_not_apply_to_ts_files(self):
+        src = (
+            "declare const a: any;\n"
+            "export const r = a </[//]/; import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.ts": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.ts")
+        )
+
+    def test_template_in_regex_after_less_than_does_not_hide_imports_in_ts(self):
+        src = (
+            "declare const a: any, x: any;\n"
+            "export const r = a </`/;\n"
+            "import { invoke } from '@tauri-apps/api/core';\n"
+            "export const t = /`/;\n"
+            "if (x) { } />`/;\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.ts": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.ts")
+        )
+
+    def test_tsx_closing_tag_needs_a_tag_name(self):
+        src = (
+            "declare const a: any;\n"
+            "export const r = a </[//]/; import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.tsx")
+        )
+
+    def test_tsx_ambiguous_self_closing_tag_fails_closed(self):
+        src = "declare const x: any;\nif (x) { } />`/;\nimport { invoke } from '@tauri-apps/api/core';\n/`/;\n"
+        self.assertFlags(
+            {"app/web/src/shell/probe.tsx": src}, ("guard-parse", "app/web/src/shell/probe.tsx")
+        )
+
     def test_regex_literals_still_lex_in_tsx(self):
         src = """\
         declare const s: string;
