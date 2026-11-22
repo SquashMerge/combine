@@ -50,11 +50,12 @@ Known limits, by design:
   generic function type written `<T>(x: T) => T` in type position after `=` reads as an
   element and fails closed, and type arguments on a JSX tag (`<Foo<string> />`) fail
   closed too. `.ts`, `.mts` and `.cts` files lex with no JSX rule.
-  As a backstop, a `.tsx` file is also checked against its raw source: every
-  `import(`, `require(`, `import x` or `export ... from` must line up with a code token
-  and a load the import reader reported, and every `from "` with a code token. So a
-  `.tsx` comment, string or JSX text that spells an import (`// import x from "y"`) is a
-  `guard-parse`, and so is a method named `import(` or `require(`.
+  As a backstop, a `.tsx` file is also checked against its raw source: the word `import`
+  or `require` anywhere in it must be a load the import reader reported at that offset,
+  and a `from` followed by a quote or backtick must belong to a reported `import` or
+  `export` load. Comments, strings and JSX text that spell those words are therefore a
+  `guard-parse`, as are `import.meta`, `import x = require(...)`, and keys or methods
+  named `import` or `require`.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -286,7 +287,7 @@ class Lines:
 
 @dataclass(frozen=True, slots=True)
 class Tok:
-    kind: str  # ident punct str char lifetime num | regex template template_expr template_tail
+    kind: str  # ident punct str char lifetime num | regex template template_expr template_mid template_tail
     text: str  # identifier (normalized), punctuation, or a literal's decoded value
     start: int
 
@@ -976,6 +977,7 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
                 if closed:
                     push("template_tail", "", i, True)
                 else:
+                    push("template_mid", "", i, False)  # `} ... ${` between interpolations
                     braces.append("template")
                 i = end
                 continue
@@ -1103,36 +1105,40 @@ def js_package(spec: str) -> str:
     return "/".join(parts[:2]) if spec.startswith("@") else parts[0]
 
 
-_RAW_CALL = re.compile(r"\b(?:import|require)\s*\(")
-_RAW_IMPORT = re.compile(r"\bimport\s+[\w{*'\"]")
-_RAW_FROM = re.compile(r"\bfrom\s*['\"]")
-_RAW_EXPORT_FROM = re.compile(r"\bexport\b[^;]*?\bfrom\b")
+_GAP = r"(?:\s|/\*[\s\S]*?\*/|//[^\n\r]*)*"  # whitespace and comments
+_RAW_KEYWORD = re.compile(r"(?<![\w$.])(?:import|require)(?![\w$])")
+_RAW_FROM = re.compile(r"(?<![\w$.])from(?![\w$])" + _GAP + r"['\"`]")
 
 
 def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | None]]) -> None:
-    """A check on a `.tsx` file that doesn't trust the JSX model. Every raw occurrence
-    of an import-shaped pattern must line up with what the lexer and the import reader
-    produced: `import(`, `require(`, `import x`, and `export ... from` with a reported
-    load at that offset, and each keyword with an identifier token at its offset.
-    Anything else (JSX text, a string or a comment spelling an import, or a load the
-    reader skipped) raises `LexError`, so a file can't hide an import by confusing the
-    lexer. Spelling an import in a `.tsx` comment or string therefore fails closed."""
-    idents = {(t.start, t.text) for t in toks if t.kind == "ident"}
+    """A check on a `.tsx` file that doesn't trust the JSX model or the lexer's
+    choices. The identifier-bounded word `import` or `require` must appear only as a
+    load the import reader reported at that exact offset, whatever follows it (a space,
+    a comment, `(`, `{`, a string). A `from` followed by a quote or backtick (after any
+    whitespace or comments) must be the `from` of a reported `import`/`export` load.
+    Anything else raises `LexError`, so no file can hide an import by confusing the
+    lexer: JSX text, strings and comments that spell these words fail closed, and so do
+    `import.meta`, `import x = require(...)` and methods or keys named `import` or
+    `require`."""
     loaded = {offset for offset, _, _ in loads}
-
-    def require(offset: int, word: str, load: bool) -> None:
-        if (offset, word) not in idents or (load and offset not in loaded):
-            raise LexError(offset, f"`{word}` here is not read as code; JSX or the lexer hid it")
-
-    for m in _RAW_CALL.finditer(src):
-        require(m.start(), m.group(0).split("(")[0].strip(), True)
-    for m in _RAW_IMPORT.finditer(src):
-        require(m.start(), "import", True)
+    index = {t.start: k for k, t in enumerate(toks)}
+    consumed: set[int] = set()
+    for offset, kind, _ in loads:
+        k = index.get(offset)
+        if kind != "literal" or k is None:
+            continue
+        for j in range(k + 1, len(toks)):
+            if toks[j].kind == "str":
+                break
+            if toks[j].is_("ident", "from") and j + 1 < len(toks) and toks[j + 1].kind == "str":
+                consumed.add(toks[j].start)
+                break
+    for m in _RAW_KEYWORD.finditer(src):
+        if m.start() not in loaded:
+            raise LexError(m.start(), f"`{m.group(0)}` here is not read as a load; JSX or the lexer hid it")
     for m in _RAW_FROM.finditer(src):
-        require(m.start(), "from", False)
-    for m in _RAW_EXPORT_FROM.finditer(src):
-        require(m.start(), "export", False)
-        require(m.end() - 4, "from", False)
+        if m.start() not in consumed:
+            raise LexError(m.start(), "`from` here is not part of a reported import or export")
 
 
 def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> list[Violation]:

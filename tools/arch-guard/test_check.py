@@ -858,6 +858,63 @@ class GuardTest(unittest.TestCase):
                 src = f"export const a = <p>{{{first}}}{{1}}</p>; export const q = /x/;\n"
                 self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
 
+    # --- the keyword matrix (opencode review 15)
+
+    @staticmethod
+    def _matrix():
+        placements = {
+            "child": "export const a = <p>{{{b}}}{{1}}</p>;\n",
+            "attr": "export const a = <p a={{{b}}} b={{1}} />;\n",
+            "plain": "export const a = [{b}, 1];\n",
+        }
+        specs = (
+            ("'@tauri-apps/api/core'", "tauri-only-in-ipc"),
+            ("'../../test/support/snapshots'", "no-production-dependency-on-non-production"),
+            ("'../ipc/' + 'tauri'", "frontend-imports-are-literal"),
+        )
+        seps = ("", " ", "/**/", "\n", "// c\n")
+        for place, shape in placements.items():
+            for form in ("bare", "template", "adjacent"):
+                for kw in ("import", "require"):
+                    for sep in seps:
+                        for spec, rule in specs:
+                            call = f"{kw}{sep}({spec})"
+                            body = {"bare": call, "template": f"`${{{call}}}`", "adjacent": f"`${{{call}}}${{{{}}}}`"}[form]
+                            yield f"{place}/{form}/{kw}/{sep!r}/{rule}", shape.format(b=body), rule
+
+    def _check_matrix(self):
+        cases = list(self._matrix())
+        for name, src, rule in cases:
+            with self.subTest(case=name):
+                found = self.guard({self.PROBE: src})
+                self.assertTrue(found, "clean")
+                self.assertTrue(found <= {(rule, self.PROBE), ("guard-parse", self.PROBE)}, found)
+        return len(cases)
+
+    def test_keyword_matrix_is_never_clean(self):
+        self.assertEqual(self._check_matrix(), 270)
+
+    def test_keyword_matrix_is_never_clean_with_a_broken_lexer(self):
+        real = check.lex_js
+
+        def broken(src, jsx=False):
+            toks = real(src, jsx=jsx)
+            return [t for t in toks if not (t.is_("punct", "}") or t.kind.startswith("template_"))] if jsx else toks
+
+        with mock.patch.object(check, "lex_js", broken):
+            self._check_matrix()
+
+    def test_backstop_keyword_without_a_following_paren(self):
+        for src in (
+            "export const a = <p>{import/**/('@tauri-apps/api/core')}{{}}</p>;\n",
+            "export const o = { import: 1 };\n",
+            "export const m = import.meta;\n",
+            "export const a = <p>message from \"x\"</p>;\n",
+        ):
+            with self.subTest(src=src):
+                found = self.guard({self.PROBE: src})
+                self.assertTrue(found)
+
     def test_clean_tsx_lexes_clean(self):
         src = """\
         declare const p: object, a: number, b: number, c: number, s: string;
