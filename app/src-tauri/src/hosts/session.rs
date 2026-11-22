@@ -7,12 +7,22 @@ use std::sync::Arc;
 use std::thread;
 
 use combine_protocol::{
-    read_message, write_message, ClientMessage, DaemonMessage, ReadError, WatchTerminals,
+    read_message, write_message, ClientMessage, DaemonMessage, ErrorCode, HostId, LayoutSnapshot,
+    ReadError, RequestId, WatchTerminals,
 };
 
 use super::outbound::{Outbound, Outgoing, RequestKind};
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
 use super::terminals::space_views;
+use super::text::display_text;
+
+/// Where a host's layout traffic goes. The three methods mirror the layout methods of
+/// [`HostEvents`](super::supervisor::HostEvents).
+pub trait LayoutSink: Send + Sync {
+    fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot);
+    fn layout_error(&self, host_id: &HostId, request: RequestId, code: ErrorCode, message: String);
+    fn layout_disconnected(&self, host_id: &HostId);
+}
 
 pub struct LivePhase {
     outbound: Arc<Outbound>,
@@ -59,6 +69,22 @@ impl SessionPhase for LivePhase {
                         Ok(Some(DaemonMessage::Terminals(list))) => {
                             events.spaces(host_id, space_views(host_id, &list));
                         }
+                        Ok(Some(DaemonMessage::Layout(reply))) => {
+                            events.layout(host_id, reply.request, reply.layout);
+                        }
+                        Ok(Some(DaemonMessage::Error(error))) => {
+                            if let Some(request) = error.request.filter(|request| {
+                                self.outbound.kind_of(host_id, *request)
+                                    == Some(RequestKind::Layout)
+                            }) {
+                                events.layout_error(
+                                    host_id,
+                                    request,
+                                    error.code,
+                                    display_text(error.trimmed_message()),
+                                );
+                            }
+                        }
                         Ok(Some(_)) => {}
                         Err(ReadError::Io(e)) => break SessionEnd::Io(e.to_string()),
                         Err(ReadError::Decode(e)) => break SessionEnd::Protocol(e.to_string()),
@@ -66,6 +92,7 @@ impl SessionPhase for LivePhase {
                 }
             };
             drop(registration);
+            events.layout_disconnected(host_id);
             let _ = tx.send(Outgoing::Stop);
             let _ = writer_thread.join();
             end
@@ -80,13 +107,18 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use combine_protocol::{HostId, RequestId, SpaceInfo, SpaceKind, TermId, Terminals};
+    use combine_protocol::{
+        ErrorCode, ErrorMessage, HostId, Layout, LayoutNode, LayoutSnapshot, MutateLayout,
+        RequestId, SpaceInfo, SpaceKind, TermId, Terminals, WatchLayout,
+    };
 
     use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
     use super::super::outbound::NotConnected;
     use super::super::registry::HostRegistry;
     use super::super::supervisor::HostEvents;
-    use super::super::testing::{host_id, RecordingEvents, HOST_A, WAIT};
+    use super::super::testing::{
+        host_id, recv, LayoutEvent, RecordingEvents, RecordingLayoutSink, HOST_A, WAIT,
+    };
     use super::*;
 
     struct Rig {
@@ -269,5 +301,144 @@ mod tests {
                 WatchTerminals { request }
             )))
         );
+    }
+
+    struct LayoutEvents(Arc<RecordingLayoutSink>);
+
+    impl HostEvents for LayoutEvents {
+        fn connection(&self, _name: &str, _state: ConnectionState) {}
+        fn host_id(&self, _name: &str, _host_id: &HostId) {}
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
+            self.0.layout(host_id, request, snapshot);
+        }
+        fn layout_error(
+            &self,
+            host_id: &HostId,
+            request: RequestId,
+            code: ErrorCode,
+            message: String,
+        ) {
+            self.0.layout_error(host_id, request, code, message);
+        }
+        fn layout_disconnected(&self, host_id: &HostId) {
+            self.0.layout_disconnected(host_id);
+        }
+    }
+
+    fn layout_rig() -> (Rig, mpsc::Receiver<LayoutEvent>) {
+        let (sink, received) = RecordingLayoutSink::new();
+        let mut rig = start(Arc::new(LayoutEvents(sink)));
+        read_client(&mut rig.daemon);
+        (rig, received)
+    }
+
+    fn snapshot(revision: u64) -> LayoutSnapshot {
+        LayoutSnapshot {
+            space: "/work".to_string(),
+            layout_revision: revision,
+            root: LayoutNode::Tile {
+                id: "t1".to_string(),
+                panels: vec!["p1".to_string()],
+                active: Some("p1".to_string()),
+            },
+            read_only: false,
+            error: None,
+            dropped: None,
+        }
+    }
+
+    #[test]
+    fn layout_push_reaches_layout_sink() {
+        let (mut rig, received) = layout_rig();
+        let pushed = Layout {
+            request: None,
+            layout: snapshot(3),
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::Layout(pushed)).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::Layout(host_id(HOST_A), None, snapshot(3))
+        );
+        let replied = rig
+            .outbound
+            .send(&host_id(HOST_A), RequestKind::Layout, |request| {
+                ClientMessage::MutateLayout(MutateLayout {
+                    request,
+                    space: "/work".to_string(),
+                    base_layout_revision: 3,
+                    ops: Vec::new(),
+                })
+            })
+            .expect("registered");
+        read_client(&mut rig.daemon);
+        let reply = Layout {
+            request: Some(replied),
+            layout: snapshot(4),
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::Layout(reply)).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::Layout(host_id(HOST_A), Some(replied), snapshot(4))
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    fn error_for(request: RequestId, code: ErrorCode, message: &str) -> DaemonMessage {
+        DaemonMessage::Error(ErrorMessage {
+            code,
+            message: message.to_string(),
+            request: Some(request),
+            attachment: None,
+        })
+    }
+
+    #[test]
+    fn layout_error_routed_by_request_kind() {
+        let (mut rig, received) = layout_rig();
+        let host = host_id(HOST_A);
+        let watch = rig
+            .outbound
+            .send(&host, RequestKind::Layout, |request| {
+                ClientMessage::WatchLayout(WatchLayout {
+                    request,
+                    space: "/nope".to_string(),
+                })
+            })
+            .expect("registered");
+        read_client(&mut rig.daemon);
+        write_message(
+            &mut rig.daemon,
+            &error_for(
+                RequestId(1),
+                ErrorCode::InvalidRequest,
+                "not a layout error",
+            ),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &error_for(watch, ErrorCode::UnknownSpace, "no such\nspace"),
+        )
+        .expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::Error(
+                host,
+                watch,
+                ErrorCode::UnknownSpace,
+                "no such space".to_string()
+            )
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        assert_eq!(recv(&received), LayoutEvent::Disconnected(host_id(HOST_A)));
+    }
+
+    #[test]
+    fn session_end_reports_layout_disconnected() {
+        let (rig, received) = layout_rig();
+        assert!(received.try_recv().is_err());
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        assert_eq!(recv(&received), LayoutEvent::Disconnected(host_id(HOST_A)));
     }
 }
