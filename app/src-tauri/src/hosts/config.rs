@@ -7,6 +7,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use combine_protocol::HostId;
@@ -22,7 +23,10 @@ const MAX_FILE_BYTES: usize = 1 << 20;
 const MAX_NAME_CHARS: usize = 64;
 const MAX_DESTINATION_BYTES: usize = 255;
 const MAX_COMBINED_PATH_BYTES: usize = 1024;
-const TEMP_FILE_NAME: &str = ".hosts.json.tmp";
+const TEMP_PREFIX: &str = ".hosts.json.";
+const MAX_TEMP_ATTEMPTS: u64 = 16;
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -332,23 +336,61 @@ impl HostsStore {
         }
     }
 
+    fn temp_path(&self, n: u64) -> PathBuf {
+        self.path
+            .with_file_name(format!("{TEMP_PREFIX}{}.{n}.tmp", std::process::id()))
+    }
+
+    /// Writes `bytes` to a new, uniquely named temp file next to `hosts.json`, then renames it
+    /// over `hosts.json`. The temp file is created exclusively (`O_EXCL`), so an existing entry
+    /// at a candidate name, symlinks included, is skipped and never followed or truncated.
     fn write_safely(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        let temp = self.path.with_file_name(TEMP_FILE_NAME);
-        let result = (|| -> io::Result<()> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temp, &self.path)
-        })();
-        result.map_err(|e| {
-            let _ = fs::remove_file(&temp);
-            StoreError::Io(e.to_string())
-        })
+        let first = NEXT_TEMP.fetch_add(MAX_TEMP_ATTEMPTS, Ordering::Relaxed);
+        self.write_safely_from(bytes, first)
+    }
+
+    fn write_safely_from(&self, bytes: &[u8], first: u64) -> Result<(), StoreError> {
+        for n in first..first + MAX_TEMP_ATTEMPTS {
+            let temp = self.temp_path(n);
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(StoreError::Io(e.to_string())),
+            };
+            let result = self
+                .match_private_mode(&file)
+                .and_then(|()| file.write_all(bytes))
+                .and_then(|()| file.sync_all())
+                .and_then(|()| {
+                    drop(file);
+                    fs::rename(&temp, &self.path)
+                });
+            return result.map_err(|e| {
+                let _ = fs::remove_file(&temp);
+                StoreError::Io(e.to_string())
+            });
+        }
+        Err(StoreError::Io(
+            "no free temporary file name next to hosts.json".to_string(),
+        ))
+    }
+
+    /// If `hosts.json` is private to its owner (no group or other bits), the replacement is too
+    /// (0600). Otherwise the temp file keeps the default mode from the umask.
+    #[cfg(unix)]
+    fn match_private_mode(&self, file: &fs::File) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(&self.path) {
+            Ok(meta) if meta.permissions().mode() & 0o077 == 0 => {
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn match_private_mode(&self, _file: &fs::File) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -394,7 +436,7 @@ impl HostIdStore for HostsStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     use super::*;
 
@@ -423,6 +465,14 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn temp_leftovers(dir: &TestDir) -> Vec<String> {
+        fs::read_dir(&dir.0)
+            .expect("list test dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(TEMP_PREFIX) && n.ends_with(".tmp"))
+            .collect()
     }
 
     fn parse(text: &str) -> Result<HostsConfig, ConfigError> {
@@ -694,7 +744,7 @@ mod tests {
         store
             .record_first_contact("mini", &id(ID_A))
             .expect("recorded");
-        assert!(!dir.0.join(TEMP_FILE_NAME).exists());
+        assert!(temp_leftovers(&dir).is_empty());
         let written = fs::read_to_string(dir.file()).expect("read");
         assert!(written.ends_with("}\n"));
         let value: Value = serde_json::from_str(&written).expect("json");
@@ -725,7 +775,7 @@ mod tests {
             Err(StoreError::Invalid)
         );
         assert_eq!(fs::read(dir.file()).expect("read"), bytes);
-        assert!(!dir.0.join(TEMP_FILE_NAME).exists());
+        assert!(temp_leftovers(&dir).is_empty());
     }
 
     #[test]
@@ -776,6 +826,92 @@ mod tests {
             })
         );
         assert_eq!(fs::read_to_string(dir.file()).expect("read"), text);
+    }
+
+    const TWO_HOSTS: &str = r#"{"version": 1, "hosts": [{"name": "mini", "ssh": "mini"}, {"name": "spare", "ssh": "spare"}]}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_follow_a_symlink_at_the_temp_path() {
+        use std::os::unix::fs::symlink;
+        let dir = TestDir::new();
+        let store = store_with(&dir, TWO_HOSTS);
+        let sentinel = dir.0.join("unrelated.txt");
+        fs::write(&sentinel, b"keep me").expect("sentinel");
+        symlink(&sentinel, dir.0.join(".hosts.json.tmp")).expect("old name");
+        symlink(&sentinel, store.temp_path(5000)).expect("first candidate");
+
+        store
+            .write_safely_from(b"{\"version\": 1, \"hosts\": []}\n", 5000)
+            .expect("skips the symlink");
+        assert_eq!(fs::read(&sentinel).expect("read"), b"keep me");
+        let meta = fs::symlink_metadata(dir.file()).expect("meta");
+        assert!(meta.file_type().is_file() && !meta.file_type().is_symlink());
+
+        let store = store_with(&dir, TWO_HOSTS);
+        store
+            .record_first_contact("mini", &id(ID_A))
+            .expect("recorded");
+        assert_eq!(fs::read(&sentinel).expect("read"), b"keep me");
+        let meta = fs::symlink_metadata(dir.file()).expect("meta");
+        assert!(meta.file_type().is_file());
+        assert!(fs::read_to_string(dir.file()).expect("read").contains(ID_A));
+    }
+
+    #[test]
+    fn a_pre_existing_temp_name_is_skipped_not_truncated() {
+        let dir = TestDir::new();
+        let store = store_with(&dir, TWO_HOSTS);
+        fs::write(store.temp_path(7000), b"someone else's file").expect("planted");
+        store
+            .write_safely_from(b"new bytes", 7000)
+            .expect("written");
+        assert_eq!(
+            fs::read(store.temp_path(7000)).expect("read"),
+            b"someone else's file"
+        );
+        assert_eq!(fs::read(dir.file()).expect("read"), b"new bytes");
+
+        for n in 8000..8000 + MAX_TEMP_ATTEMPTS {
+            fs::write(store.temp_path(n), b"taken").expect("planted");
+        }
+        let err = store.write_safely_from(b"x", 8000).expect_err("all taken");
+        assert!(matches!(err, StoreError::Io(_)));
+        assert_eq!(fs::read(dir.file()).expect("read"), b"new bytes");
+    }
+
+    #[test]
+    fn two_store_instances_do_not_corrupt_each_other() {
+        let dir = TestDir::new();
+        fs::write(dir.file(), TWO_HOSTS).expect("write");
+        let (first, _) = HostsStore::load(dir.file());
+        let (second, _) = HostsStore::load(dir.file());
+        first
+            .record_first_contact("mini", &id(ID_A))
+            .expect("first");
+        assert_eq!(
+            second.record_first_contact("spare", &id(ID_B)),
+            Err(StoreError::ChangedOnDisk)
+        );
+        let file: HostsFileV1 =
+            serde_json::from_slice(&fs::read(dir.file()).expect("read")).expect("valid json");
+        assert_eq!(file.hosts[0].host_id.as_deref(), Some(ID_A));
+        assert_eq!(file.hosts[1].host_id, None);
+        assert!(temp_leftovers(&dir).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_mode_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new();
+        let store = store_with(&dir, TWO_HOSTS);
+        fs::set_permissions(dir.file(), fs::Permissions::from_mode(0o600)).expect("chmod");
+        store
+            .record_first_contact("mini", &id(ID_A))
+            .expect("recorded");
+        let mode = fs::metadata(dir.file()).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
