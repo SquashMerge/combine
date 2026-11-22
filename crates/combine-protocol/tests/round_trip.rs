@@ -188,11 +188,11 @@ fn lost_round_trips() {
 
 #[test]
 fn frame_header_is_big_endian_length_counting_kind_and_payload() {
-    let json = br#"{"type":"hello","protocol_version":1}"#;
+    let json = format!(r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION}}}"#);
     let mut golden = vec![0x00, 0x00, 0x00, 0x26, 0x01];
-    golden.extend_from_slice(json);
+    golden.extend_from_slice(json.as_bytes());
     let hello = ClientMessage::Hello(Hello {
-        protocol_version: 1,
+        protocol_version: PROTOCOL_VERSION,
     });
     assert_eq!(hello.encode().unwrap(), golden);
     assert_eq!(json.len() + 1, 0x26);
@@ -261,12 +261,13 @@ fn split_data_rejects_seq_overflow() {
 
 #[test]
 fn unknown_fields_are_ignored() {
-    let hello =
-        control_frame(r#"{"type":"hello","protocol_version":1,"extra":{"a":[1,{"b":null}]}}"#);
+    let hello = control_frame(&format!(
+        r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION},"extra":{{"a":[1,{{"b":null}}]}}}}"#
+    ));
     assert_eq!(
         ClientMessage::decode(&hello).unwrap().0,
         ClientMessage::Hello(Hello {
-            protocol_version: 1
+            protocol_version: PROTOCOL_VERSION
         })
     );
     let started = control_frame(
@@ -407,11 +408,13 @@ fn stream_attachment_marks_each_stream_message() {
 
 #[test]
 fn json_whitespace_is_accepted() {
-    let frame = control_frame(" \n{ \"type\" : \"hello\" , \"protocol_version\" : 1 }\r\n\t");
+    let frame = control_frame(&format!(
+        " \n{{ \"type\" : \"hello\" , \"protocol_version\" : {PROTOCOL_VERSION} }}\r\n\t"
+    ));
     assert_eq!(
         ClientMessage::decode(&frame).unwrap().0,
         ClientMessage::Hello(Hello {
-            protocol_version: 1
+            protocol_version: PROTOCOL_VERSION
         })
     );
 }

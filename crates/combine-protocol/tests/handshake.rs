@@ -1,6 +1,12 @@
 use combine_protocol::*;
 
-const MISMATCH_JSON: &str = r#"{"type":"error","code":"version_mismatch","message":"protocol version mismatch: client 2, daemon 1","request":null,"attachment":null}"#;
+const OTHER: u32 = PROTOCOL_VERSION + 1;
+
+fn mismatch_json() -> String {
+    format!(
+        r#"{{"type":"error","code":"version_mismatch","message":"protocol version mismatch: client {OTHER}, daemon {PROTOCOL_VERSION}","request":null,"attachment":null}}"#
+    )
+}
 
 fn host() -> HostId {
     HostId("3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b".into())
@@ -36,54 +42,54 @@ fn welcome(version: u32) -> DaemonMessage {
 
 #[test]
 fn client_handshake_sends_hello_first_and_returns_welcome() {
-    let mut reader = &daemon_stream(&[welcome(1)])[..];
+    let mut reader = &daemon_stream(&[welcome(PROTOCOL_VERSION)])[..];
     let mut writer = Vec::new();
     let got = client_handshake(&mut reader, &mut writer).unwrap();
     assert_eq!(
         got,
         Welcome {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             host_id: host()
         }
     );
-    assert_eq!(writer, hello(1).encode().unwrap());
+    assert_eq!(writer, hello(PROTOCOL_VERSION).encode().unwrap());
 }
 
 #[test]
 fn daemon_handshake_accepts_matching_hello_and_sends_welcome() {
-    let mut reader = &client_stream(&[hello(1)])[..];
+    let mut reader = &client_stream(&[hello(PROTOCOL_VERSION)])[..];
     let mut writer = Vec::new();
     let got = daemon_handshake(&mut reader, &mut writer, &host()).unwrap();
     assert_eq!(
         got,
         Hello {
-            protocol_version: 1
+            protocol_version: PROTOCOL_VERSION
         }
     );
-    assert_eq!(writer, welcome(1).encode().unwrap());
+    assert_eq!(writer, welcome(PROTOCOL_VERSION).encode().unwrap());
 }
 
 #[test]
 fn daemon_handshake_refuses_other_version_with_both_versions_named() {
-    let mut reader = &client_stream(&[hello(2)])[..];
+    let mut reader = &client_stream(&[hello(OTHER)])[..];
     let mut writer = Vec::new();
     let error = daemon_handshake(&mut reader, &mut writer, &host()).unwrap_err();
     assert!(matches!(
         error,
         HandshakeError::VersionMismatch(VersionMismatch {
-            client: 2,
-            daemon: 1
+            client: OTHER,
+            daemon: PROTOCOL_VERSION
         })
     ));
-    assert_eq!(writer, frame(MISMATCH_JSON));
+    assert_eq!(writer, frame(&mismatch_json()));
 }
 
 #[test]
 fn client_handshake_reports_daemon_refusal() {
     let refusal = DaemonMessage::Error(
         VersionMismatch {
-            client: 1,
-            daemon: 2,
+            client: PROTOCOL_VERSION,
+            daemon: OTHER,
         }
         .into(),
     );
@@ -92,7 +98,10 @@ fn client_handshake_reports_daemon_refusal() {
     match client_handshake(&mut reader, &mut writer).unwrap_err() {
         HandshakeError::Refused(e) => {
             assert_eq!(e.code, ErrorCode::VersionMismatch);
-            assert_eq!(e.message, "protocol version mismatch: client 1, daemon 2");
+            assert_eq!(
+                e.message,
+                format!("protocol version mismatch: client {PROTOCOL_VERSION}, daemon {OTHER}")
+            );
         }
         other => panic!("expected Refused, got {other:?}"),
     }
@@ -100,13 +109,13 @@ fn client_handshake_reports_daemon_refusal() {
 
 #[test]
 fn client_handshake_rejects_welcome_with_other_version() {
-    let mut reader = &daemon_stream(&[welcome(2)])[..];
+    let mut reader = &daemon_stream(&[welcome(OTHER)])[..];
     let mut writer = Vec::new();
     assert!(matches!(
         client_handshake(&mut reader, &mut writer).unwrap_err(),
         HandshakeError::VersionMismatch(VersionMismatch {
-            client: 1,
-            daemon: 2
+            client: PROTOCOL_VERSION,
+            daemon: OTHER
         })
     ));
 }
@@ -114,12 +123,12 @@ fn client_handshake_rejects_welcome_with_other_version() {
 #[test]
 fn version_mismatch_message_names_both_versions() {
     let mismatch = VersionMismatch {
-        client: 2,
-        daemon: 1,
+        client: OTHER,
+        daemon: PROTOCOL_VERSION,
     };
     assert_eq!(
         mismatch.to_string(),
-        "protocol version mismatch: client 2, daemon 1"
+        format!("protocol version mismatch: client {OTHER}, daemon {PROTOCOL_VERSION}")
     );
     let message = ErrorMessage::from(mismatch);
     assert_eq!(message.code, ErrorCode::VersionMismatch);

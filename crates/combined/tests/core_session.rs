@@ -4,7 +4,7 @@ use combine_protocol::{
     Ack, Attach, AttachmentId, AutomaticReply, BackendGeneration, ClientMessage, CloseReason,
     Cursor, DaemonMessage, Detach, Epoch, ErrorCode, ErrorMessage, Fidelity, Focus, Gap, Hello,
     Input, Ownership, OwnershipGeneration, RequestId, RequestOwnership, Resize, Resume, Seq,
-    SetDisplay, TermId,
+    SetDisplay, TermId, PROTOCOL_VERSION,
 };
 use combined::core::{
     BackendCommand, ConfigError, ConnectionId, Core, CoreConfig, Effect, LogEnd, OwnershipState,
@@ -371,7 +371,7 @@ fn hello_after_handshake_is_invalid_request() {
     rig.send(
         c,
         ClientMessage::Hello(Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         }),
     );
     let messages = rig.pull(c);
@@ -433,7 +433,7 @@ fn error_messages_carry_no_peer_text() {
     rig.send(
         c,
         ClientMessage::Hello(Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         }),
     );
     rig.input(c, watcher, b"secret-input");
