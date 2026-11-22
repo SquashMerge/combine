@@ -1,13 +1,20 @@
-//! The conversions between the layout sync's types and the wire protocol's.
+//! The conversions between the layout sync's types and the wire protocol's, and core's refusal of
+//! layout messages.
 
 mod layout_support;
 
 use combine_protocol as wire;
 use combined::core::{
-    layout_snapshot, ops_from_wire, DroppedBatch, LayoutOp, SpaceLayoutStatus, MAX_WIRE_OPS,
+    layout_snapshot, ops_from_wire, Core, CoreConfig, DroppedBatch, LayoutOp, SpaceLayoutStatus,
+    MAX_WIRE_OPS,
 };
-use combined::model::{LayoutRevision, SplitDir};
+use combined::model::{LayoutRevision, Millis, SplitDir};
+use combined::ports::Capabilities;
 use layout_support::*;
+
+fn ratio(value: f64) -> wire::Ratio {
+    wire::Ratio::new(value).unwrap()
+}
 
 fn status() -> SpaceLayoutStatus {
     SpaceLayoutStatus {
@@ -47,7 +54,7 @@ fn status_becomes_a_snapshot() {
         snapshot.root,
         wire::LayoutNode::Split {
             dir: wire::SplitDirection::H,
-            ratio: wire::Ratio(0.4),
+            ratio: ratio(0.4),
             a: Box::new(wire::LayoutNode::Tile {
                 id: "a".to_string(),
                 panels: vec!["p1".to_string(), "p2".to_string()],
@@ -78,7 +85,7 @@ fn every_wire_op_converts() {
         set_active_op(),
         wire::LayoutOp::SetRatio {
             leaves: vec!["b".to_string(), "a".to_string()],
-            ratio: wire::Ratio(0.3),
+            ratio: ratio(0.3),
         },
         wire::LayoutOp::MovePanel {
             panel: "p1".to_string(),
@@ -89,7 +96,7 @@ fn every_wire_op_converts() {
             tile: "a".to_string(),
             dir: wire::SplitDirection::V,
             new_tile: "c".to_string(),
-            ratio: wire::Ratio(0.5),
+            ratio: ratio(0.5),
             panel: Some("p2".to_string()),
         },
         wire::LayoutOp::CloseTile {
@@ -137,7 +144,58 @@ fn an_invalid_id_refuses_the_batch() {
     assert!(ops_from_wire(vec![set_active_op(), bad]).is_err());
     let bad_leaf = wire::LayoutOp::SetRatio {
         leaves: vec!["a\nb".to_string()],
-        ratio: wire::Ratio(0.5),
+        ratio: ratio(0.5),
     };
     assert!(ops_from_wire(vec![bad_leaf]).is_err());
+}
+
+#[test]
+fn core_refuses_every_layout_message_with_invalid_request() {
+    let capabilities = Capabilities {
+        ordered_attach: true,
+        byte_credit: false,
+        initial_credit: 0,
+        display_queries: true,
+        automatic_replies: true,
+        resync_signal: true,
+        agent_state: false,
+    };
+    let messages = [
+        (
+            wire::ClientMessage::WatchLayout(wire::WatchLayout {
+                request: wire::RequestId(5),
+                space: "/work/repo".to_string(),
+            }),
+            Some(wire::RequestId(5)),
+        ),
+        (
+            wire::ClientMessage::MutateLayout(wire::MutateLayout {
+                request: wire::RequestId(6),
+                space: "/work/repo".to_string(),
+                base_layout_revision: 0,
+                ops: vec![set_active_op()],
+            }),
+            Some(wire::RequestId(6)),
+        ),
+        (
+            wire::ClientMessage::UnwatchLayout(wire::UnwatchLayout {}),
+            None,
+        ),
+    ];
+    for (message, request) in messages {
+        let mut core = Core::new(CoreConfig::default(), capabilities).unwrap();
+        let connection = core.connect();
+        core.client_message(connection, message, Millis(0));
+        let replies = core.pull(connection, usize::MAX, Millis(0));
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            wire::DaemonMessage::Error(error) => {
+                assert_eq!(error.code, wire::ErrorCode::InvalidRequest);
+                assert_eq!(error.message, "unexpected layout message");
+                assert_eq!(error.request, request);
+                assert_eq!(error.attachment, None);
+            }
+            other => panic!("not an error: {other:?}"),
+        }
+    }
 }

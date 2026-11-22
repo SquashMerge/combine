@@ -10,6 +10,10 @@ const UNWATCH_JSON: &str = r#"{"type":"unwatch_layout"}"#;
 const MUTATE_JSON: &str = r#"{"type":"mutate_layout","request":6,"space":"/Users/me/src/trellis","base_layout_revision":3,"ops":[{"op":"set_active","tile":"main","panel":"p1"},{"op":"set_ratio","leaves":["a","b"],"ratio":0.25},{"op":"move_panel","panel":"p1","to_tile":"b","index":0},{"op":"split_tile","tile":"a","dir":"h","new_tile":"c","ratio":0.5,"panel":null},{"op":"split_tile","tile":"a","dir":"v","new_tile":"d","ratio":0.5,"panel":"p2"},{"op":"close_tile","tile":"c"}]}"#;
 const LAYOUT_JSON: &str = r#"{"type":"layout","request":null,"layout":{"space":"/Users/me/src/trellis","layout_revision":4,"root":{"type":"split","dir":"h","ratio":0.5,"a":{"type":"tile","id":"a","panels":["p1","p2"],"active":"p2"},"b":{"type":"tile","id":"b","panels":[],"active":null}},"read_only":false,"error":null,"dropped":{"op_count":2,"message":"dropped"}}}"#;
 
+fn ratio(value: f64) -> Ratio {
+    Ratio::new(value).unwrap()
+}
+
 fn s(text: &str) -> String {
     text.to_owned()
 }
@@ -22,7 +26,7 @@ fn ops() -> Vec<LayoutOp> {
         },
         LayoutOp::SetRatio {
             leaves: vec![s("a"), s("b")],
-            ratio: Ratio(0.25),
+            ratio: ratio(0.25),
         },
         LayoutOp::MovePanel {
             panel: s("p1"),
@@ -33,14 +37,14 @@ fn ops() -> Vec<LayoutOp> {
             tile: s("a"),
             dir: SplitDirection::H,
             new_tile: s("c"),
-            ratio: Ratio(0.5),
+            ratio: ratio(0.5),
             panel: None,
         },
         LayoutOp::SplitTile {
             tile: s("a"),
             dir: SplitDirection::V,
             new_tile: s("d"),
-            ratio: Ratio(0.5),
+            ratio: ratio(0.5),
             panel: Some(s("p2")),
         },
         LayoutOp::CloseTile { tile: s("c") },
@@ -53,7 +57,7 @@ fn snapshot() -> LayoutSnapshot {
         layout_revision: 4,
         root: LayoutNode::Split {
             dir: SplitDirection::H,
-            ratio: Ratio(0.5),
+            ratio: ratio(0.5),
             a: Box::new(LayoutNode::Tile {
                 id: s("a"),
                 panels: vec![s("p1"), s("p2")],

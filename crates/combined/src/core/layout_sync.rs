@@ -197,7 +197,7 @@ fn wire_node(node: &SplitNode) -> wire::LayoutNode {
                 SplitDir::H => wire::SplitDirection::H,
                 SplitDir::V => wire::SplitDirection::V,
             },
-            ratio: wire::Ratio(split.ratio),
+            ratio: wire::Ratio::new(split.ratio).unwrap_or(wire::Ratio::HALF),
             a: Box::new(wire_node(&split.a)),
             b: Box::new(wire_node(&split.b)),
         },
@@ -245,7 +245,7 @@ fn op_from_wire(op: wire::LayoutOp) -> Result<LayoutOp, String> {
         },
         wire::LayoutOp::SetRatio { leaves, ratio } => LayoutOp::SetRatio {
             leaves: leaves.into_iter().map(tile).collect::<Result<_, _>>()?,
-            ratio: ratio.0,
+            ratio: ratio.get(),
         },
         wire::LayoutOp::MovePanel {
             panel: p,
@@ -269,7 +269,7 @@ fn op_from_wire(op: wire::LayoutOp) -> Result<LayoutOp, String> {
                 wire::SplitDirection::V => SplitDir::V,
             },
             new_tile: tile(new_tile)?,
-            ratio: ratio.0,
+            ratio: ratio.get(),
             panel: p.map(panel).transpose()?,
         },
         wire::LayoutOp::CloseTile { tile: t } => LayoutOp::CloseTile { tile: tile(t)? },
