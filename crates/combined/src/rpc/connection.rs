@@ -1,11 +1,11 @@
 //! One client connection: a reader thread that does the handshake and then feeds the server's
 //! inbox, and a writer thread that writes the batches the server hands it.
 
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use combine_protocol::{
     daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, DecodeError,
@@ -42,6 +42,8 @@ pub(super) struct Spawn {
     pub inbox: mpsc::Sender<ConnEvent>,
     pub host_id: HostId,
     pub handshake_timeout: Duration,
+    /// When the server took the connection: the hello deadline counts from here.
+    pub admitted: Instant,
 }
 
 pub(super) fn spawn(parts: Spawn) -> std::io::Result<()> {
@@ -61,6 +63,26 @@ fn error_message(code: ErrorCode, message: String) -> DaemonMessage {
     })
 }
 
+/// Reads from the stream until one deadline. Before each read it sets the socket's receive
+/// timeout to the time left, so a client that sends a byte at a time can't stretch the hello
+/// past the deadline; once the deadline has passed it reads nothing and reports a timeout.
+struct DeadlineReader<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "hello deadline passed"))?;
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
 /// Writes `message` and flushes, for the replies that go out of turn during the handshake.
 fn reply(stream: &mut UnixStream, message: DaemonMessage) {
     let _ = write_message(stream, &message).and_then(|()| stream.flush().map_err(WriteError::from));
@@ -74,15 +96,17 @@ fn read_side(parts: Spawn) {
         inbox,
         host_id,
         handshake_timeout,
+        admitted,
     } = parts;
     let Ok(mut write_half) = stream.try_clone() else {
         let _ = inbox.blocking_send(ConnEvent::Closed(conn));
         return;
     };
-    let handshake = stream
-        .set_read_timeout(Some(handshake_timeout))
-        .map_err(|_| HandshakeError::Closed)
-        .and_then(|()| daemon_handshake(&mut stream, &mut write_half, &host_id));
+    let mut reader = DeadlineReader {
+        stream: &mut stream,
+        deadline: admitted + handshake_timeout,
+    };
+    let handshake = daemon_handshake(&mut reader, &mut write_half, &host_id);
     match handshake {
         Ok(_) => {}
         Err(failure) => {
@@ -188,6 +212,7 @@ fn write_side(
                 }
                 let _ = out.flush();
                 let _ = socket.shutdown(Shutdown::Both);
+                let _ = inbox.blocking_send(ConnEvent::Closed(conn));
                 return;
             }
             None => {

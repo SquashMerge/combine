@@ -230,6 +230,13 @@ impl WireClient {
         self.stream.flush().unwrap();
     }
 
+    /// Like [`WireClient::send_bytes`], but reports a write failure, such as the daemon having
+    /// closed the connection.
+    pub fn try_send_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.stream.write_all(bytes)?;
+        self.stream.flush()
+    }
+
     /// Closes the write side, so the daemon reads end of stream after what was sent.
     pub fn shutdown_write(&self) {
         self.stream.shutdown(Shutdown::Write).unwrap();

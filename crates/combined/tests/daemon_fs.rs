@@ -6,7 +6,7 @@ mod daemon_support;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use combined::adapters::fs::config::{self, BackendName, ConfigFileError};
 use combined::adapters::fs::data_dir::{DataDir, DataDirError};
@@ -450,4 +450,103 @@ fn fs_file_store_refuses_a_relative_space() {
     ));
     assert!(!Path::new("cs4-relative-space").exists());
     assert_eq!(block_on(store.revision(&space)).unwrap(), StoreRevision(0));
+}
+
+// ---- file store symlink containment ----
+
+enum Escape {
+    /// `<space>/.workspace` is a symlink to the outside folder.
+    Workspace,
+    /// `<space>/.workspace/sub` is a symlink to the outside folder; the path is `sub/victim`.
+    Folder,
+    /// `<space>/.workspace/victim` is a symlink to the outside file.
+    File,
+}
+
+const SENTINEL: &[u8] = b"keep me";
+
+/// Builds a space whose `victim` path escapes through a symlink, and returns the space, the
+/// store path and the outside sentinel file.
+fn escaping_space(scratch: &ShortTempDir, escape: &Escape) -> (SpaceId, &'static str, PathBuf) {
+    use std::os::unix::fs::symlink;
+    let space = scratch.path().join("space");
+    let outside = scratch.path().join("outside");
+    fs::create_dir(&space).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("victim");
+    fs::write(&sentinel, SENTINEL).unwrap();
+    let path = match escape {
+        Escape::Workspace => {
+            symlink(&outside, space.join(".workspace")).unwrap();
+            "victim"
+        }
+        Escape::Folder => {
+            fs::create_dir(space.join(".workspace")).unwrap();
+            symlink(&outside, space.join(".workspace/sub")).unwrap();
+            "sub/victim"
+        }
+        Escape::File => {
+            fs::create_dir(space.join(".workspace")).unwrap();
+            symlink(&sentinel, space.join(".workspace/victim")).unwrap();
+            "victim"
+        }
+    };
+    (SpaceId(space.to_str().unwrap().to_string()), path, sentinel)
+}
+
+fn assert_read_refused(escape: Escape) {
+    let scratch = ShortTempDir::new();
+    let (space, path, sentinel) = escaping_space(&scratch, &escape);
+    let result = block_on(FsFileStore::new().read(&space, path));
+    assert!(
+        matches!(result, Err(StoreError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), SENTINEL);
+}
+
+fn assert_write_refused(escape: Escape) {
+    let scratch = ShortTempDir::new();
+    let (space, path, sentinel) = escaping_space(&scratch, &escape);
+    let store = FsFileStore::new();
+    let result = block_on(store.write(&space, path, b"overwritten".to_vec()));
+    assert!(
+        matches!(result, Err(StoreError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), SENTINEL);
+    assert_eq!(block_on(store.revision(&space)).unwrap(), StoreRevision(0));
+    let outside = sentinel.parent().unwrap();
+    let names: Vec<_> = fs::read_dir(outside).unwrap().collect();
+    assert_eq!(names.len(), 1, "nothing new appears outside: {names:?}");
+}
+
+#[test]
+fn fs_file_store_refuses_to_read_through_a_symlinked_workspace() {
+    assert_read_refused(Escape::Workspace);
+}
+
+#[test]
+fn fs_file_store_refuses_to_write_through_a_symlinked_workspace() {
+    assert_write_refused(Escape::Workspace);
+}
+
+#[test]
+fn fs_file_store_refuses_to_read_through_a_symlinked_folder() {
+    assert_read_refused(Escape::Folder);
+}
+
+#[test]
+fn fs_file_store_refuses_to_write_through_a_symlinked_folder() {
+    assert_write_refused(Escape::Folder);
+}
+
+#[test]
+fn fs_file_store_refuses_to_read_a_symlinked_file() {
+    assert_read_refused(Escape::File);
+}
+
+#[test]
+fn fs_file_store_refuses_to_write_a_symlinked_file() {
+    assert_write_refused(Escape::File);
 }

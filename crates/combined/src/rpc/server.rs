@@ -72,6 +72,9 @@ struct ConnState {
     watching: bool,
     answers: VecDeque<RequestId>,
     stale: bool,
+    /// The connection's last message is queued and its input is ignored. It still counts
+    /// toward `max_connections` until its writer reports the socket closed.
+    closing: bool,
 }
 
 enum Wake {
@@ -224,6 +227,7 @@ impl Server {
 
     /// Takes a new connection, or closes it unanswered when the server is full.
     fn admit(&mut self, stream: UnixStream) {
+        let admitted = std::time::Instant::now();
         if self.conns.len() >= self.options.max_connections {
             return;
         }
@@ -246,6 +250,7 @@ impl Server {
             inbox: self.inbox_tx.clone(),
             host_id: self.host_id.clone(),
             handshake_timeout: self.options.handshake_timeout,
+            admitted,
         });
         if let Err(error) = started {
             eprintln!("combined: cannot start a connection thread: {error}");
@@ -260,6 +265,7 @@ impl Server {
                 watching: false,
                 answers: VecDeque::new(),
                 stale: false,
+                closing: false,
             },
         );
         self.stats.admitted();
@@ -276,7 +282,7 @@ impl Server {
         let now = self.clock.now();
         match event {
             ConnEvent::Message(conn, message) => {
-                if !self.conns.contains_key(&conn) {
+                if !self.conns.get(&conn).is_some_and(|state| !state.closing) {
                     return;
                 }
                 match message {
@@ -288,16 +294,24 @@ impl Server {
             }
             ConnEvent::Malformed(conn, text) => {
                 self.driver.core_mut().disconnect(conn, now);
-                let Some(state) = self.conns.remove(&conn) else {
+                let Some(state) = self.conns.get_mut(&conn) else {
                     return;
                 };
-                self.stats.removed();
+                if state.closing {
+                    return;
+                }
+                state.closing = true;
+                state.watching = false;
+                state.answers.clear();
+                state.stale = false;
                 let error = DaemonMessage::Error(ErrorMessage {
                     code: ErrorCode::Malformed,
                     message: format!("malformed frame: {text}"),
                     request: None,
                     attachment: None,
                 });
+                // The slot stays taken until the writer has sent this and closed the socket
+                // and then reports `Closed`; the write timeout bounds a blocked peer.
                 if state
                     .writer
                     .try_send(WriterCmd::Close(Some(error)))
@@ -400,7 +414,7 @@ impl Server {
             let Some(state) = self.conns.get_mut(&conn) else {
                 continue;
             };
-            if state.writer.capacity() != state.writer.max_capacity() {
+            if state.closing || state.writer.capacity() != state.writer.max_capacity() {
                 continue;
             }
             let mut batch: Vec<DaemonMessage> = state

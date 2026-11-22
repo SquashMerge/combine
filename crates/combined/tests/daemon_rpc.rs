@@ -539,6 +539,37 @@ fn handshake_timeout_closes_a_silent_connection() {
 }
 
 #[test]
+fn handshake_deadline_is_absolute_not_per_read() {
+    let env = Env::with(ServeOptions {
+        handshake_timeout: Duration::from_millis(500),
+        ..ServeOptions::default()
+    });
+    let mut client = WireClient::connect(&env.socket);
+    let hello = combine_protocol::WireMessage::encode(&ClientMessage::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+    }))
+    .unwrap();
+    let start = Instant::now();
+    let mut closed_after = None;
+    // One byte every 80 ms never leaves a read idle for 500 ms, yet the whole hello would take
+    // longer than the deadline.
+    for byte in &hello[..16] {
+        if client.try_send_bytes(&[*byte]).is_err() {
+            closed_after = Some(start.elapsed());
+            break;
+        }
+        thread::sleep(Duration::from_millis(80));
+    }
+    let closed_after = closed_after.expect("the daemon kept reading a hello past its deadline");
+    assert!(
+        closed_after < Duration::from_millis(900),
+        "closed after {closed_after:?}"
+    );
+    client.expect_closed();
+    env.wait_connections(0);
+}
+
+#[test]
 fn client_eof_disconnects_and_keeps_attachments_for_resume() {
     let env = Env::new();
     let term = env.spawn_terminal();
@@ -590,6 +621,41 @@ fn connections_over_the_limit_are_closed() {
     assert_eq!(next_terminals(&first).request, Some(RequestId(1)));
     drop(second);
     env.wait_connections(1);
+}
+
+#[test]
+fn a_closing_connection_still_counts_toward_the_limit_until_its_writer_is_done() {
+    const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+    let env = Env::with(ServeOptions {
+        max_connections: 1,
+        write_timeout: WRITE_TIMEOUT,
+        ..ServeOptions::default()
+    });
+    let mut spec = spawn_spec(env.work.to_str().unwrap(), 80, 24);
+    spec.argv.push("x".repeat(512 * 1024));
+    block_on(combined::ports::TerminalBackend::spawn(&*env.backend, spec)).unwrap();
+
+    let mut first = connect_and_never_read(&env.socket);
+    env.wait_connections(1);
+    std::io::Write::write_all(&mut first, &watch_frame(1)).unwrap();
+    thread::sleep(Duration::from_millis(200));
+    let malformed_at = Instant::now();
+    std::io::Write::write_all(&mut first, &frame(1, b"not json")).unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    // The writer is stuck on the unread snapshot, so the connection is still closing and
+    // still holds the only slot: every newcomer is refused without a byte.
+    let mut refused = 0;
+    while malformed_at.elapsed() < WRITE_TIMEOUT / 2 {
+        assert_eq!(env.stats().connections(), 1);
+        WireClient::connect(&env.socket).expect_closed();
+        refused += 1;
+    }
+    assert!(refused >= 1);
+
+    env.wait_connections(0);
+    let (_admitted, welcome) = WireClient::open(&env.socket);
+    assert_eq!(welcome.host_id, HostId(HOST.to_string()));
 }
 
 #[test]

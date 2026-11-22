@@ -256,7 +256,8 @@ fn combined_connect_exits_1_when_stdin_cannot_be_read() {
 /// here: its stdout pipe plus the chunk in its hand and the socket buffer), so the bridge really
 /// is blocked on its stdout. A bridge that
 /// was starved before it got that far keeps the loop going until it is scheduled again. A
-/// 30 s deadline bounds a bridge that never reads.
+/// 30 s deadline bounds a bridge that never reads, and the function panics if it was the
+/// deadline that ended the fill: the precondition then did not hold.
 fn fill_then_close(daemon_side: UnixStream) {
     daemon_side.set_nonblocking(true).unwrap();
     let chunk = vec![b'x'; 64 * 1024];
@@ -277,7 +278,20 @@ fn fill_then_close(daemon_side: UnixStream) {
             Err(error) => panic!("{error}"),
         }
     }
+    assert!(
+        written >= 64 * 1024 && last_progress.elapsed() >= Duration::from_millis(300),
+        "the bridge's stdout never stopped making progress ({written} bytes written)"
+    );
     drop(daemon_side);
+}
+
+/// Where a bridge started by [`traced_bridge`] records the branch its input thread took.
+fn trace_file(scratch: &ShortTempDir) -> std::path::PathBuf {
+    scratch.path().join("connect-trace")
+}
+
+fn trace_has(scratch: &ShortTempDir, wanted: &str) -> bool {
+    fs::read_to_string(trace_file(scratch)).is_ok_and(|trace| trace.contains(wanted))
 }
 
 /// Drains the bridge's stdout and stderr and waits for it to exit.
@@ -295,9 +309,8 @@ fn drain(child: &mut std::process::Child) -> (Vec<u8>, String, std::process::Exi
 /// then input reaches the dead socket: the write fails with a broken pipe. That means the
 /// daemon closed, so the bridge still exits 0 with nothing on stderr.
 ///
-/// If the bridge was starved so long that it drained the socket and exited before the test
-/// wrote, the test's own write fails with a broken pipe. The daemon behaved correctly, so that
-/// is tolerated: the run is then vacuous, never a failure.
+/// The test fails unless the fill really blocked the bridge and the bridge's own trace
+/// (`COMBINED_CONNECT_TRACE`, test-support builds) shows its input write hit the closed socket.
 #[test]
 fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_closed() {
     let scratch = ShortTempDir::new();
@@ -306,6 +319,7 @@ fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_close
     let mut child = combined_command(&scratch)
         .args(["connect", "--socket"])
         .arg(&socket)
+        .env("COMBINED_CONNECT_TRACE", trace_file(&scratch))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -313,17 +327,21 @@ fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_close
         .unwrap();
     let (daemon_side, _) = listener.accept().unwrap();
     fill_then_close(daemon_side);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the bridge exited before the daemon closed"
+    );
 
     let mut stdin = child.stdin.take().unwrap();
-    match stdin.write_all(b"after the close") {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-        Err(error) => panic!("{error}"),
-    }
+    stdin.write_all(b"after the close").unwrap();
     drop(stdin);
-    // Give the input thread time to hit the closed socket. A shorter wait can only make this
-    // test pass without exercising that path; it cannot make it fail.
-    thread::sleep(Duration::from_millis(300));
+    assert!(
+        wait_until(Duration::from_secs(10), || trace_has(
+            &scratch,
+            "input write failed"
+        )),
+        "the input thread never wrote to the closed socket"
+    );
 
     let (relayed, errors, status) = drain(&mut child);
     assert!(relayed.iter().all(|byte| *byte == b'x'));
@@ -334,7 +352,9 @@ fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_close
 
 /// The same race, but stdin ends without a byte, so the first thing the input thread does
 /// after the daemon closed is the half-close. On platforms where that fails with `ENOTCONN`
-/// (macOS), the bridge must still exit 0 and say nothing on stderr; elsewhere it succeeds.
+/// (macOS), the bridge must still exit 0 and say nothing on stderr, and the test fails unless
+/// the trace shows that failure happened. Elsewhere the half-close succeeds and nothing
+/// remains to observe.
 #[test]
 fn combined_connect_exits_0_when_the_half_close_reaches_a_socket_the_daemon_already_closed() {
     let scratch = ShortTempDir::new();
@@ -343,6 +363,7 @@ fn combined_connect_exits_0_when_the_half_close_reaches_a_socket_the_daemon_alre
     let mut child = combined_command(&scratch)
         .args(["connect", "--socket"])
         .arg(&socket)
+        .env("COMBINED_CONNECT_TRACE", trace_file(&scratch))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -350,9 +371,21 @@ fn combined_connect_exits_0_when_the_half_close_reaches_a_socket_the_daemon_alre
         .unwrap();
     let (daemon_side, _) = listener.accept().unwrap();
     fill_then_close(daemon_side);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the bridge exited before the daemon closed"
+    );
 
     drop(child.stdin.take());
-    thread::sleep(Duration::from_millis(300));
+    if cfg!(target_os = "macos") {
+        assert!(
+            wait_until(Duration::from_secs(10), || trace_has(
+                &scratch,
+                "half-close failed"
+            )),
+            "the half-close never failed on the closed socket"
+        );
+    }
 
     let (relayed, errors, status) = drain(&mut child);
     assert!(relayed.iter().all(|byte| *byte == b'x'));

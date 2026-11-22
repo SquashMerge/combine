@@ -13,6 +13,26 @@ use std::thread;
 
 const CHUNK: usize = 64 * 1024;
 
+/// Tests set `COMBINED_CONNECT_TRACE` to a file and read which daemon-closed branch the input
+/// thread took, so a test can fail when the race it targets never happened. Without the
+/// `test-support` feature this does nothing.
+#[cfg(feature = "test-support")]
+fn trace(event: &str) {
+    let Some(path) = std::env::var_os("COMBINED_CONNECT_TRACE") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{event}");
+    }
+}
+
+#[cfg(not(feature = "test-support"))]
+fn trace(_event: &str) {}
+
 /// Copies stdin to the socket until stdin ends, then closes the socket's write side. The main
 /// thread copies the socket to stdout, flushing after every read, and exits 0 when the socket
 /// ends or stdout is closed. It exits 1 if it cannot connect, if stdin fails to read, or on any
@@ -98,12 +118,18 @@ fn relay<R: Read>(input: &mut R, socket: &mut UnixStream) -> Result<(), RelayErr
     loop {
         match input.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => socket.write_all(&buf[..n]).map_err(RelayError::Socket)?,
+            Ok(n) => socket.write_all(&buf[..n]).map_err(|error| {
+                trace(&format!("input write failed: {:?}", error.kind()));
+                RelayError::Socket(error)
+            })?,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(RelayError::Stdin(error)),
         }
     }
-    socket.shutdown(Shutdown::Write).map_err(RelayError::Socket)
+    socket.shutdown(Shutdown::Write).map_err(|error| {
+        trace(&format!("half-close failed: {:?}", error.kind()));
+        RelayError::Socket(error)
+    })
 }
 
 fn copy_to_stdout(mut socket: UnixStream) -> io::Result<()> {
