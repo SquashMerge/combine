@@ -13,7 +13,7 @@ use combine_protocol::{
 
 use super::{
     FakeAttachmentRef, FakeCall, FakeConfig, Half, Mutation, ResyncMode, FAKE_PAINT_END,
-    FAKE_PAINT_START,
+    FAKE_PAINT_START, LATE_DATA, LATE_RESIZED,
 };
 use crate::model::{SpawnSpec, TermEvent, TermInfo, TermState};
 use crate::ports::{AttachEvent, AttachOptions, BackendError, BackendResult, Capabilities};
@@ -1072,7 +1072,6 @@ impl World {
         let credit = u64::from(self.config.capabilities.initial_credit);
         let started = self.started(index);
         let paint = self.paint_for(index);
-        let (cols, rows) = (self.terminals[index].cols, self.terminals[index].rows);
         let fidelity = self.terminals[index].fidelity;
         let att = self.attachments.get_mut(&id).expect("attachment");
         let old = att.generation;
@@ -1087,8 +1086,15 @@ impl World {
         att.pipe(new, started, false);
         att.pipe(new, AttachEvent::Data(paint), true);
         if late {
-            att.pipe(old, AttachEvent::Data(b"<late>".to_vec()), false);
-            att.pipe(old, AttachEvent::Resized { cols, rows }, false);
+            att.pipe(old, AttachEvent::Data(LATE_DATA.to_vec()), false);
+            att.pipe(
+                old,
+                AttachEvent::Resized {
+                    cols: LATE_RESIZED.0,
+                    rows: LATE_RESIZED.1,
+                },
+                false,
+            );
         }
         let queued: Vec<Queued> = att.queue.drain(..).collect();
         att.queued_input = 0;

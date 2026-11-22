@@ -14,6 +14,23 @@ macro_rules! contract {
         areas: [$($area:ident),* $(,)?],
         cases: [$($case:ident),* $(,)?] $(,)?
     ) => {
+        contract!(
+            target: $target,
+            make: $make,
+            lane: || Ok::<(), String>(()),
+            lane_target: "unused",
+            areas: [$($area),*],
+            cases: [$($case),*],
+        );
+    };
+    (
+        target: $target:ty,
+        make: $make:expr,
+        lane: $lane:expr,
+        lane_target: $label:literal,
+        areas: [$($area:ident),* $(,)?],
+        cases: [$($case:ident),* $(,)?] $(,)?
+    ) => {
         fn all_cases() -> Vec<$crate::contract::Case<$target>> {
             let mut all = Vec::new();
             $( all.extend($area::cases::<$target>()); )*
@@ -30,6 +47,14 @@ macro_rules! contract {
         $(
             #[test]
             fn $case() {
+                if let Err(reason) = $lane() {
+                    $crate::contract::report::record(
+                        stringify!($case),
+                        $label,
+                        &$crate::contract::report::Verdict::Skip(reason),
+                    );
+                    return;
+                }
                 $crate::contract::run_named::<$target>($make, &all_cases(), stringify!($case));
             }
         )*
