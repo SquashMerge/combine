@@ -780,6 +780,75 @@ fn control_queue_overflow_disconnects() {
 }
 
 #[test]
+fn overflow_during_announce_never_leaves_a_stale_owner() {
+    let config = CoreConfig {
+        max_control_messages: 3,
+        ..CoreConfig::default()
+    };
+    let mut rig = Rig::with(config, caps());
+    let (x, y, z) = (rig.core.connect(), rig.core.connect(), rig.core.connect());
+    let a = rig.open(x, 1, false);
+    let b = rig.open(y, 1, false);
+    let c = rig.open(z, 1, false);
+    rig.focus(z, c);
+    rig.effects();
+    let bad = || {
+        ClientMessage::Attach(Attach {
+            request: RequestId(9),
+            terminal: term(1),
+            options: request_options(0, 0, false),
+        })
+    };
+    for _ in 0..3 {
+        rig.send(y, bad());
+    }
+    assert!(rig.effects().is_empty());
+
+    rig.input(y, b, b"x");
+
+    assert_eq!(rig.owner(1), Some(c));
+    assert!(rig.effects().contains(&Effect::Disconnect(y)));
+    assert!(rig.pull(y).is_empty());
+    let current = rig.core.ownership(&term(1)).unwrap();
+    let last_notice = |messages: Vec<DaemonMessage>| {
+        messages
+            .into_iter()
+            .rev()
+            .find_map(|message| match message {
+                DaemonMessage::Ownership(ownership) => Some(ownership),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let heard_a = last_notice(rig.pull(x));
+    let heard_c = last_notice(rig.pull(z));
+    for (heard, id) in [(heard_a, a), (heard_c, c)] {
+        assert_eq!(heard.attachment, id);
+        assert_eq!(heard.ownership_generation, current.generation);
+        assert_eq!(heard.owner, current.owner);
+    }
+
+    rig.send(
+        z,
+        ClientMessage::Resize(Resize {
+            attachment: c,
+            cols: 100,
+            rows: 30,
+            ownership_generation: current.generation,
+        }),
+    );
+    assert!(rig.pull(z).is_empty());
+    assert_eq!(
+        rig.commands().last(),
+        Some(&BackendCommand::Resize {
+            attachment: c,
+            cols: 100,
+            rows: 30
+        })
+    );
+}
+
+#[test]
 fn resume_on_a_new_connection_moves_the_attachment() {
     let mut rig = Rig::new();
     let c1 = rig.core.connect();

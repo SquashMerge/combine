@@ -83,6 +83,9 @@ pub struct Core {
     attachments: BTreeMap<AttachmentId, Attachment>,
     ownerships: BTreeMap<String, TerminalOwnership>,
     effects: Vec<Effect>,
+    /// Connections whose control queue overflowed during the current call. They are dropped when
+    /// it finishes, so a hand-off never announces in the middle of another announce.
+    overflowed: BTreeSet<ConnectionId>,
 }
 
 fn take(counter: &mut u64) -> u64 {
@@ -118,6 +121,7 @@ impl Core {
             attachments: BTreeMap::new(),
             ownerships: BTreeMap::new(),
             effects: Vec::new(),
+            overflowed: BTreeSet::new(),
         })
     }
 
@@ -141,6 +145,19 @@ impl Core {
     /// for the grace period, except a finished gap's, which go at once, and those still opening,
     /// which are abandoned.
     pub fn disconnect(&mut self, connection: ConnectionId, now: Millis) {
+        self.drop_connection(connection, now);
+        self.drop_overflowed(now);
+    }
+
+    /// Drops every connection whose control queue overflowed. A drop can hand ownership off and
+    /// overflow another queue, so this runs until none is left.
+    fn drop_overflowed(&mut self, now: Millis) {
+        while let Some(connection) = self.overflowed.pop_first() {
+            self.drop_connection(connection, now);
+        }
+    }
+
+    fn drop_connection(&mut self, connection: ConnectionId, now: Millis) {
         if self.connections.remove(&connection).is_none() {
             return;
         }
@@ -217,6 +234,17 @@ impl Core {
         max_bytes: usize,
         now: Millis,
     ) -> Vec<DaemonMessage> {
+        let out = self.pull_messages(connection, max_bytes, now);
+        self.drop_overflowed(now);
+        out
+    }
+
+    fn pull_messages(
+        &mut self,
+        connection: ConnectionId,
+        max_bytes: usize,
+        now: Millis,
+    ) -> Vec<DaemonMessage> {
         let Some(state) = self.connections.get_mut(&connection) else {
             return Vec::new();
         };
@@ -265,6 +293,11 @@ impl Core {
     /// Finishes unbound attachments whose grace ran out, then disconnects each bound client that
     /// has left a final gap unsent for longer than the gap timeout.
     pub fn tick(&mut self, now: Millis) {
+        self.expire(now);
+        self.drop_overflowed(now);
+    }
+
+    fn expire(&mut self, now: Millis) {
         let expired: Vec<AttachmentId> = self
             .attachments
             .iter()
@@ -287,20 +320,23 @@ impl Core {
             .collect();
         for connection in stuck {
             self.effects.push(Effect::Disconnect(connection));
-            self.disconnect(connection, now);
+            self.drop_connection(connection, now);
         }
     }
 
     // ---- output queue ----
 
-    fn push_control(&mut self, connection: ConnectionId, message: DaemonMessage, now: Millis) {
+    /// Queues a control message. An overflow only marks the connection: it is dropped when the
+    /// current call ends, never in the middle of a loop over members.
+    fn push_control(&mut self, connection: ConnectionId, message: DaemonMessage, _now: Millis) {
         let max = self.config.max_control_messages;
         let Some(state) = self.connections.get_mut(&connection) else {
             return;
         };
         if state.control.len() >= max {
-            self.effects.push(Effect::Disconnect(connection));
-            self.disconnect(connection, now);
+            if self.overflowed.insert(connection) {
+                self.effects.push(Effect::Disconnect(connection));
+            }
             return;
         }
         state.control.push_back(message);
@@ -330,6 +366,11 @@ impl Core {
         message: ClientMessage,
         now: Millis,
     ) {
+        self.dispatch(connection, message, now);
+        self.drop_overflowed(now);
+    }
+
+    fn dispatch(&mut self, connection: ConnectionId, message: ClientMessage, now: Millis) {
         if !self.connections.contains_key(&connection) {
             return;
         }
@@ -761,6 +802,11 @@ impl Core {
         result: BackendResult<()>,
         now: Millis,
     ) {
+        self.settle_attach(attachment, result, now);
+        self.drop_overflowed(now);
+    }
+
+    fn settle_attach(&mut self, attachment: AttachmentId, result: BackendResult<()>, now: Millis) {
         let opening = self
             .attachments
             .get(&attachment)
@@ -829,6 +875,17 @@ impl Core {
         event: AttachEvent,
         now: Millis,
     ) {
+        self.apply_event(attachment, generation, event, now);
+        self.drop_overflowed(now);
+    }
+
+    fn apply_event(
+        &mut self,
+        attachment: AttachmentId,
+        generation: BackendGeneration,
+        event: AttachEvent,
+        now: Millis,
+    ) {
         let Some(held) = self.attachments.get(&attachment) else {
             self.command(BackendCommand::Detach { attachment });
             return;
@@ -888,6 +945,11 @@ impl Core {
 
     /// A stream that ends without a final event counts as the backend losing the terminal.
     pub fn backend_stream_ended(&mut self, attachment: AttachmentId, now: Millis) {
+        self.end_stream(attachment, now);
+        self.drop_overflowed(now);
+    }
+
+    fn end_stream(&mut self, attachment: AttachmentId, now: Millis) {
         let Some(held) = self.attachments.get_mut(&attachment) else {
             return;
         };
