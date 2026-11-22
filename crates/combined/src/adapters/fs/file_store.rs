@@ -73,6 +73,9 @@ impl FsFileStore {
     }
 
     fn fallback_file(&self, space: &SpaceId, path: &str) -> Option<PathBuf> {
+        if !valid_store_path(path) {
+            return None;
+        }
         let root = self.fallback.as_ref()?;
         let digest = Sha256::digest(space.0.as_bytes());
         let mut name = String::with_capacity(64);
@@ -209,9 +212,7 @@ impl FileStore for FsFileStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let revision = StoreRevision(revisions.get(space).copied().unwrap_or(0));
-        if !valid_store_path(path) {
-            return Err(StoreError::InvalidPath);
-        }
+        file_path(space, path)?;
         if let Some(copy) = self.fallback_file(space, path) {
             match std::fs::read(&copy) {
                 Ok(bytes) => return Ok(Some(stored(bytes, revision, true))),
@@ -240,6 +241,7 @@ impl FileStore for FsFileStore {
             .revisions
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        file_path(space, path)?;
         let copy = self.fallback_file(space, path);
         let mut aside = copy
             .as_ref()

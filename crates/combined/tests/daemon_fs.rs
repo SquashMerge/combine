@@ -956,3 +956,30 @@ fn store_contract_fallback_stays_authoritative_after_the_project_is_writable() {
         Some(b"B".to_vec())
     );
 }
+
+#[test]
+fn store_contract_invalid_paths_never_reach_an_existing_fallback_target() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let root = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&root);
+    let hex = hex_sha256(&space.0);
+    fs::create_dir_all(root.join(&hex)).unwrap();
+    let victim = scratch.path().join("victim");
+    fs::write(&victim, SENTINEL).unwrap();
+    let absolute = victim.to_str().unwrap().to_string();
+    let climbing = "../../victim".to_string();
+    for path in [absolute, climbing] {
+        assert_eq!(
+            block_on(store.write(&space, &path, b"overwritten".to_vec())),
+            Err(StoreError::InvalidPath),
+            "{path}"
+        );
+        assert_eq!(
+            block_on(store.read(&space, &path)),
+            Err(StoreError::InvalidPath),
+            "{path}"
+        );
+        assert_eq!(fs::read(&victim).unwrap(), SENTINEL, "{path}");
+    }
+}
