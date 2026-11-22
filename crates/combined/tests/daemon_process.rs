@@ -262,4 +262,7 @@ fn version_names_the_protocol_and_unknown_commands_exit_2() {
         "{stderr}"
     );
     assert!(stderr.contains("usage:"), "{stderr}");
+    for line in stderr.lines() {
+        assert!(line.starts_with("combined: "), "{line:?} in {stderr}");
+    }
 }

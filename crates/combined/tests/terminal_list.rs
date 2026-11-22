@@ -158,6 +158,7 @@ fn core_answers_watch_terminals_with_invalid_request() {
     match &messages[0] {
         DaemonMessage::Error(error) => {
             assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(error.message, "unexpected watch_terminals");
             assert_eq!(error.request, Some(RequestId(5)));
             assert_eq!(error.attachment, None);
         }

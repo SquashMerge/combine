@@ -20,18 +20,13 @@ use combine_protocol::{
     HostId, Welcome,
 };
 use combined::adapters::fs::data_dir::DataDir;
-use combined::adapters::fs::file_store::FsFileStore;
-use combined::adapters::fs::git_probe::FsGitProbe;
-use combined::core::{Core, CoreConfig, Driver, TerminalList};
 use combined::ports::TerminalBackend;
-use combined::rpc::{self, ServeOptions, ServerHandle, ServerParts};
+use combined::rpc::socket::MAX_SOCKET_PATH;
+use combined::rpc::{self, ServeOptions, ServerHandle};
 use combined::testing::FakeBackend;
-use combined::wiring::clock::MonotonicClock;
 use combined::wiring::config::{self, DaemonEnv};
 use combined::wiring::ids::IdReservation;
-
-/// The longest socket path macOS accepts.
-const MAX_SOCKET_PATH: usize = 103;
+use combined::wiring::server_parts;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -95,13 +90,46 @@ pub fn refuse_default_herdr_core(path: &Path, scratch: &ShortTempDir) {
 /// As [`refuse_default_herdr_core`], against the environment `env` describes.
 pub fn refuse_default_herdr_core_in(path: &Path, scratch: &ShortTempDir, env: &DaemonEnv) {
     check_in_scratch(path, scratch);
-    if let Ok((default, _)) = config::herdr_core_socket(None, env) {
+    for default in default_herdr_core_sockets(env) {
         assert!(
             path != default,
             "{} is herdr-core's default socket",
             path.display()
         );
     }
+}
+
+/// Every spelling of herdr-core's default socket `env` can reach: what the environment itself
+/// resolves to, and the default session's socket under `XDG_RUNTIME_DIR`, under
+/// `XDG_STATE_HOME` and under `$HOME/.local/state`, each as if `HC_SOCKET` were unset.
+pub fn default_herdr_core_sockets(env: &DaemonEnv) -> Vec<PathBuf> {
+    let session = Some("default".to_string());
+    let variants = [
+        env.clone(),
+        DaemonEnv {
+            hc_socket: None,
+            hc_session: session.clone(),
+            xdg_runtime_dir: env.xdg_runtime_dir.clone(),
+            ..DaemonEnv::default()
+        },
+        DaemonEnv {
+            hc_socket: None,
+            hc_session: session.clone(),
+            xdg_state_home: env.xdg_state_home.clone(),
+            ..DaemonEnv::default()
+        },
+        DaemonEnv {
+            hc_socket: None,
+            hc_session: session,
+            home: env.home.clone(),
+            ..DaemonEnv::default()
+        },
+    ];
+    variants
+        .iter()
+        .filter_map(|variant| config::herdr_core_socket(None, variant).ok())
+        .map(|(path, _)| path)
+        .collect()
 }
 
 /// The three paths a daemon needs, all inside the scratch dir.
@@ -321,25 +349,10 @@ pub fn fake_server(
     rpc::spawn(
         socket,
         move || {
-            let core = Core::new(
-                CoreConfig {
-                    id_base,
-                    ..CoreConfig::default()
-                },
-                backend.capabilities(),
-            )
-            .unwrap();
             let backend: Arc<dyn TerminalBackend> = backend;
             // Each test serves its own data dir, so no other writer needs the lock.
             drop(data_dir);
-            ServerParts {
-                driver: Driver::new(core, backend),
-                terminals: TerminalList::new(Box::new(FsGitProbe)),
-                host_id,
-                ids,
-                clock: MonotonicClock::new(),
-                file_store: Arc::new(FsFileStore::new()),
-            }
+            server_parts(backend, id_base, host_id, ids).unwrap()
         },
         options,
     )

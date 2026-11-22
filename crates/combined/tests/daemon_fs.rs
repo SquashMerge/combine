@@ -85,6 +85,36 @@ fn write_atomic_replaces_the_file_and_leaves_no_temp_file() {
 }
 
 #[test]
+fn concurrent_write_atomic_calls_to_one_path_all_succeed_and_leave_one_writers_bytes() {
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 50;
+    let scratch = ShortTempDir::new();
+    let path = scratch.path().join("out.json");
+    let payloads: Vec<Vec<u8>> = (0..WRITERS)
+        .map(|writer| format!("writer {writer} ").repeat(2048).into_bytes())
+        .collect();
+    let barrier = std::sync::Barrier::new(WRITERS);
+    std::thread::scope(|scope| {
+        for payload in &payloads {
+            let (path, barrier) = (&path, &barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..ROUNDS {
+                    write_atomic(path, payload, 0o600).unwrap();
+                }
+            });
+        }
+    });
+    let bytes = fs::read(&path).unwrap();
+    assert!(payloads.contains(&bytes), "the file holds a mix of writers");
+    let names: Vec<_> = fs::read_dir(scratch.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["out.json"]);
+}
+
+#[test]
 fn host_id_is_created_on_first_open_with_mode_0600() {
     let scratch = ShortTempDir::new();
     let dir = open(&scratch);
@@ -95,6 +125,24 @@ fn host_id_is_created_on_first_open_with_mode_0600() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["version"], 1);
     assert_eq!(value["host_id"], id.0.as_str());
+}
+
+/// The app's `hosts::identity::is_valid_host_id` reads the same file and must give the same
+/// answers, because it relies on the daemon's rule.
+#[test]
+fn host_id_rule_matches_the_shared_table() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../combine-protocol/tests/fixtures/host_id_cases.json"
+    ))
+    .unwrap();
+    for (key, expected) in [("accept", true), ("reject", false)] {
+        let ids = cases[key].as_array().unwrap();
+        assert!(!ids.is_empty());
+        for id in ids {
+            let id = id.as_str().unwrap();
+            assert_eq!(is_valid_host_id(id), expected, "{id:?}");
+        }
+    }
 }
 
 #[test]

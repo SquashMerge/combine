@@ -11,7 +11,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 /// The longest socket path macOS accepts.
-const MAX_SOCKET_PATH: usize = 103;
+pub const MAX_SOCKET_PATH: usize = 103;
 
 #[derive(Debug)]
 pub enum BindError {

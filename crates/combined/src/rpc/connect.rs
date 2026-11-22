@@ -71,6 +71,9 @@ pub fn run(socket: &Path) -> ExitCode {
     match copy_to_stdout(stream) {
         Ok(()) if failed.load(Ordering::SeqCst) => ExitCode::from(1),
         Ok(()) => ExitCode::SUCCESS,
+        // A read error that says the daemon has gone. No test reaches this on macOS: a closed
+        // peer reads as end of stream there, so `Ok(())` above is taken instead. Linux can
+        // report a reset when the peer closes with unread input.
         Err(error) if daemon_closed(&error) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("combined: {error}");
