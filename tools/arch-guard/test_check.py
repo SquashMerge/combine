@@ -645,6 +645,72 @@ class GuardTest(unittest.TestCase):
         """
         self.assertEqual(sorted(v.line for v in self._violations({"app/web/src/main.ts": src})), [1, 2, 3, 4, 5])
 
+    # --- JSX tags
+
+    def test_jsx_closing_tag_on_one_line(self):
+        self.assertFlags({"app/web/src/shell/A.tsx": "export const a = <p>hi</p>;\n"})
+
+    def test_jsx_closing_tag_on_its_own_line(self):
+        src = """\
+        export const a = (
+          <section>
+            <p>hi</p>
+          </section>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_jsx_nested_elements_and_fragments(self):
+        src = """\
+        export const a = (
+          <>
+            <ul>
+              <li>one</li>
+              <li>{1 + 2}</li>
+            </ul>
+          </>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_jsx_self_closing_tags(self):
+        src = """\
+        declare const x: object;
+        export const a = (
+          <div>
+            <Foo />
+            <Foo a="b" />
+            <Foo a={1} />
+            <Foo {...x} />
+            <br />
+          </div>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_regex_literals_still_lex_in_tsx(self):
+        src = """\
+        declare const s: string;
+        export const a = <p>{s.replace(/\\.$/, "")}</p>;
+        export const re = /<p>/;
+        const b = [/x/, /y/].length;
+        import { invoke } from "@tauri-apps/api/core";
+        """
+        self.assertFlags(
+            {"app/web/src/shell/A.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/A.tsx")
+        )
+
+    def test_tauri_import_in_a_tsx_component_is_flagged(self):
+        src = """\
+        import { invoke } from "@tauri-apps/api/core";
+        export function A() {
+          return <p onClick={() => invoke("x")}>go</p>;
+        }
+        """
+        self.assertFlags(
+            {"app/web/src/shell/A.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/A.tsx")
+        )
+
     def test_division_after_postfix_and_non_null(self):
         self.assertFlags(
             {

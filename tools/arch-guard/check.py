@@ -41,8 +41,11 @@ Known limits, by design:
 - Rust: macros are not expanded; re-exports, glob imports of a parent (`use std::*;`)
   and aliases of a crate root (`use std as s;`) are not followed. File ownership by
   package is by containing directory, not by the module tree.
-- Frontend: JSX text is not modeled; a `.tsx` file whose JSX text holds an unpaired quote
-  may be reported as `guard-parse`.
+- Frontend: JSX tags are handled: the `/` of a closing tag (`</p>`, `</>`) and of a
+  self-closing tag (`<Foo />`, `<Foo {...x} />`) is punctuation. The cost is that in plain
+  JS `a </re/` and `{ } />/` read as JSX, which can only add references, never hide one.
+  JSX text is still not modeled; a `.tsx` file whose JSX text holds an unpaired quote
+  may be reported as `guard-parse`, so keep quotes, backticks and slashes out of JSX text.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -746,6 +749,22 @@ def _line_end(src: str, i: int) -> int:
     return min(ends) if ends else len(src)
 
 
+def _jsx_tag_slash(src: str, i: int, toks: list[Tok]) -> bool:
+    """Whether the `/` at `i` belongs to a JSX tag, not a regex literal: the closing
+    tag's `</` (the `<` token touches the `/`), or a self-closing `/>` after the `}` of
+    a `{...props}` attribute. Approximation: in plain JS `a </re/` and `{ } />/` read
+    as JSX here; the `/` is then punctuation, so the regex body is lexed as code and can
+    only add references, never hide one."""
+    if not toks:
+        return False
+    prev = toks[-1]
+    if prev.kind != "punct":
+        return False
+    if prev.text == "<" and prev.start == i - 1:
+        return True
+    return prev.text == "}" and src.startswith("/>", i)
+
+
 def lex_js(src: str) -> list[Tok]:
     """Tokens of a JS/TS module. Whether `/` starts a regex depends on whether the
     previous token ends an expression, which takes some context: `)` after `if (...)`
@@ -811,6 +830,9 @@ def lex_js(src: str) -> list[Tok]:
                 push("template_expr", "", i, False)
                 braces.append("template")
             i = end
+        elif c == "/" and _jsx_tag_slash(src, i, toks):
+            push("punct", c, i, False)
+            i += 1
         elif c == "/" and not last_ends_expr():
             j, in_class = i + 1, False
             while j < n:
