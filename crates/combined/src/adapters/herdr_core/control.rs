@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -73,11 +74,28 @@ struct Inner {
 #[derive(Default)]
 pub(super) struct Shared {
     inner: Mutex<Inner>,
+    /// Attaches in flight: opened but not yet registered.
+    opening: AtomicUsize,
+}
+
+/// Marks an initial attach as busy from the first call to the core until the attachment is
+/// registered. Dropping it, on success or error, ends the mark.
+pub(super) struct OpenGuard(Arc<Shared>);
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        self.0.opening.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn opening(self: &Arc<Self>) -> OpenGuard {
+        self.opening.fetch_add(1, Ordering::SeqCst);
+        OpenGuard(Arc::clone(self))
     }
 
     pub(super) fn register(&self, address: &str, attachment: Weak<attachment::Shared>) {
@@ -270,9 +288,12 @@ impl HerdrCoreControl {
         DeliveryWait { goals }
     }
 
-    /// A pair is reopening, or a RESIZE, FOCUS or FACTS frame passed under 50 ms ago.
+    /// An attach is in flight, a pair is reopening, or a RESIZE, FOCUS or FACTS frame passed
+    /// under 50 ms ago.
     pub fn busy(&self) -> bool {
-        self.recently_touched() || self.pairs().iter().any(|(_, status)| !status.open)
+        self.shared.opening.load(Ordering::SeqCst) > 0
+            || self.recently_touched()
+            || self.pairs().iter().any(|(_, status)| !status.open)
     }
 
     /// Old-generation events delivered after rebuilds since the fault was switched on.
@@ -369,5 +390,62 @@ impl HerdrCoreControl {
     /// While on, the watcher grants the core no credit, so the core's queue for it grows.
     pub fn stall_watch_credit(&self, on: bool) {
         self.shared.lock().watch_credit_stalled = on;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::super::connection::Connection;
+    use super::*;
+
+    fn control() -> (Arc<Shared>, HerdrCoreControl) {
+        let shared = Arc::new(Shared::default());
+        let control = HerdrCoreControl::new(Arc::clone(&shared));
+        (shared, control)
+    }
+
+    /// A core that waits `delay`, then answers hello or hangs up.
+    async fn slow_core(mut server: tokio::io::DuplexStream, delay: Duration, answer: bool) {
+        let mut byte = [0u8; 1];
+        while server.read_exact(&mut byte).await.is_ok() && byte[0] != b'\n' {}
+        tokio::time::sleep(delay).await;
+        if answer {
+            let hello = r#"{"jsonrpc":"2.0","id":0,"result":{"generation":1,"version":"0.1.21","framed":true,"core":{"id":"x","name":"y"},"methods":["terminal.attach","terminal.list","terminal.run","terminal.kill","events.subscribe"],"features":[]}}"#;
+            let _ = server.write_all(format!("{hello}\n").as_bytes()).await;
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// An attach whose core is slow keeps `busy()` true for the whole wait, and the mark ends
+    /// when the open fails, with no count left behind.
+    #[tokio::test]
+    async fn an_attach_in_flight_is_busy_until_it_ends() {
+        let (shared, control) = control();
+        assert!(!control.busy());
+        let (client, server) = tokio::io::duplex(4_096);
+        let core = tokio::spawn(slow_core(server, Duration::from_millis(100), true));
+        let guard = shared.opening();
+        let open = tokio::spawn(Connection::from_stream(client));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(control.busy(), "busy while the core has not answered");
+        let opened = open.await.expect("task").expect("opened");
+        assert!(control.busy(), "busy until the attachment is registered");
+        drop(guard);
+        assert!(!control.busy());
+        drop(opened);
+        core.abort();
+
+        let (client, server) = tokio::io::duplex(4_096);
+        let core = tokio::spawn(slow_core(server, Duration::from_millis(20), false));
+        let failed = {
+            let _guard = shared.opening();
+            assert!(control.busy());
+            Connection::from_stream(client).await.is_err()
+        };
+        assert!(failed, "the core hung up before hello");
+        assert!(!control.busy(), "an open that failed releases the mark");
+        core.await.expect("core");
     }
 }

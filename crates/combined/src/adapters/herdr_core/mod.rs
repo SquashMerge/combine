@@ -226,6 +226,8 @@ impl TerminalBackend for HerdrCoreBackend {
 
     async fn attach(&self, id: &TermId, opts: AttachOptions) -> BackendResult<Box<dyn Attachment>> {
         let address = self.resolve(id)?;
+        #[cfg(feature = "test-support")]
+        let _opening = self.env.control.opening();
         let params = OpenParams {
             address: &address,
             size: (opts.cols, opts.rows),
