@@ -21,6 +21,7 @@ use super::identity::{
 };
 use super::link::{abort_link, Closer, ConnectError, Connector, ExitInfo, Link};
 use super::model::{ConnectionState, SpaceView};
+use super::outbound::Outbound;
 use super::text::is_blank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +134,8 @@ pub trait HostEvents: Send + Sync {
 
 pub struct SessionIo<'a> {
     pub host_id: &'a HostId,
-    pub reader: &'a mut dyn Read,
-    pub writer: &'a mut dyn Write,
+    pub reader: &'a mut (dyn Read + Send),
+    pub writer: &'a mut (dyn Write + Send),
     pub events: &'a dyn HostEvents,
 }
 
@@ -178,6 +179,7 @@ pub struct SupervisorDeps {
     pub clock: Arc<dyn Clock>,
     pub events: Arc<dyn HostEvents>,
     pub phase: PhaseFactory,
+    pub outbound: Arc<Outbound>,
 }
 
 fn stderr_detail(exit: &Option<ExitInfo>) -> Option<String> {
@@ -453,6 +455,7 @@ mod tests {
             clock: clock.clone(),
             events: recorder,
             phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+            outbound: Arc::new(Outbound::default()),
         };
         Rig {
             connector,
