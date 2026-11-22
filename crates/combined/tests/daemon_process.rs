@@ -146,6 +146,7 @@ fn herdr_core_backend_without_the_adapter_fails_at_start() {
     // A stand-in for herdr-core's socket: it is checked and never connected to.
     fs::create_dir_all(paths.herdr_core_socket.parent().unwrap()).unwrap();
     let listener = UnixListener::bind(&paths.herdr_core_socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
 
     let mut daemon = DaemonProcess::spawn(&scratch, &paths, "herdr-core");
     assert_eq!(code(daemon.wait_exit()), Some(3));
@@ -153,31 +154,46 @@ fn herdr_core_backend_without_the_adapter_fails_at_start() {
     assert!(log.contains("no herdr-core adapter"), "{log}");
     assert!(log.contains("#23"), "{log}");
     assert!(!paths.socket.exists());
+    // Any connection the daemon had made would be waiting in the backlog.
+    match listener.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("the daemon connected to herdr-core's socket"),
+        Err(error) => panic!("{error}"),
+    }
     drop(listener);
 }
 
 #[test]
 fn serve_with_a_bad_config_exits_2() {
     let scratch = ShortTempDir::new();
-    let paths = DaemonPaths::in_scratch(&scratch, "bad");
-    let dir = scratch.path().join("bad");
-    fs::create_dir_all(&dir).unwrap();
-    let config = dir.join("daemon.json");
 
-    for (text, needle) in [
+    // Each case has its own name, so its own log: a message can only come from its own run.
+    for (index, (text, needle)) in [
         (r#"{"version": 1, "typo": true}"#, "typo"),
         (r#"{"version": 2}"#, "version 2"),
         (r#"{"version": 1, "socket": "relative.sock"}"#, "absolute"),
         ("not json", "invalid"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let paths = DaemonPaths::in_scratch(&scratch, &format!("bad{index}"));
+        let dir = scratch.path().join(&paths.name);
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("daemon.json");
         fs::write(&config, text).unwrap();
         let mut daemon =
             DaemonProcess::spawn_with(&scratch, &paths, &["serve", "--config"], &config);
         assert_eq!(code(daemon.wait_exit()), Some(2), "{text}");
-        assert!(daemon.log().contains(needle), "{text}: {}", daemon.log());
-        assert!(daemon.log().starts_with("combined: "), "{}", daemon.log());
+        let log = daemon.log();
+        assert!(log.starts_with("combined: "), "{text}: {log}");
+        assert!(log.contains(needle), "{text}: {log}");
+        assert_eq!(log.matches("combined: ").count(), 1, "{text}: {log}");
     }
 
+    let paths = DaemonPaths::in_scratch(&scratch, "bad-missing");
+    let dir = scratch.path().join(&paths.name);
+    fs::create_dir_all(&dir).unwrap();
     let missing = dir.join("missing.json");
     let mut daemon = DaemonProcess::spawn_with(&scratch, &paths, &["serve", "--config"], &missing);
     assert_eq!(code(daemon.wait_exit()), Some(2));

@@ -7,7 +7,7 @@ mod daemon_support;
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
@@ -248,9 +248,56 @@ fn combined_connect_exits_1_when_stdin_cannot_be_read() {
     assert!(!output.stderr.is_empty());
 }
 
+/// Fills the bridge's way to stdout from the daemon side, then drops the daemon side.
+///
+/// The bridge stops reading the socket once its stdout pipe (which nobody reads) is full, so it
+/// cannot see the daemon's close until the test drains the pipe. The fill stops once writes
+/// have stalled for 300 ms *and* at least 64 KiB went through (a blocked bridge takes about 80 KiB
+/// here: its stdout pipe plus the chunk in its hand and the socket buffer), so the bridge really
+/// is blocked on its stdout. A bridge that
+/// was starved before it got that far keeps the loop going until it is scheduled again. A
+/// 30 s deadline bounds a bridge that never reads.
+fn fill_then_close(daemon_side: UnixStream) {
+    daemon_side.set_nonblocking(true).unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut written = 0usize;
+    let mut last_progress = Instant::now();
+    while Instant::now() < deadline
+        && (written < 64 * 1024 || last_progress.elapsed() < Duration::from_millis(300))
+    {
+        match (&daemon_side).write(&chunk) {
+            Ok(n) => {
+                written += n;
+                last_progress = Instant::now();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    drop(daemon_side);
+}
+
+/// Drains the bridge's stdout and stderr and waits for it to exit.
+fn drain(child: &mut std::process::Child) -> (Vec<u8>, String, std::process::ExitStatus) {
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut relayed = Vec::new();
+    stdout.read_to_end(&mut relayed).unwrap();
+    let mut errors = String::new();
+    stderr.read_to_string(&mut errors).unwrap();
+    (relayed, errors, child.wait().unwrap())
+}
+
 /// The daemon has closed while the bridge is still stuck writing to a stdout nobody reads, and
-/// then input reaches the dead socket: the write fails with a broken pipe and the half-close
-/// with `ENOTCONN`. Both mean the daemon closed, so the bridge still exits 0.
+/// then input reaches the dead socket: the write fails with a broken pipe. That means the
+/// daemon closed, so the bridge still exits 0 with nothing on stderr.
+///
+/// If the bridge was starved so long that it drained the socket and exited before the test
+/// wrote, the test's own write fails with a broken pipe. The daemon behaved correctly, so that
+/// is tolerated: the run is then vacuous, never a failure.
 #[test]
 fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_closed() {
     let scratch = ShortTempDir::new();
@@ -265,40 +312,50 @@ fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_close
         .spawn()
         .unwrap();
     let (daemon_side, _) = listener.accept().unwrap();
-
-    // Fill the bridge's way to stdout: it stops reading the socket once its stdout pipe is
-    // full, so it cannot see the daemon's close until the test drains the pipe.
-    daemon_side.set_nonblocking(true).unwrap();
-    let chunk = vec![b'x'; 64 * 1024];
-    let mut last_progress = Instant::now();
-    while last_progress.elapsed() < Duration::from_millis(300) {
-        match (&daemon_side).write(&chunk) {
-            Ok(_) => last_progress = Instant::now(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    drop(daemon_side);
+    fill_then_close(daemon_side);
 
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"after the close").unwrap();
+    match stdin.write_all(b"after the close") {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("{error}"),
+    }
     drop(stdin);
     // Give the input thread time to hit the closed socket. A shorter wait can only make this
     // test pass without exercising that path; it cannot make it fail.
     thread::sleep(Duration::from_millis(300));
 
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let mut relayed = Vec::new();
-    stdout.read_to_end(&mut relayed).unwrap();
-    let mut errors = String::new();
-    stderr.read_to_string(&mut errors).unwrap();
-    let status = child.wait().unwrap();
-
+    let (relayed, errors, status) = drain(&mut child);
     assert!(relayed.iter().all(|byte| *byte == b'x'));
     assert_eq!(errors, "");
     assert_eq!(status.code(), Some(0));
     assert!(fs::metadata(&socket).is_ok());
+}
+
+/// The same race, but stdin ends without a byte, so the first thing the input thread does
+/// after the daemon closed is the half-close. On platforms where that fails with `ENOTCONN`
+/// (macOS), the bridge must still exit 0 and say nothing on stderr; elsewhere it succeeds.
+#[test]
+fn combined_connect_exits_0_when_the_half_close_reaches_a_socket_the_daemon_already_closed() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.sock("halfclose.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut child = combined_command(&scratch)
+        .args(["connect", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (daemon_side, _) = listener.accept().unwrap();
+    fill_then_close(daemon_side);
+
+    drop(child.stdin.take());
+    thread::sleep(Duration::from_millis(300));
+
+    let (relayed, errors, status) = drain(&mut child);
+    assert!(relayed.iter().all(|byte| *byte == b'x'));
+    assert_eq!(errors, "");
+    assert_eq!(status.code(), Some(0));
 }
