@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::display::Display;
 use crate::ids::{AttachmentId, Cursor, Epoch, OwnershipGeneration, RequestId, TermId};
+use crate::layout::LayoutOp;
 
 /// The client's first frame. See the handshake in [`crate::client_handshake`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +97,33 @@ pub struct WatchTerminals {
     pub request: RequestId,
 }
 
+/// Subscribes the connection to one space's layout. The daemon answers
+/// `layout` carrying this `request` once it has read the file, then pushes the
+/// newest layout after each change. A connection watches one space at most:
+/// watching another replaces the first. An unknown `space` gets
+/// `unknown_space`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchLayout {
+    pub request: RequestId,
+    pub space: String,
+}
+
+/// Stops the layout watch. It has no `request` and gets no reply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnwatchLayout {}
+
+/// Changes the watched space's layout. The batch holds 1 to 32 ops and applies
+/// whole or not at all. A `base_layout_revision` that isn't the current one
+/// gets `stale_layout`; an op the layout can't take gets `invalid_request`.
+/// The daemon answers `layout` carrying this `request`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutateLayout {
+    pub request: RequestId,
+    pub space: String,
+    pub base_layout_revision: u64,
+    pub ops: Vec<LayoutOp>,
+}
+
 /// Typed input: frame kind 3, never JSON. A caller with more than
 /// [`MAX_INPUT_CHUNK`](crate::MAX_INPUT_CHUNK) bytes splits it, in order, with
 /// `chunks`.
@@ -135,6 +163,9 @@ pub enum ClientMessage {
     SetDisplay(SetDisplay),
     RequestOwnership(RequestOwnership),
     WatchTerminals(WatchTerminals),
+    WatchLayout(WatchLayout),
+    UnwatchLayout(UnwatchLayout),
+    MutateLayout(MutateLayout),
     #[serde(skip)]
     Input(Input),
     #[serde(skip)]
@@ -156,6 +187,9 @@ impl ClientMessage {
             Self::SetDisplay(_) => "set_display",
             Self::RequestOwnership(_) => "request_ownership",
             Self::WatchTerminals(_) => "watch_terminals",
+            Self::WatchLayout(_) => "watch_layout",
+            Self::UnwatchLayout(_) => "unwatch_layout",
+            Self::MutateLayout(_) => "mutate_layout",
             Self::Input(_) => "input",
             Self::AutomaticReply(_) => "automatic_reply",
         }

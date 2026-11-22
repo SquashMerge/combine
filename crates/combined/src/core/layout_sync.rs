@@ -10,12 +10,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use combine_protocol as wire;
+
 use crate::core::effects::ConnectionId;
 use crate::core::layout::{
     apply_ops, default_layout, diff_fields, encode_layout, identity_origins, parse_layout,
     validate_layout, FieldPath, LayoutError, LayoutOp, Origins, LAYOUT_MAX_BYTES,
 };
-use crate::model::{ContentHash, LayoutRevision, Millis, SpaceId, SpaceLayout};
+use crate::model::{
+    ContentHash, LayoutRevision, Millis, PanelId, SpaceId, SpaceLayout, SplitDir, SplitNode, TileId,
+};
 use crate::ports::{StoreError, StoredFile, WriteOutcome};
 
 /// How long the sync waits before writing, and before retrying a write.
@@ -168,6 +172,108 @@ pub struct SpaceLayoutStatus {
     pub read_only: bool,
     pub error: Option<String>,
     pub dropped: Option<DroppedBatch>,
+}
+
+/// The most ops one `mutate_layout` may carry.
+pub const MAX_WIRE_OPS: usize = 32;
+
+/// The wire form of a space's layout for its clients. The wire tree has no `groups` or unknown
+/// keys.
+pub fn layout_snapshot(space: &SpaceId, status: &SpaceLayoutStatus) -> wire::LayoutSnapshot {
+    wire::LayoutSnapshot {
+        space: space.0.clone(),
+        layout_revision: status.layout_revision.0,
+        root: wire_node(&status.layout.root),
+        read_only: status.read_only,
+        error: status.error.clone(),
+        dropped: status.dropped.as_ref().map(dropped_notice),
+    }
+}
+
+fn wire_node(node: &SplitNode) -> wire::LayoutNode {
+    match node {
+        SplitNode::Split(split) => wire::LayoutNode::Split {
+            dir: match split.dir {
+                SplitDir::H => wire::SplitDirection::H,
+                SplitDir::V => wire::SplitDirection::V,
+            },
+            ratio: wire::Ratio(split.ratio),
+            a: Box::new(wire_node(&split.a)),
+            b: Box::new(wire_node(&split.b)),
+        },
+        SplitNode::Tile(tile) => wire::LayoutNode::Tile {
+            id: tile.id.as_str().to_string(),
+            panels: tile
+                .panels
+                .iter()
+                .map(|panel| panel.as_str().to_string())
+                .collect(),
+            active: tile.active.as_ref().map(|panel| panel.as_str().to_string()),
+        },
+    }
+}
+
+fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
+    wire::DroppedNotice {
+        op_count: u32::try_from(dropped.op_count).unwrap_or(u32::MAX),
+        message: format!(
+            "{} pending change(s) were dropped because the layout was edited outside Combine",
+            dropped.op_count
+        ),
+    }
+}
+
+/// Converts the ops of a `mutate_layout` for [`Layouts::mutate`]. The batch holds 1 to
+/// [`MAX_WIRE_OPS`] ops, and every ID must be valid. The error text is for the client.
+pub fn ops_from_wire(ops: Vec<wire::LayoutOp>) -> Result<Vec<LayoutOp>, String> {
+    if ops.is_empty() || ops.len() > MAX_WIRE_OPS {
+        return Err(format!(
+            "a mutation carries 1 to {MAX_WIRE_OPS} ops, not {}",
+            ops.len()
+        ));
+    }
+    ops.into_iter().map(op_from_wire).collect()
+}
+
+fn op_from_wire(op: wire::LayoutOp) -> Result<LayoutOp, String> {
+    let tile = |id: String| TileId::new(id).map_err(|e| format!("invalid tile ID: {e}"));
+    let panel = |id: String| PanelId::new(id).map_err(|e| format!("invalid panel ID: {e}"));
+    Ok(match op {
+        wire::LayoutOp::SetActive { tile: t, panel: p } => LayoutOp::SetActive {
+            tile: tile(t)?,
+            panel: panel(p)?,
+        },
+        wire::LayoutOp::SetRatio { leaves, ratio } => LayoutOp::SetRatio {
+            leaves: leaves.into_iter().map(tile).collect::<Result<_, _>>()?,
+            ratio: ratio.0,
+        },
+        wire::LayoutOp::MovePanel {
+            panel: p,
+            to_tile,
+            index,
+        } => LayoutOp::MovePanel {
+            panel: panel(p)?,
+            to_tile: tile(to_tile)?,
+            index: usize::try_from(index).unwrap_or(usize::MAX),
+        },
+        wire::LayoutOp::SplitTile {
+            tile: t,
+            dir,
+            new_tile,
+            ratio,
+            panel: p,
+        } => LayoutOp::SplitTile {
+            tile: tile(t)?,
+            dir: match dir {
+                wire::SplitDirection::H => SplitDir::H,
+                wire::SplitDirection::V => SplitDir::V,
+            },
+            new_tile: tile(new_tile)?,
+            ratio: ratio.0,
+            panel: p.map(panel).transpose()?,
+        },
+        wire::LayoutOp::CloseTile { tile: t } => LayoutOp::CloseTile { tile: tile(t)? },
+    })
 }
 
 fn invalid_file_error(reason: &str) -> String {

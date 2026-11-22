@@ -60,11 +60,6 @@ fn hello_frame(version: u32) -> Vec<u8> {
 }
 
 #[test]
-fn protocol_version_is_2() {
-    assert_eq!(PROTOCOL_VERSION, 2);
-}
-
-#[test]
 fn watch_terminals_decodes_from_the_spec_example() {
     let (message, used) = ClientMessage::decode(&control_frame(WATCH_JSON)).unwrap();
     assert_eq!(
@@ -133,13 +128,16 @@ fn daemon_refuses_a_v1_hello_with_the_exact_text() {
         error,
         HandshakeError::VersionMismatch(VersionMismatch {
             client: 1,
-            daemon: 2
+            daemon: PROTOCOL_VERSION
         })
     ));
     match DaemonMessage::decode(&writer).unwrap().0 {
         DaemonMessage::Error(e) => {
             assert_eq!(e.code, ErrorCode::VersionMismatch);
-            assert_eq!(e.message, "protocol version mismatch: client 1, daemon 2");
+            assert_eq!(
+                e.message,
+                format!("protocol version mismatch: client 1, daemon {PROTOCOL_VERSION}")
+            );
         }
         other => panic!("expected error, got {other:?}"),
     }
@@ -158,7 +156,7 @@ fn client_handshake_reports_a_v1_daemon_as_mismatch() {
     assert!(matches!(
         client_handshake(&mut reader, &mut writer).unwrap_err(),
         HandshakeError::VersionMismatch(VersionMismatch {
-            client: 2,
+            client: PROTOCOL_VERSION,
             daemon: 1
         })
     ));

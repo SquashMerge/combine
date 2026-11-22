@@ -139,6 +139,23 @@ fn decoding_stays_within_its_allocation_bounds() {
         assert!(peak <= 2 * frame_cap, "full terminals: peak {peak}");
     }
 
+    let full_layout = full_control_frame(
+        r#"{"type":"layout","request":null,"layout":{"space":"s","layout_revision":1,"read_only":false,"error":null,"dropped":null,"root":{"type":"tile","id":"a","active":null,"panels":["#,
+        |_| r#""p","#.to_owned(),
+        r#""p"]}}"#,
+    );
+    for (result, peak) in decode_both::<DaemonMessage>(&full_layout) {
+        match result {
+            Ok(DaemonMessage::Layout(layout)) => match layout.layout.root {
+                LayoutNode::Tile { panels, .. } => assert!(panels.len() > 100_000),
+                other => panic!("expected a tile, got {other:?}"),
+            },
+            other => panic!("expected layout, got {other:?}"),
+        }
+        // Each three-byte panel ID costs a 24-byte `String`, so the panel list is the worst case.
+        assert!(peak <= 8 * frame_cap, "full layout: peak {peak}");
+    }
+
     let worst_error = {
         let target = MAX_FRAME_LEN as usize - 1;
         let prefix = r#"{"type":"hello","protocol_version":""#;
