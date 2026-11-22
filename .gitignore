@@ -6,3 +6,7 @@ __pycache__/
 # feature-factory run state and sandboxes
 .factory/
 /.factory-sandboxes/
+
+# Build output: Tauri writes gen/ (capability schemas) into the crate on every build; vite writes dist/.
+app/src-tauri/gen/
+app/web/dist/

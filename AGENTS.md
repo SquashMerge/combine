@@ -18,24 +18,26 @@ Combine is one desktop window over the herdr-core agent terminals on each of you
 
 ## Shared heavy-run lock
 
-This machine runs several projects' builds and test suites. Heavy work is serialized through one shared lease, used by Trellis, mimir, Combine and other projects:
+This machine runs several projects' builds and test suites. Heavy work is serialized through one shared lease with two slots, used by Trellis, mimir, Combine and other projects. The protocol is in `trellis-evidence/heavy-lock/README-v2.md`. There are two wrappers:
 
+    /Users/jcarreira/projects/squashmerge/trellis-evidence/heavy-lock/heavy-medium.sh <command> [args...]
     /Users/jcarreira/projects/squashmerge/trellis-evidence/heavy-lock/heavy.sh <command> [args...]
 
-- **Heavy work goes through heavy.sh:**
+- **Medium (`heavy-medium.sh`)** takes one slot, so two medium jobs can run at once. Use it for builds and checks:
+  - `./tools/verify` (it takes the medium tier itself);
   - the full test suite (`cargo test --workspace`, `cargo nextest run`);
-  - release builds, including Tauri app bundles;
   - whole-workspace `cargo clippy --all-targets`;
-  - benchmarks and any timing measurement, so another project's load doesn't skew your numbers. M0's keystroke-latency and output-burst measurements count;
+  - release builds, including Tauri app bundles;
   - anything else that saturates the CPU for more than a minute or two.
 
-  Example: `heavy.sh cargo nextest run --workspace`.
+  Example: `heavy-medium.sh cargo nextest run --workspace`.
+- **Large (`heavy.sh`)** takes both slots and runs alone. Use it for benchmarks and any timing or memory measurement, so another job's load doesn't skew your numbers. M0's keystroke-latency and output-burst measurements and M1's latency test count. A job that names no tier counts as large.
 - **Light work runs directly:** `cargo check`, `cargo fmt`, single targeted tests (`cargo test some_test`) and quick builds of one crate.
-- **It queues.** The wrapper waits for the lease, then runs the command. The 4-hour timeout covers waiting and running together. Start long runs in the background and wait for them to finish. Don't poll in a tight loop.
-- **Never touch the lease directory** `~/.mimir-heavy-locks/heavy.lock.lease`: don't delete, rename or "break" it. A stale lease (a holder that died) is broken automatically after 10 minutes without a heartbeat.
-- **No nesting.** Wrap the outermost command only. Inside a wrapped run `MIMIR_HEAVY_LOCK_HELD` is set, and nested calls run directly.
-- **Interrupting:** Ctrl-C or SIGTERM on heavy.sh kills the command's process group and releases the lease. Never SIGKILL the wrapper: the child keeps running unlocked.
+- **It queues.** The wrapper waits for a slot, then runs the command. A waiting large job stops new medium jobs from starting, so measurements aren't starved. The 4-hour timeout covers waiting and running together. Start long runs in the background and wait for them to finish. Don't poll in a tight loop.
+- **Never touch the lease directories** under `~/.mimir-heavy-locks/` (`heavy.lock.lease`, `heavy.lock.lease2`, `heavy.lock.intent`): don't delete, rename or "break" them. A stale lease (a holder that died) is broken automatically after 10 minutes without a heartbeat.
+- **No nesting.** Wrap the outermost command only. Inside a wrapped run `MIMIR_HEAVY_LOCK_HELD` is set, and nested calls run directly. A factory driver that wraps `factory observe` in `heavy-medium.sh` therefore runs `./tools/verify` inside that lease, and the lock wait doesn't count against the verify timeout. Nested wrappers don't upgrade the tier: a `heavy.sh` call inside a medium lease still holds one slot. If any step measures timing or memory, wrap the outermost command in `heavy.sh`, or run the measurement separately after the medium lease is released. Never unset `MIMIR_HEAVY_LOCK_HELD` to force an upgrade.
+- **Interrupting:** Ctrl-C or SIGTERM on the wrapper kills the command's process group and releases the lease. Never SIGKILL the wrapper: the child keeps running unlocked.
 - Hold the lease for one command at a time. Don't wrap an interactive shell or a long idle wait.
-- **Scripts:** run a test or check script whole through heavy.sh (e.g. `heavy.sh ./tools/verify` once it exists). Don't wrap only some of the steps inside it.
+- **Scripts:** run a test or check script whole through the wrapper. Don't wrap only some of the steps inside it.
 - **Build directories:** give each checkout or worktree its own `CARGO_TARGET_DIR` under `/Users/jcarreira/projects/squashmerge/combine-targets/<checkout-name>`, as Trellis does with `trellis-targets/`. Never share one between checkouts. The lock limits CPU use, not disk, so watch free space too.
 - **Agents in a container or VM** can only take part if they see the same `~/.mimir-heavy-locks` directory through a bind mount. The protocol allows this, but it needs mounting and setting up.
