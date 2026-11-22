@@ -52,10 +52,13 @@ pub fn herdr_core_socket_refusal(path: &Path, env: &SocketGuardEnv) -> Option<St
             .map(|x| x.join(DEFAULT_SOCKET_SUFFIX)),
         env.hc_socket.clone(),
     ];
-    let equals_known = defaults
-        .iter()
-        .flatten()
-        .any(|known| candidates.iter().flatten().any(|p| *p == known.as_path()));
+    let equals_known = defaults.iter().flatten().any(|known| {
+        let known_canonical = fs::canonicalize(known).ok();
+        [Some(known.as_path()), known_canonical.as_deref()]
+            .iter()
+            .flatten()
+            .any(|k| candidates.iter().flatten().any(|p| p == k))
+    });
     (named || equals_known).then(|| {
         format!(
             "refusing to connect to {}: it is a herdr-core socket. A local host's \"socket\" must be the Combine daemon's socket.",
@@ -177,6 +180,38 @@ mod tests {
             Err(ConnectError::Permanent(ft)) => assert_eq!(ft.detail, None),
             other => panic!("expected a refusal, got {:?}", other.err()),
         }
+    }
+
+    #[test]
+    fn refuses_a_symlink_into_a_herdr_core_directory() {
+        let dir = ShortTempDir::new();
+        let core = dir.path().join("herdr-core");
+        fs::create_dir(&core).expect("create the directory");
+        fs::write(core.join("d.sock"), b"").expect("create a regular file");
+        let link = dir.path().join("combine.sock");
+        std::os::unix::fs::symlink(core.join("d.sock"), &link).expect("symlink");
+        let guard = SocketGuardEnv::default();
+        assert_eq!(
+            herdr_core_socket_refusal(&link, &guard),
+            Some(format!(
+                "refusing to connect to {}: it is a herdr-core socket. A local host's \"socket\" must be the Combine daemon's socket.",
+                link.display()
+            ))
+        );
+        match LocalSocketConnector::new(link, guard).connect() {
+            Err(ConnectError::Permanent(ft)) => assert_eq!(ft.detail, None),
+            other => panic!("expected a refusal, got {:?}", other.err()),
+        }
+
+        let real = dir.path().join("real.sock");
+        fs::write(&real, b"").expect("create a regular file");
+        let alias = dir.path().join("alias.sock");
+        std::os::unix::fs::symlink(&real, &alias).expect("symlink");
+        let guard = SocketGuardEnv {
+            hc_socket: Some(real),
+            ..SocketGuardEnv::default()
+        };
+        assert!(herdr_core_socket_refusal(&alias, &guard).is_some());
     }
 
     #[test]

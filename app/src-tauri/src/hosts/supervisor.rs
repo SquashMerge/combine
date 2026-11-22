@@ -471,15 +471,20 @@ mod tests {
         Some(("example@mini".to_string(), "/opt/combined".to_string()))
     }
 
-    /// Runs the loop on this thread. Only for scripts that end without outside help.
+    /// Runs the loop to its end, for scripts that end without outside help. A loop that does
+    /// not end within [`WAIT`] is stopped and fails the test, instead of hanging it.
     fn run_to_end(rig: &Rig, stored: Option<HostId>, ssh: Option<(String, String)>) {
-        run_supervisor(
+        let stop = StopSignal::new();
+        let handle = spawn_supervisor(
             "mini".to_string(),
             stored,
             ssh,
             rig.deps.clone(),
-            StopSignal::new(),
+            stop.clone(),
         );
+        let ended = joins_within(handle, WAIT);
+        stop.stop();
+        assert!(ended, "the supervisor did not stop within 5 s");
     }
 
     fn connection(event: Event) -> ConnectionState {
@@ -854,5 +859,45 @@ mod tests {
             store_failure_message(&StoreError::Invalid),
             "could not save the host ID: hosts.json is invalid, so Combine will not write it"
         );
+    }
+
+    #[test]
+    fn already_recorded_with_the_same_id_publishes_it_and_continues() {
+        let double = Double::welcome(a());
+        let probe = double.probe();
+        let store = MemoryHostIdStore::failing(StoreError::AlreadyRecorded(a()));
+        let rig = rig_with(vec![Step::Serve(double)], store, FakeClock::stop_after(1));
+        let events = rig.events;
+        let handle = spawn_supervisor("mini".to_string(), None, None, rig.deps, StopSignal::new());
+        assert_eq!(connection(recv(&events)), ConnectionState::Connecting);
+        assert_eq!(recv(&events), Event::HostId("mini".to_string(), a()));
+        assert_eq!(connection(recv(&events)), ConnectionState::Connected);
+        probe.drop_now();
+        assert_eq!(
+            connection(recv(&events)),
+            dropped("connection closed", None, 1000)
+        );
+        assert!(joins_within(handle, WAIT));
+    }
+
+    #[test]
+    fn already_recorded_with_another_id_is_refused_as_a_mismatch() {
+        let double = Double::welcome(a());
+        let probe = double.probe();
+        let store = MemoryHostIdStore::failing(StoreError::AlreadyRecorded(host_id(HOST_B)));
+        let rig = rig_with(vec![Step::Serve(double)], store, FakeClock::new());
+        run_to_end(&rig, None, None);
+        let mismatch = super::super::identity::mismatch_message("mini", &host_id(HOST_B), &a());
+        let events: Vec<Event> = rig.events.try_iter().collect();
+        assert_eq!(
+            events.last(),
+            Some(&Event::Connection(
+                "mini".to_string(),
+                failed(&mismatch, None)
+            ))
+        );
+        assert!(events.iter().all(|e| !matches!(e, Event::HostId(..))));
+        assert_eq!(rig.connector.connect_count(), 1);
+        assert!(probe.closed_by_client());
     }
 }

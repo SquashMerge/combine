@@ -266,6 +266,20 @@ mod tests {
     }
 
     #[test]
+    fn stderr_keeps_the_last_64_kib() {
+        let dir = ShortTempDir::new();
+        let script = write_fake_ssh(
+            dir.path(),
+            "head -c 70000 /dev/zero | tr '\\0' a >&2; printf 'END\\n' >&2; exit 1",
+        );
+        let link = connect(&script);
+        let exit = link.finish().expect("an ssh link reports its exit");
+        assert_eq!(exit.code, Some(1));
+        assert_eq!(exit.stderr.len(), STDERR_TAIL_BYTES);
+        assert!(exit.stderr.ends_with("END\n"));
+    }
+
+    #[test]
     fn spawn_error_is_permanent_with_the_os_error_as_detail() {
         let missing = "/nonexistent/cs5-ssh";
         match SshConnector::new(missing, "example@mini", "/opt/combined").connect() {
