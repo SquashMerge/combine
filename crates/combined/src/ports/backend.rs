@@ -154,7 +154,14 @@ pub trait Attachment: Send {
     /// Taken once; a second call returns an empty stream.
     fn events(&mut self) -> AttachEvents;
     async fn write(&mut self, bytes: &[u8]) -> BackendResult<()>;
-    async fn write_automatic(&mut self, bytes: &[u8]) -> BackendResult<()>;
+    /// `generation` is the one core authorized: that of the `Started` which opened the reply's
+    /// epoch. A reply for any other generation is dropped and returns `Ok`, even if the pair
+    /// was rebuilt before core saw the new `Started`.
+    async fn write_automatic(
+        &mut self,
+        generation: BackendGeneration,
+        bytes: &[u8],
+    ) -> BackendResult<()>;
     async fn resize(&mut self, cols: u16, rows: u16) -> BackendResult<()>;
     async fn focus(&mut self) -> BackendResult<()>;
     async fn set_display(&mut self, display: Display) -> BackendResult<()>;

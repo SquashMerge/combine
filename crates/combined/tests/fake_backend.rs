@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use combine_protocol::{CloseReason, Fidelity, TermId};
+use combine_protocol::{BackendGeneration, CloseReason, Fidelity, TermId};
 use combined::model::{SpaceId, TermEvent};
 use combined::ports::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, Capabilities, FileStore,
@@ -155,7 +155,9 @@ fn watch_only_has_no_input_half() {
 
     block_on(async {
         att.write(b"typed").await.unwrap();
-        att.write_automatic(b"reply").await.unwrap();
+        att.write_automatic(BackendGeneration(1), b"reply")
+            .await
+            .unwrap();
         att.resize(120, 40).await.unwrap();
         att.focus().await.unwrap();
     });
@@ -543,7 +545,9 @@ fn reopen_queue_is_bounded() {
             Err(BackendError::Failed("reopen queue full".to_string()))
         );
         att.write(b"fgh").await.unwrap();
-        att.write_automatic(b"dropped").await.unwrap();
+        att.write_automatic(BackendGeneration(1), b"dropped")
+            .await
+            .unwrap();
         att.credit(10).await.unwrap();
         att.resize(90, 20).await.unwrap();
         att.focus().await.unwrap();
@@ -717,7 +721,9 @@ fn spawn_kill_and_calls_follow_the_rules() {
 
     block_on(async {
         att.write(b"echo me").await.unwrap();
-        att.write_automatic(b"\x1b[0n").await.unwrap();
+        att.write_automatic(BackendGeneration(1), b"\x1b[0n")
+            .await
+            .unwrap();
         att.set_display(display()).await.unwrap();
     });
     assert_eq!(control.typed_input(&term), b"echo me");
@@ -767,7 +773,9 @@ fn capabilities_gate_facts_and_automatic_replies() {
     drain(&mut events);
     block_on(async {
         att.set_display(display()).await.unwrap();
-        att.write_automatic(b"reply").await.unwrap();
+        att.write_automatic(BackendGeneration(1), b"reply")
+            .await
+            .unwrap();
         att.credit(1).await.unwrap();
     });
     control.emit(&term, &[b'z'; 600_000]);
@@ -779,6 +787,25 @@ fn capabilities_gate_facts_and_automatic_replies() {
         att: FakeAttachmentRef(1),
         bytes: b"reply".to_vec()
     }));
+}
+
+#[test]
+fn an_automatic_write_for_another_generation_is_dropped() {
+    let (backend, control) = fake(FakeConfig::default());
+    let term = spawn(&backend);
+    let mut att = attach(&backend, &term);
+    control.fail_half(FakeAttachmentRef(1), Half::Input);
+    assert!(control.step());
+
+    block_on(async {
+        att.write_automatic(BackendGeneration(1), b"old")
+            .await
+            .unwrap();
+        att.write_automatic(BackendGeneration(2), b"new")
+            .await
+            .unwrap();
+    });
+    assert_eq!(control.automatic_input(&term), vec![b"new".to_vec()]);
 }
 
 #[test]

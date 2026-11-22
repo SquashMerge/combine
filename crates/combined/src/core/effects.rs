@@ -1,6 +1,6 @@
 //! What core asks its caller to do.
 
-use combine_protocol::{AttachmentId, Display, TermId};
+use combine_protocol::{AttachmentId, BackendGeneration, Display, TermId};
 
 use crate::ports::AttachOptions;
 
@@ -19,8 +19,11 @@ pub enum BackendCommand {
         attachment: AttachmentId,
         bytes: Vec<u8>,
     },
+    /// `generation` is the backend generation of the `Started` that opened the reply's epoch.
+    /// The adapter drops the reply if the pair has been rebuilt since.
     WriteAutomatic {
         attachment: AttachmentId,
+        generation: BackendGeneration,
         bytes: Vec<u8>,
     },
     Resize {
@@ -58,6 +61,15 @@ impl BackendCommand {
             | BackendCommand::Detach { attachment } => *attachment,
         }
     }
+}
+
+/// A client-driven attachment command, named when the backend refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedCommand {
+    Input,
+    Resize,
+    Focus,
+    SetDisplay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

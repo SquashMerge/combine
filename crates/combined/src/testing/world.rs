@@ -807,12 +807,18 @@ impl World {
         self.request(att, Request::Write(bytes.to_vec()))
     }
 
-    pub(crate) fn write_automatic(&mut self, att: u64, bytes: &[u8]) -> BackendResult<()> {
+    pub(crate) fn write_automatic(
+        &mut self,
+        att: u64,
+        generation: BackendGeneration,
+        bytes: &[u8],
+    ) -> BackendResult<()> {
         self.calls.push(FakeCall::WriteAutomatic {
             att: FakeAttachmentRef(att),
             bytes: bytes.to_vec(),
         });
-        if self.gate(att)? == Gate::Apply && self.config.capabilities.automatic_replies {
+        let current = self.attachments[&att].generation == generation.0;
+        if self.gate(att)? == Gate::Apply && current && self.config.capabilities.automatic_replies {
             let index = self
                 .index(&self.attachments[&att].address)
                 .expect("terminal");

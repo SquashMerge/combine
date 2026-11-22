@@ -8,6 +8,7 @@ use combine_protocol::{
 };
 use combined::core::{
     BackendCommand, ConfigError, ConnectionId, Core, CoreConfig, Effect, LogEnd, OwnershipState,
+    RefusedCommand,
 };
 use combined::model::Millis;
 use combined::ports::{AttachEvent, BackendError, Capabilities};
@@ -780,6 +781,69 @@ fn control_queue_overflow_disconnects() {
 }
 
 #[test]
+fn a_refused_command_tells_the_attachments_client_in_combine_words() {
+    let mut rig = Rig::new();
+    let c = rig.core.connect();
+    let a = rig.open(c, 1, false);
+    let now = rig.now();
+    let secret = BackendError::Failed("secret-detail".into());
+    for (command, text) in [
+        (
+            RefusedCommand::Input,
+            "the backend refused input for this attachment",
+        ),
+        (
+            RefusedCommand::Resize,
+            "the backend refused the resize for this attachment",
+        ),
+        (
+            RefusedCommand::Focus,
+            "the backend refused the focus for this attachment",
+        ),
+        (
+            RefusedCommand::SetDisplay,
+            "the backend refused the display change for this attachment",
+        ),
+    ] {
+        rig.core.command_failed(a, command, &secret, now);
+        let messages = rig.pull(c);
+        let [DaemonMessage::Error(error)] = messages.as_slice() else {
+            panic!("{command:?} was not reported");
+        };
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(error.attachment, Some(a));
+        assert_eq!(error.request, None);
+        assert_eq!(error.message, text);
+    }
+
+    rig.core
+        .command_failed(a, RefusedCommand::Input, &BackendError::Closed, now);
+    rig.core
+        .command_failed(AttachmentId(999), RefusedCommand::Input, &secret, now);
+    assert!(rig.pull(c).is_empty());
+    assert!(rig.effects().is_empty());
+}
+
+#[test]
+fn a_refused_command_that_overflows_the_queue_drops_the_connection() {
+    let config = CoreConfig {
+        max_control_messages: 3,
+        ..CoreConfig::default()
+    };
+    let mut rig = Rig::with(config, caps());
+    let c = rig.core.connect();
+    let a = rig.open(c, 1, false);
+    let now = rig.now();
+    let refused = BackendError::Failed("x".into());
+    for _ in 0..4 {
+        rig.core
+            .command_failed(a, RefusedCommand::Input, &refused, now);
+    }
+    assert_eq!(rig.effects(), [Effect::Disconnect(c)]);
+    assert!(rig.pull(c).is_empty());
+}
+
+#[test]
 fn overflow_during_announce_never_leaves_a_stale_owner() {
     let config = CoreConfig {
         max_control_messages: 3,
@@ -1470,6 +1534,7 @@ fn automatic_reply_fence() {
         rig.commands(),
         [BackendCommand::WriteAutomatic {
             attachment: owner,
+            generation: BackendGeneration(1),
             bytes: b"\x1b[0n".to_vec()
         }]
     );

@@ -167,7 +167,11 @@ impl Attachment for StubAttachment {
         Ok(())
     }
 
-    async fn write_automatic(&mut self, bytes: &[u8]) -> BackendResult<()> {
+    async fn write_automatic(
+        &mut self,
+        _generation: BackendGeneration,
+        bytes: &[u8],
+    ) -> BackendResult<()> {
         self.note(format!("auto {}", String::from_utf8_lossy(bytes)));
         Ok(())
     }

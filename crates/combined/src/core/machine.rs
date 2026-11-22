@@ -13,7 +13,7 @@ use combine_protocol::{
 };
 
 use super::config::{validate, ConfigError, CoreConfig};
-use super::effects::{BackendCommand, ConnectionId, Effect};
+use super::effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 use super::log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats};
 use super::ownership::{OwnershipChange, TerminalOwnership};
 use crate::model::Millis;
@@ -34,6 +34,10 @@ const NOT_SENT: &str = "the cursor names an event that was not sent";
 const UNEXPECTED_HELLO: &str = "unexpected hello";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
+const REFUSED_INPUT: &str = "the backend refused input for this attachment";
+const REFUSED_RESIZE: &str = "the backend refused the resize for this attachment";
+const REFUSED_FOCUS: &str = "the backend refused the focus for this attachment";
+const REFUSED_DISPLAY: &str = "the backend refused the display change for this attachment";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -190,9 +194,9 @@ impl Core {
         unbound.sort_by_key(|(id, _)| self.is_owner(*id));
         for (id, finished) in unbound {
             if finished {
-                self.finish(id, now);
+                self.finish(id);
             } else {
-                self.refresh_eligibility(id, now);
+                self.refresh_eligibility(id);
             }
         }
     }
@@ -234,17 +238,12 @@ impl Core {
         max_bytes: usize,
         now: Millis,
     ) -> Vec<DaemonMessage> {
-        let out = self.pull_messages(connection, max_bytes, now);
+        let out = self.pull_messages(connection, max_bytes);
         self.drop_overflowed(now);
         out
     }
 
-    fn pull_messages(
-        &mut self,
-        connection: ConnectionId,
-        max_bytes: usize,
-        now: Millis,
-    ) -> Vec<DaemonMessage> {
+    fn pull_messages(&mut self, connection: ConnectionId, max_bytes: usize) -> Vec<DaemonMessage> {
         let Some(state) = self.connections.get_mut(&connection) else {
             return Vec::new();
         };
@@ -270,7 +269,7 @@ impl Core {
             let gap = matches!(message, DaemonMessage::Gap(_));
             out.push(message);
             if gap {
-                self.finish(id, now);
+                self.finish(id);
             }
         }
         out
@@ -306,7 +305,7 @@ impl Core {
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
-            self.finish(id, now);
+            self.finish(id);
         }
         let stuck: BTreeSet<ConnectionId> = self
             .attachments
@@ -328,7 +327,7 @@ impl Core {
 
     /// Queues a control message. An overflow only marks the connection: it is dropped when the
     /// current call ends, never in the middle of a loop over members.
-    fn push_control(&mut self, connection: ConnectionId, message: DaemonMessage, _now: Millis) {
+    fn push_control(&mut self, connection: ConnectionId, message: DaemonMessage) {
         let max = self.config.max_control_messages;
         let Some(state) = self.connections.get_mut(&connection) else {
             return;
@@ -349,9 +348,8 @@ impl Core {
         message: &str,
         request: Option<RequestId>,
         attachment: Option<AttachmentId>,
-        now: Millis,
     ) {
-        self.push_control(connection, error(code, message, request, attachment), now);
+        self.push_control(connection, error(code, message, request, attachment));
     }
 
     fn command(&mut self, command: BackendCommand) {
@@ -381,32 +379,28 @@ impl Core {
                 UNEXPECTED_HELLO,
                 None,
                 None,
-                now,
             ),
-            ClientMessage::Attach(attach) => self.on_attach(connection, attach, now),
+            ClientMessage::Attach(attach) => self.on_attach(connection, attach),
             ClientMessage::Resume(resume) => {
-                self.on_resume(connection, resume.request, resume.cursor, now)
+                self.on_resume(connection, resume.request, resume.cursor)
             }
             ClientMessage::Detach(detach) => self.on_detach(connection, detach.attachment, now),
-            ClientMessage::Ack(ack) => self.on_ack(connection, ack.cursor, now),
+            ClientMessage::Ack(ack) => self.on_ack(connection, ack.cursor),
             ClientMessage::Resize(resize) => self.on_resize(
                 connection,
                 resize.attachment,
                 resize.cols,
                 resize.rows,
                 resize.ownership_generation,
-                now,
             ),
-            ClientMessage::Focus(focus) => self.on_focus(connection, focus.attachment, now),
+            ClientMessage::Focus(focus) => self.on_focus(connection, focus.attachment),
             ClientMessage::SetDisplay(set) => {
-                self.on_set_display(connection, set.attachment, set.display, now)
+                self.on_set_display(connection, set.attachment, set.display)
             }
             ClientMessage::RequestOwnership(request) => {
-                self.on_request_ownership(connection, request.attachment, now)
+                self.on_request_ownership(connection, request.attachment)
             }
-            ClientMessage::Input(input) => {
-                self.on_input(connection, input.attachment, input.bytes, now)
-            }
+            ClientMessage::Input(input) => self.on_input(connection, input.attachment, input.bytes),
             ClientMessage::AutomaticReply(reply) => self.on_automatic_reply(connection, reply),
         }
     }
@@ -421,51 +415,38 @@ impl Core {
         Some(matches!(attachment.state, State::Ended(_)))
     }
 
-    fn unknown_attachment(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) {
+    fn unknown_attachment(&mut self, connection: ConnectionId, id: AttachmentId) {
         self.send_error(
             connection,
             ErrorCode::UnknownAttachment,
             UNKNOWN_ATTACHMENT,
             None,
             Some(id),
-            now,
         );
     }
 
     /// The gate for a message the client may send about its own, live attachment. It answers
     /// `unknown_attachment` when the connection doesn't hold it and returns false; an ended
     /// attachment also returns false, silently.
-    fn active(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) -> bool {
+    fn active(&mut self, connection: ConnectionId, id: AttachmentId) -> bool {
         match self.held(connection, id) {
             None => {
-                self.unknown_attachment(connection, id, now);
+                self.unknown_attachment(connection, id);
                 false
             }
             Some(ended) => !ended,
         }
     }
 
-    fn watch_only_error(
-        &mut self,
-        connection: ConnectionId,
-        id: AttachmentId,
-        now: Millis,
-    ) -> bool {
+    fn watch_only_error(&mut self, connection: ConnectionId, id: AttachmentId) -> bool {
         if self.attachments[&id].watch_only {
-            self.send_error(
-                connection,
-                ErrorCode::WatchOnly,
-                WATCH_ONLY,
-                None,
-                Some(id),
-                now,
-            );
+            self.send_error(connection, ErrorCode::WatchOnly, WATCH_ONLY, None, Some(id));
             return true;
         }
         false
     }
 
-    fn on_attach(&mut self, connection: ConnectionId, attach: Attach, now: Millis) {
+    fn on_attach(&mut self, connection: ConnectionId, attach: Attach) {
         let Attach {
             request,
             terminal,
@@ -478,7 +459,6 @@ impl Core {
                 ZERO_SIZE,
                 Some(request),
                 None,
-                now,
             );
             return;
         }
@@ -516,13 +496,7 @@ impl Core {
         });
     }
 
-    fn on_resume(
-        &mut self,
-        connection: ConnectionId,
-        request: RequestId,
-        cursor: Cursor,
-        now: Millis,
-    ) {
+    fn on_resume(&mut self, connection: ConnectionId, request: RequestId, cursor: Cursor) {
         let id = cursor.attachment;
         let resumed = match self.attachments.get_mut(&id) {
             Some(a) if a.state != State::Opening => Some(a.log.resume(cursor)),
@@ -537,10 +511,9 @@ impl Core {
                         attachment: id,
                         request: Some(request),
                     }),
-                    now,
                 );
                 if other.is_some() {
-                    self.finish(id, now);
+                    self.finish(id);
                 }
                 return;
             }
@@ -549,7 +522,7 @@ impl Core {
             attachment.connection = Some(connection);
             attachment.grace_deadline = None;
         }
-        self.refresh_eligibility(id, now);
+        self.refresh_eligibility(id);
         self.grant_credit(id);
         self.push_control(
             connection,
@@ -558,12 +531,11 @@ impl Core {
                 attachment: id,
                 replay_through,
             }),
-            now,
         );
-        self.push_ownership(connection, id, now);
+        self.push_ownership(connection, id);
     }
 
-    fn push_ownership(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) {
+    fn push_ownership(&mut self, connection: ConnectionId, id: AttachmentId) {
         let Some(attachment) = self.attachments.get(&id) else {
             return;
         };
@@ -578,17 +550,16 @@ impl Core {
                 ownership_generation: state.generation,
                 owner: state.owner,
             }),
-            now,
         );
     }
 
     fn on_detach(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) {
         let Some(ended) = self.held(connection, id) else {
-            self.unknown_attachment(connection, id, now);
+            self.unknown_attachment(connection, id);
             return;
         };
         if ended {
-            self.finish(id, now);
+            self.finish(id);
             return;
         }
         let live = matches!(self.attachments[&id].state, State::Live { .. });
@@ -603,16 +574,16 @@ impl Core {
         }
     }
 
-    fn on_ack(&mut self, connection: ConnectionId, cursor: Cursor, now: Millis) {
+    fn on_ack(&mut self, connection: ConnectionId, cursor: Cursor) {
         let id = cursor.attachment;
-        if !self.active_or_ended(connection, id, now) {
+        if !self.active_or_ended(connection, id) {
             return;
         }
         let Some(attachment) = self.attachments.get_mut(&id) else {
             return;
         };
         match attachment.log.ack(cursor) {
-            Ok(true) => self.finish(id, now),
+            Ok(true) => self.finish(id),
             Ok(false) => self.grant_credit(id),
             Err(AckError::NotSent) => self.send_error(
                 connection,
@@ -620,15 +591,14 @@ impl Core {
                 NOT_SENT,
                 None,
                 Some(id),
-                now,
             ),
         }
     }
 
     /// Like [`active`](Self::active), but an ended attachment passes too.
-    fn active_or_ended(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) -> bool {
+    fn active_or_ended(&mut self, connection: ConnectionId, id: AttachmentId) -> bool {
         if self.held(connection, id).is_none() {
-            self.unknown_attachment(connection, id, now);
+            self.unknown_attachment(connection, id);
             return false;
         }
         true
@@ -641,9 +611,8 @@ impl Core {
         cols: u16,
         rows: u16,
         generation: OwnershipGeneration,
-        now: Millis,
     ) {
-        if !self.active(connection, id, now) || self.watch_only_error(connection, id, now) {
+        if !self.active(connection, id) || self.watch_only_error(connection, id) {
             return;
         }
         let Some(attachment) = self.attachments.get(&id) else {
@@ -659,7 +628,6 @@ impl Core {
                 STALE_GENERATION,
                 None,
                 Some(id),
-                now,
             );
             return;
         }
@@ -670,7 +638,6 @@ impl Core {
                 ZERO_SIZE,
                 None,
                 Some(id),
-                now,
             );
             return;
         }
@@ -688,8 +655,8 @@ impl Core {
         }
     }
 
-    fn on_focus(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) {
-        if !self.active(connection, id, now) {
+    fn on_focus(&mut self, connection: ConnectionId, id: AttachmentId) {
+        if !self.active(connection, id) {
             return;
         }
         let order = take(&mut self.next_focus);
@@ -705,14 +672,8 @@ impl Core {
         }
     }
 
-    fn on_set_display(
-        &mut self,
-        connection: ConnectionId,
-        id: AttachmentId,
-        display: Display,
-        now: Millis,
-    ) {
-        if !self.active(connection, id, now) {
+    fn on_set_display(&mut self, connection: ConnectionId, id: AttachmentId, display: Display) {
+        if !self.active(connection, id) {
             return;
         }
         let Some(attachment) = self.attachments.get_mut(&id) else {
@@ -734,23 +695,17 @@ impl Core {
             .is_some_and(|ownership| ownership.is_owner(id))
     }
 
-    fn on_request_ownership(&mut self, connection: ConnectionId, id: AttachmentId, now: Millis) {
-        if !self.active(connection, id, now) || self.watch_only_error(connection, id, now) {
+    fn on_request_ownership(&mut self, connection: ConnectionId, id: AttachmentId) {
+        if !self.active(connection, id) || self.watch_only_error(connection, id) {
             return;
         }
         if !self.is_owner(id) {
-            self.grant(id, None, now);
+            self.grant(id, None);
         }
     }
 
-    fn on_input(
-        &mut self,
-        connection: ConnectionId,
-        id: AttachmentId,
-        bytes: Vec<u8>,
-        now: Millis,
-    ) {
-        if !self.active(connection, id, now) || self.watch_only_error(connection, id, now) {
+    fn on_input(&mut self, connection: ConnectionId, id: AttachmentId, bytes: Vec<u8>) {
+        if !self.active(connection, id) || self.watch_only_error(connection, id) {
             return;
         }
         if bytes.is_empty() {
@@ -762,7 +717,7 @@ impl Core {
                 bytes,
             });
         } else {
-            self.grant(id, Some(bytes), now);
+            self.grant(id, Some(bytes));
         }
     }
 
@@ -772,7 +727,11 @@ impl Core {
         let Some(attachment) = self.attachments.get(&id) else {
             return;
         };
-        let State::Live { epoch, .. } = attachment.state else {
+        let State::Live {
+            generation: backend_generation,
+            epoch,
+        } = attachment.state
+        else {
             return;
         };
         let generation = self
@@ -790,11 +749,43 @@ impl Core {
         }
         self.command(BackendCommand::WriteAutomatic {
             attachment: id,
+            generation: backend_generation,
             bytes: reply.bytes,
         });
     }
 
     // ---- backend inputs ----
+
+    /// The backend refused a command core sent for an attachment. The attachment's client is
+    /// told in Combine's own words and nothing else changes: the backend's text stays out, and
+    /// a `Closed` failure says nothing because the attachment's stream reports the end.
+    pub fn command_failed(
+        &mut self,
+        attachment: AttachmentId,
+        command: RefusedCommand,
+        failure: &BackendError,
+        now: Millis,
+    ) {
+        if !matches!(failure, BackendError::Closed) {
+            let text = match command {
+                RefusedCommand::Input => REFUSED_INPUT,
+                RefusedCommand::Resize => REFUSED_RESIZE,
+                RefusedCommand::Focus => REFUSED_FOCUS,
+                RefusedCommand::SetDisplay => REFUSED_DISPLAY,
+            };
+            let connection = self.attachments.get(&attachment).and_then(|a| a.connection);
+            if let Some(connection) = connection {
+                self.send_error(
+                    connection,
+                    ErrorCode::Internal,
+                    text,
+                    None,
+                    Some(attachment),
+                );
+            }
+        }
+        self.drop_overflowed(now);
+    }
 
     pub fn attach_result(
         &mut self,
@@ -802,11 +793,11 @@ impl Core {
         result: BackendResult<()>,
         now: Millis,
     ) {
-        self.settle_attach(attachment, result, now);
+        self.settle_attach(attachment, result);
         self.drop_overflowed(now);
     }
 
-    fn settle_attach(&mut self, attachment: AttachmentId, result: BackendResult<()>, now: Millis) {
+    fn settle_attach(&mut self, attachment: AttachmentId, result: BackendResult<()>) {
         let opening = self
             .attachments
             .get(&attachment)
@@ -819,7 +810,7 @@ impl Core {
             return;
         }
         match result {
-            Ok(()) => self.opened(attachment, now),
+            Ok(()) => self.opened(attachment),
             Err(failure) => {
                 let Some(opening) = self.attachments.remove(&attachment) else {
                     return;
@@ -833,12 +824,12 @@ impl Core {
                     }
                     _ => (ErrorCode::AttachFailed, ATTACH_FAILED),
                 };
-                self.send_error(connection, code, text, Some(opening.request), None, now);
+                self.send_error(connection, code, text, Some(opening.request), None);
             }
         }
     }
 
-    fn opened(&mut self, id: AttachmentId, now: Millis) {
+    fn opened(&mut self, id: AttachmentId) {
         let Some(attachment) = self.attachments.get_mut(&id) else {
             return;
         };
@@ -863,9 +854,8 @@ impl Core {
                 request,
                 attachment: id,
             }),
-            now,
         );
-        self.push_ownership(connection, id, now);
+        self.push_ownership(connection, id);
     }
 
     pub fn backend_event(
@@ -993,9 +983,9 @@ impl Core {
         }
         let unbound = attachment.connection.is_none();
         self.release(id);
-        self.refresh_eligibility(id, now);
+        self.refresh_eligibility(id);
         if end == LogEnd::Gap && unbound {
-            self.finish(id, now);
+            self.finish(id);
         }
     }
 
@@ -1012,7 +1002,7 @@ impl Core {
     }
 
     /// Removes the attachment, releasing the backend if that has not happened.
-    fn finish(&mut self, id: AttachmentId, now: Millis) {
+    fn finish(&mut self, id: AttachmentId) {
         self.release(id);
         let Some(attachment) = self.attachments.remove(&id) else {
             return;
@@ -1027,7 +1017,7 @@ impl Core {
             self.ownerships.remove(&key.0);
         }
         if let Some(change) = change {
-            self.announce(&key, change, now);
+            self.announce(&key, change);
         }
     }
 
@@ -1052,7 +1042,7 @@ impl Core {
     // ---- ownership ----
 
     /// A member may own while it is bound and its pair is up.
-    fn refresh_eligibility(&mut self, id: AttachmentId, now: Millis) {
+    fn refresh_eligibility(&mut self, id: AttachmentId) {
         let Some(attachment) = self.attachments.get(&id) else {
             return;
         };
@@ -1065,12 +1055,12 @@ impl Core {
         let change =
             ownership.set_eligible(id, eligible, &mut || OwnershipGeneration(take(next_id)));
         if let Some(change) = change {
-            self.announce(&key, change, now);
+            self.announce(&key, change);
         }
     }
 
     /// Makes `id` the owner. Any input that triggered the grant is written last.
-    fn grant(&mut self, id: AttachmentId, write: Option<Vec<u8>>, now: Millis) {
+    fn grant(&mut self, id: AttachmentId, write: Option<Vec<u8>>) {
         let Some(attachment) = self.attachments.get(&id) else {
             return;
         };
@@ -1080,7 +1070,7 @@ impl Core {
         };
         let generation = OwnershipGeneration(take(&mut self.next_id));
         let change = ownership.grant(id, generation);
-        self.announce(&key, change, now);
+        self.announce(&key, change);
         if let Some(bytes) = write {
             if self.is_owner(id) {
                 self.command(BackendCommand::Write {
@@ -1093,7 +1083,7 @@ impl Core {
 
     /// Tells every bound member of the terminal about an ownership change, and sets a new
     /// owner up with the size and display it last asked for.
-    fn announce(&mut self, terminal: &TermId, change: OwnershipChange, now: Millis) {
+    fn announce(&mut self, terminal: &TermId, change: OwnershipChange) {
         let members: Vec<AttachmentId> = self
             .attachments
             .iter()
@@ -1111,7 +1101,6 @@ impl Core {
                     ownership_generation: change.state.generation,
                     owner: change.state.owner,
                 }),
-                now,
             );
         }
         let Some(owner) = change.new_owner else {

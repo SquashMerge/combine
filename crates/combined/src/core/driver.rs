@@ -11,7 +11,7 @@ use combine_protocol::AttachmentId;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 
-use super::effects::{BackendCommand, ConnectionId, Effect};
+use super::effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 use super::machine::Core;
 use crate::model::Millis;
 use crate::ports::{AttachEvents, Attachment, BackendResult, TerminalBackend};
@@ -123,12 +123,17 @@ impl Driver {
             }
             BackendCommand::Write { attachment, bytes } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.write(&bytes).await;
+                    let result = held.write(&bytes).await;
+                    self.refused(attachment, RefusedCommand::Input, result, now);
                 }
             }
-            BackendCommand::WriteAutomatic { attachment, bytes } => {
+            BackendCommand::WriteAutomatic {
+                attachment,
+                generation,
+                bytes,
+            } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.write_automatic(&bytes).await;
+                    let _ = held.write_automatic(generation, &bytes).await;
                 }
             }
             BackendCommand::Resize {
@@ -137,12 +142,14 @@ impl Driver {
                 rows,
             } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.resize(cols, rows).await;
+                    let result = held.resize(cols, rows).await;
+                    self.refused(attachment, RefusedCommand::Resize, result, now);
                 }
             }
             BackendCommand::Focus { attachment } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.focus().await;
+                    let result = held.focus().await;
+                    self.refused(attachment, RefusedCommand::Focus, result, now);
                 }
             }
             BackendCommand::SetDisplay {
@@ -150,7 +157,8 @@ impl Driver {
                 display,
             } => {
                 if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.set_display(display).await;
+                    let result = held.set_display(display).await;
+                    self.refused(attachment, RefusedCommand::SetDisplay, result, now);
                 }
             }
             BackendCommand::Credit { attachment, bytes } => {
@@ -158,6 +166,19 @@ impl Driver {
                     let _ = held.credit(bytes).await;
                 }
             }
+        }
+    }
+
+    /// Tells core when the backend refused a command a client's message caused.
+    fn refused(
+        &mut self,
+        attachment: AttachmentId,
+        command: RefusedCommand,
+        result: BackendResult<()>,
+        now: Millis,
+    ) {
+        if let Err(failure) = result {
+            self.core.command_failed(attachment, command, &failure, now);
         }
     }
 

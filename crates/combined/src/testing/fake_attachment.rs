@@ -75,8 +75,12 @@ impl Attachment for FakeAttachment {
         lock(&self.world).write(self.id, bytes)
     }
 
-    async fn write_automatic(&mut self, bytes: &[u8]) -> BackendResult<()> {
-        lock(&self.world).write_automatic(self.id, bytes)
+    async fn write_automatic(
+        &mut self,
+        generation: BackendGeneration,
+        bytes: &[u8],
+    ) -> BackendResult<()> {
+        lock(&self.world).write_automatic(self.id, generation, bytes)
     }
 
     async fn resize(&mut self, cols: u16, rows: u16) -> BackendResult<()> {
