@@ -1,4 +1,4 @@
-# Combine — Spec (rev 13)
+# Combine — Spec (rev 14)
 
 Updated 2026-11-22
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 13 (panel kinds):** issue lists and issue details are panel kinds: typed data contracts that any service's group (GitHub, Jira, Linear, ...) fills, so the same panels and renderers show issues from any backend; the GitHub group gains issue list and issue detail panels; M4's done criterion covers issues and a second issue backend.
 
 **Changes from rev 12 (S5, client shell):** the client's `hosts.json` schema and location; two entries never share a host ID; how the client trims daemon text and `ssh` stderr before showing them; reconnect backoff, and which failures stop reconnecting; host state reaches the webview as `hosts-changed` snapshots; every unsigned 64-bit value crosses the Tauri boundary as a decimal string.
 
@@ -43,7 +45,8 @@ The app is one window over every space on every host you use, with agent-built p
 - Terminals stream from the first milestone; no polling phase.
 - The coding agent in a terminal can create panels: persistent views of live data and one-off views such as "show me the class diagram for these related classes".
 - Panels can carry JS loaders that run allowlisted CLIs and MCP tools on the agent's host and correlate the results.
-- Panel groups (GitHub, Jira, Trellis) hold several related views of one service, linked by a shared selection.
+- Panel groups (GitHub, Jira, Linear, Trellis) hold several related views of one service, linked by a shared selection.
+- Panel kinds: an issue list, an issue detail or a PR list looks and behaves the same whichever service its data comes from. A group for GitHub, Jira or Linear fills the same kinds, so the client draws them with the same panels.
 - Mermaid diagrams rendered with [Pele](https://pele.run).
 
 **Non-goals for v1**
@@ -189,11 +192,13 @@ SplitNode   = Split { dir: H | V, ratio, a, b } | Tile { id: TileId, panels: [Pa
 
 PanelSpec     { version, id, title, lifetime: Persistent | Scratch, group?: GroupInstanceId,
                 content: Terminal { slot: String, template: SpawnSpec, follow_active }
-                       | View { renderer, loader?: "loader.js", sources: [Source],
+                       | View { kind?: PanelKind, renderer, loader?: "loader.js", sources: [Source],
                                 refresh, params: Map<String, Value | GroupRef> },
                 created_by: User | Agent { slot } }
 
 GroupInstance { id, group: "github", params: { repo: "SquashMerge/trellis" } }
+
+PanelKind   = "issue-list" | "issue-detail" | "pr-list" | "pr-detail" | "checks" | "diff" | ...  // see Panel kinds
 
 // Daemon runtime state: <daemon data>/state.json
 SpaceBinding  { space_id, slots: Map<slot, TermId>, trust: TrustRecord, file_hashes: Map<path, hash> }
@@ -201,7 +206,7 @@ SpaceBinding  { space_id, slots: Map<slot, TermId>, trust: TrustRecord, file_has
 // Per-client state: <client data>/hosts/<host-id>.json
 ClientSpaceState { space_id, focused_tile: TileId, active_terminal: slot,
                    active_tabs: Map<TileId, PanelId>,                     // overrides Tile.active
-                   group_state: Map<GroupInstanceId, { selected_pr?: 123, ... }> }
+                   group_state: Map<GroupInstanceId, { selected_pr?: 123, selected_issue?: IssueRef, ... }> }
 ```
 
 **Who owns which state**
@@ -212,7 +217,7 @@ ClientSpaceState { space_id, focused_tile: TileId, active_terminal: slot,
 | Terminal slot bindings, trust approvals | Daemon |
 | Focused tile, active terminal, last active space | Per client |
 | Active tab in each tile | Saved default (`Tile.active`) in the layout; per-client override |
-| Group selection (e.g. selected PR) | Per client |
+| Group selection (e.g. selected PR or issue) | Per client |
 | PTY size and input ownership | Daemon-arbitrated per terminal |
 
 - Two clients can look at the same space differently: switching terminals or selecting a PR on one laptop doesn't change the other. Shared live selection would be an explicit later feature.
@@ -495,7 +500,7 @@ export default async function load(ctx) {
 
 - The loader's only I/O is `ctx`: `cli.run(id, args)`, `mcp.call(server, tool, args)`, `files.read(path)` inside the project, `terminal.read(slot)`, `params`, and the group's `state` and `lib`.
 - It runs in an embedded JS isolate in the daemon with no filesystem, network or process access, a time limit and a memory cap. Engine choice is open (deno_core or QuickJS).
-- Its return value is validated against the renderer's input before it reaches a client.
+- Its return value is validated against the renderer's input, and against its panel kind's schema when the panel declares a `kind`, before it reaches a client.
 - A panel with no loader uses a single declared source or static content.
 
 **Loader runs**
@@ -516,11 +521,43 @@ export default async function load(ctx) {
 
 - `panel_status` reports spec validation separately from results, and results per client or explicit input.
 
+**Panel kinds**
+
+A panel kind is a typed data contract that several services can fill. The kind fixes the record schema, the selection a row sets, and how the client draws it. The service only decides where the data comes from. An issue list from GitHub, Jira or Linear is the same `issue-list` panel, with the same columns, filters, keyboard handling and click-through, fed by a different group's loader.
+
+| Kind | Record | Drawn as | Selection |
+| --- | --- | --- | --- |
+| `issue-list` | `IssueRow` per issue | Table with kind columns; a row click selects | Sets `selected_issue` |
+| `issue-detail` | One `IssueDetail` for `selected_issue` | Header fields plus the body as Markdown, then comments | Reads `selected_issue` |
+| `pr-list` | `PrRow` per pull request | Table; a row click selects | Sets `selected_pr` |
+| `pr-detail`, `checks`, `diff` | One record for `selected_pr` | Kind-specific views | Read `selected_pr` |
+
+```
+IssueRef    { backend: "github" | "jira" | "linear" | ..., id: String }   // "#123", "PROJ-45", "LIN-7"
+IssueRow    { ref: IssueRef, title, state: Open | InProgress | Closed, native_state: String,
+              assignees: [String], labels: [String], updated_at, url,
+              extra?: Map<String, Value> }                          // backend fields shown as optional columns
+IssueDetail { row: IssueRow, body_markdown, comments: [{ author, created_at, body_markdown }],
+              links: [{ kind: "pr" | "issue" | "url", label, url }] }
+```
+
+- `state` is the normalized value every backend maps to. `native_state` keeps the service's own name ("In Review", "Triage"), and the panel shows it next to the normalized one.
+- A loader for a kind returns records in the kind's schema. The daemon validates them, so a malformed record is a loader error shown on the panel, never a broken view.
+- Backends add fields through `extra`. The panel can show them as optional columns, but nothing in the kind depends on them.
+- A space may hold issue lists from several backends. Each is its own group instance with its own selection. Merging them into one list is a later feature.
+- New kinds are added to the client with their schema. A group can't define a kind, only fill one.
+
 **Panel groups**
 
-- A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks and diff.
+- A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks, diff, issue list and issue detail. Each template names the panel kind it fills.
+- Issue backends are groups that fill the same issue kinds:
+  - `groups/github/` fills them with the `gh-issues` and `gh-issue` CLI entries.
+  - `groups/jira/` fills them through an approved Jira MCP server.
+  - `groups/linear/` fills them through an approved Linear MCP server or CLI.
+
+  Adding another service means writing a group whose loaders map that service's data into the kind schema. The client doesn't change.
 - A space instantiates a group with params; the instance is one entry in `layout.json` plus its panels. The `trellis` space might hold a GitHub group for `SquashMerge/trellis` and a Trellis group for its index.
-- Group state holds the selection and is per client. Clicking a row in the PR list sets `selected_pr` for that client; every panel whose params bind to it reloads for that client.
+- Group state holds the selection and is per client. Clicking a row in the PR list sets `selected_pr` for that client, and clicking an issue sets `selected_issue`. Every panel whose params bind to that selection reloads for that client.
 - By default a group opens as one tile with its panels as tabs; panels can be split out and stay in the group.
 - Agents can create group definitions and instances through MCP tools or by writing the files directly.
 
@@ -568,7 +605,10 @@ The daemon discovers the MCP servers the host's agents have, but treats each one
 **CLI allowlist**
 
 - Stored in the host's `settings.json`, optionally narrowed per project. It never lives in the repo, so a repo can't widen its own allowlist.
-- Each entry names a command, fixed args, the args a loader may set with a type or pattern each, the output format, and the env it runs with. Example: `gh-prs = gh pr list --json number,title,author,state --repo {repo}` with `repo` matching `owner/name`.
+- Each entry names a command, fixed args, the args a loader may set with a type or pattern each, the output format, and the env it runs with.
+  - `gh-prs = gh pr list --json number,title,author,state --repo {repo}`, with `repo` matching `owner/name`.
+  - `gh-issues = gh issue list --json number,title,state,assignees,labels,updatedAt,url --repo {repo}`.
+  - `gh-issue = gh issue view {number} --json number,title,state,assignees,labels,updatedAt,url,body,comments --repo {repo}`, with `number` a positive integer.
 
 **Refresh and cache**
 
@@ -797,7 +837,10 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter (paired viewers) over `terminal.attach` and `events.subscribe`, the fake backend and the contract test suite, a clean `trellis rules check`, the wire protocol (`combine-protocol`) with output batched per display frame, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts, and keystroke echo over the local network stays within the latency budget.
 2. **M2: Agent-built diagrams.** MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation. Done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.
 3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` and Jira data shows live and survives a daemon restart.
-4. **M4: Panel groups.** Group library, params, per-client selection, a GitHub group as the first template. Done when clicking a PR in the list updates its detail, checks and diff panels.
+4. **M4: Panel groups and kinds.** Group library, params, per-client selection, the issue and PR panel kinds, and a GitHub group as the first template, with PR and issue panels. A second issue backend (Jira or Linear) fills the same issue kinds. Done when:
+   - clicking a PR in the list updates its detail, checks and diff panels;
+   - clicking an issue updates its issue detail panel;
+   - the same issue panels show GitHub issues and the second backend's issues, without client changes.
 5. **M5: Rex adapter (after v1).** Passes the shared contract tests. The goal is no changes outside the adapter; any trait change it needs is reviewed as a design change. Rex spaces appear on the rail. Requires the `rex` CLI.
 6. **M6: Polish.** CustomHtml sandbox, `push_panel_data`, and after M5, attention badges from Rex output heuristics.
 
@@ -820,6 +863,11 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 - [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirmed it for terminals that predate the daemon and across planned restarts.
 - [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
+
+**New in rev 14**
+
+- [ ] Which second issue backend ships in M4, Jira or Linear? It depends on which approved MCP server is available on the hosts.
+- [ ] Should a space be able to show one merged issue list across backends, with one selection? It is out of scope for M4.
 
 **From rev 2**
 
