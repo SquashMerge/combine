@@ -27,8 +27,9 @@ pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Encoded frames waiting for the writer task.
-pub(super) const WRITER_QUEUE_FRAMES: usize = 1_024;
+/// Encoded frames waiting for the writer task. Room for the largest reopen replay
+/// (`fencing::REOPEN_QUEUE_FRAMES`) with the same again for credit and typed input.
+pub(super) const WRITER_QUEUE_FRAMES: usize = 2_048;
 
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -58,6 +59,17 @@ type SharedPending = Arc<Mutex<Pending>>;
 
 fn lock(pending: &SharedPending) -> std::sync::MutexGuard<'_, Pending> {
     pending.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Waits for one free slot in a writer queue. Pending when there is no queue; `None` once the
+/// queue is closed. Credit goes through this so it waits for room instead of being dropped.
+pub(super) async fn reserve_slot(
+    writer: Option<&mpsc::Sender<Vec<u8>>>,
+) -> Option<mpsc::Permit<'_, Vec<u8>>> {
+    match writer {
+        Some(writer) => writer.reserve().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 pub(super) struct Connection {

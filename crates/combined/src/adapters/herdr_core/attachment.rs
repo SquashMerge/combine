@@ -1,10 +1,12 @@
 //! One attachment: the handle the daemon calls, and the supervisor that keeps its pair of
 //! viewers alive.
 //!
-//! The handle never awaits a round trip. It locks the state, lets `fencing` decide, and
-//! `try_send`s encoded frames. The supervisor owns the connections: it turns the display
-//! half's frames into events, credits and discards the input half's output, and rebuilds the
-//! pair when a half ends.
+//! The handle never awaits a round trip. It locks the state, reserves room in the writer
+//! queue for every frame the request can send, lets `fencing` decide, and sends through the
+//! reserved slots, so an accepted request is never dropped and a request that doesn't fit is
+//! refused. The supervisor owns the connections: it turns the display half's frames into
+//! events, credits and discards the input half's output, and rebuilds the pair when a half
+//! ends. Credit that finds the queue full is owed and sent when room returns.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,8 +15,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use combine_protocol::{BackendGeneration, CloseReason, Display, Fidelity, OwnershipGeneration};
 use futures::stream::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, Notify};
 
+use super::connection::reserve_slot;
 #[cfg(feature = "test-support")]
 use super::control::PairHalf;
 use super::fencing::{Effect, Facts, Fence, Out, Phase, Request};
@@ -191,6 +195,8 @@ struct State {
     ordered: bool,
     display_open: bool,
     input_open: bool,
+    /// Credit the daemon granted that the display half's queue had no room for yet.
+    display_owed: u64,
     /// Bytes the core may still send on the display half: its allowance, plus the credit given,
     /// less the bytes received. Lets a test target tell when output is credit-bound.
     #[cfg(feature = "test-support")]
@@ -198,6 +204,22 @@ struct State {
     /// Display-half DATA bytes received over the attachment's life.
     #[cfg(feature = "test-support")]
     received: u64,
+}
+
+impl State {
+    /// The next CREDIT's worth of the owed display credit.
+    fn take_display_credit(&mut self) -> Option<u32> {
+        let bytes = u32::try_from(self.display_owed).unwrap_or(u32::MAX);
+        if bytes == 0 {
+            return None;
+        }
+        self.display_owed -= u64::from(bytes);
+        #[cfg(feature = "test-support")]
+        {
+            self.window += i64::from(bytes);
+        }
+        Some(bytes)
+    }
 }
 
 /// What the handle, the supervisor and the control handle share.
@@ -208,6 +230,8 @@ pub(super) struct Shared {
     state: Mutex<State>,
     events: Mutex<Option<EventTx>>,
     commands: mpsc::UnboundedSender<Command>,
+    /// Wakes the supervisor when display credit is owed.
+    credit_wake: Notify,
 }
 
 impl Shared {
@@ -231,50 +255,59 @@ impl Shared {
         lock(&self.state).fence.generation
     }
 
-    /// Sends what the fence decided, in order. Called with the state locked.
-    fn perform(&self, state: &State, effects: Vec<Effect>) {
+    /// Emits what the fence decided and returns the frames it wants sent, in order. Called
+    /// with the state locked.
+    fn frames_of(&self, state: &State, effects: Vec<Effect>) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
         for effect in effects {
             match effect {
                 Effect::Emit(event) => self.emit(state.fence.generation, event),
                 Effect::Send(out) => {
-                    let Some(writer) = &state.writers.input else {
+                    if state.writers.input.is_none() {
                         continue;
-                    };
+                    }
                     let channel = state.writers.input_channel;
                     #[cfg(feature = "test-support")]
                     if matches!(out, Out::Resize(..) | Out::Facts(_) | Out::Focus) {
                         self.env.control.touch();
                     }
-                    let frames = match out {
-                        Out::Data(bytes) => frame::data_frames(channel, &bytes),
-                        Out::Automatic(bytes) => frame::automatic_frames(channel, &bytes),
-                        Out::Resize(cols, rows) => vec![frame::resize(channel, cols, rows)],
-                        Out::Facts(display) => vec![frame::facts(
+                    match out {
+                        Out::Data(bytes) => frames.extend(frame::data_frames(channel, &bytes)),
+                        Out::Automatic(bytes) => {
+                            frames.extend(frame::automatic_frames(channel, &bytes));
+                        }
+                        Out::Resize(cols, rows) => frames.push(frame::resize(channel, cols, rows)),
+                        Out::Facts(display) => frames.push(frame::facts(
                             channel,
                             jsonrpc::display_json(&display).to_string().as_bytes(),
-                        )],
-                        Out::Focus => vec![frame::focus(channel, true)],
-                    };
-                    for bytes in frames {
-                        let _ = writer.try_send(bytes);
+                        )),
+                        Out::Focus => frames.push(frame::focus(channel, true)),
                     }
                 }
             }
         }
+        frames
+    }
+
+    /// Starts the reopen when the input writer is gone.
+    fn input_writer_closed(&self, state: &mut State) {
+        state.fence.begin_reopen();
+        let _ = self.commands.send(Command::Fail);
     }
 
     fn request(&self, ownership: OwnershipGeneration, request: Request) -> BackendResult<()> {
         let mut state = lock(&self.state);
+        let writer = state.writers.input.clone();
+        let mut permits = None;
         if state.fence.phase == Phase::Ready && !state.fence.watch_only {
-            match &state.writers.input {
-                Some(writer) if writer.is_closed() => {
-                    state.fence.begin_reopen();
-                    let _ = self.commands.send(Command::Fail);
+            if let Some(writer) = &writer {
+                match writer.try_reserve_many(Fence::frames_needed(&request)) {
+                    Ok(reserved) => permits = Some(reserved),
+                    Err(TrySendError::Full(())) => {
+                        return Err(BackendError::Failed("input queue full".to_string()));
+                    }
+                    Err(TrySendError::Closed(())) => self.input_writer_closed(&mut state),
                 }
-                Some(writer) if writer.capacity() < Fence::frames_needed(&request) => {
-                    return Err(BackendError::Failed("input queue full".to_string()));
-                }
-                _ => {}
             }
         }
         let effects = {
@@ -282,7 +315,15 @@ impl Shared {
             let highest = fence.entry(self.address.clone()).or_insert(0);
             state.fence.request(highest, ownership.0, request)?
         };
-        self.perform(&state, effects);
+        let frames = self.frames_of(&state, effects);
+        if let Some(permits) = permits {
+            // `frames_needed` bounds what `Fence::apply` can send for a request, so every
+            // frame has a slot.
+            debug_assert!(frames.len() <= permits.len());
+            for (permit, bytes) in permits.zip(frames) {
+                permit.send(bytes);
+            }
+        }
         Ok(())
     }
 
@@ -320,17 +361,20 @@ impl Shared {
         lock(&self.state).received
     }
 
-    /// Fails one half. False when the attachment is closed.
+    /// Fails one half. False when the attachment is closed. The reopen begins at once, under
+    /// the lock, as it does when a connection breaks, so a request made right after this call
+    /// is queued for the new pair rather than racing the supervisor.
     #[cfg(feature = "test-support")]
     pub(super) fn fail(&self, half: PairHalf) -> bool {
         {
-            let state = lock(&self.state);
+            let mut state = lock(&self.state);
             if state.fence.phase == Phase::Closed {
                 return false;
             }
             if state.fence.watch_only && half == PairHalf::Input {
                 return true;
             }
+            state.fence.begin_reopen();
         }
         self.commands.send(Command::Fail).is_ok()
     }
@@ -366,6 +410,7 @@ pub(super) fn start(
         ordered: halves.ordered,
         display_open: true,
         input_open: halves.input.is_some(),
+        display_owed: 0,
         #[cfg(feature = "test-support")]
         window: i64::from(INITIAL_CREDIT),
         #[cfg(feature = "test-support")]
@@ -378,6 +423,7 @@ pub(super) fn start(
         state: Mutex::new(state),
         events: Mutex::new(Some(events_tx)),
         commands: commands_tx,
+        credit_wake: Notify::new(),
     });
     #[cfg(feature = "test-support")]
     env.control.register(address, Arc::downgrade(&shared));
@@ -432,6 +478,10 @@ async fn recv_input(input: &mut Option<Half>) -> Option<Frame> {
 }
 
 /// Runs one pair until it ends. `halves` keeps the connections for the caller to close.
+///
+/// Credit for the input half's output is owed until the writer queue has room for it, and the
+/// display half's owed credit (from `credit`) is sent the same way, so every byte received is
+/// credited once.
 async fn run_pair(
     shared: &Shared,
     halves: &mut Halves,
@@ -439,14 +489,23 @@ async fn run_pair(
 ) -> Ended {
     let mut run = PairRun::default();
     let mut input_done = false;
+    let mut input_owed = 0u64;
+    let input_writer = halves
+        .input
+        .as_ref()
+        .and_then(|input| input.connection.sender());
+    let input_channel = halves.input.as_ref().map_or(0, |input| input.channel);
+    let display_writer = halves.display.connection.sender();
+    let display_channel = halves.display.channel;
     let prefetched = std::mem::take(&mut halves.prefetched);
     for frame in prefetched {
         let reaction = run.on_display(Some(frame));
-        if let Some(ended) = apply(shared, halves, reaction, true) {
+        if let Some(ended) = apply(shared, reaction, true, &mut input_owed) {
             return ended;
         }
     }
     loop {
+        let display_owed = lock(&shared.state).display_owed > 0;
         let (reaction, from_display) = tokio::select! {
             frame = halves.display.frames.recv() => (run.on_display(frame), true),
             frame = recv_input(&mut halves.input), if !input_done && halves.input.is_some() => {
@@ -455,6 +514,30 @@ async fn run_pair(
                 }
                 (run.on_input(frame), false)
             }
+            slot = reserve_slot(input_writer.as_ref()), if input_owed > 0 => {
+                match slot {
+                    Some(slot) => {
+                        let bytes = u32::try_from(input_owed).unwrap_or(u32::MAX);
+                        input_owed -= u64::from(bytes);
+                        slot.send(frame::credit(input_channel, bytes));
+                    }
+                    None => input_owed = 0,
+                }
+                continue;
+            }
+            slot = reserve_slot(display_writer.as_ref()), if display_owed => {
+                let mut state = lock(&shared.state);
+                match slot {
+                    Some(slot) => {
+                        if let Some(bytes) = state.take_display_credit() {
+                            slot.send(frame::credit(display_channel, bytes));
+                        }
+                    }
+                    None => state.display_owed = 0,
+                }
+                continue;
+            }
+            () = shared.credit_wake.notified() => continue,
             command = commands.recv() => {
                 return match command {
                     Some(Command::Fail) => Ended::Rebuild {
@@ -465,18 +548,18 @@ async fn run_pair(
                 };
             }
         };
-        if let Some(ended) = apply(shared, halves, reaction, from_display) {
+        if let Some(ended) = apply(shared, reaction, from_display, &mut input_owed) {
             return ended;
         }
     }
 }
 
-/// Emits a reaction's events and credits the input half. `Some` when the pair is over.
+/// Emits a reaction's events and owes the input half its credit. `Some` when the pair is over.
 fn apply(
     shared: &Shared,
-    halves: &Halves,
     reaction: Reaction,
     from_display: bool,
+    input_owed: &mut u64,
 ) -> Option<Ended> {
     let generation = shared.generation();
     for event in reaction.events {
@@ -492,13 +575,7 @@ fn apply(
         }
         shared.emit(generation, event);
     }
-    if reaction.credit_input > 0 {
-        if let Some(input) = &halves.input {
-            if let Some(writer) = input.connection.sender() {
-                let _ = writer.try_send(frame::credit(input.channel, reaction.credit_input));
-            }
-        }
-    }
+    *input_owed += u64::from(reaction.credit_input);
     match reaction.next {
         Next::Continue => None,
         Next::Finish => Some(Ended::Finished),
@@ -640,8 +717,10 @@ async fn rebuild(
         };
         match pair::open(&shared.env, &params).await {
             Ok(halves) => {
-                install(shared, &halves);
-                return Some(halves);
+                if install(shared, &halves) {
+                    return Some(halves);
+                }
+                halves.close();
             }
             Err(OpenError::Finished) => {
                 finish(shared, None, Some(AttachEvent::Closed(CloseReason::Exited)));
@@ -655,16 +734,28 @@ async fn rebuild(
 }
 
 /// Swaps in a rebuilt pair under one lock: the next generation, `Started`, the late events a
-/// test asked for, then the queued requests in order.
-fn install(shared: &Shared, halves: &Halves) {
+/// test asked for, then the queued requests in order. The replay's frames are reserved in the
+/// new writer queue first. If they can't be, the pair is not installed and this returns
+/// false: the queue stays, and the caller counts the attempt and tries again.
+fn install(shared: &Shared, halves: &Halves) -> bool {
     let mut state = lock(&shared.state);
+    let writers = writers_of(halves);
+    let input = writers.input.clone();
+    let permits = match &input {
+        Some(writer) => match writer.try_reserve_many(state.fence.queued_frames_bound()) {
+            Ok(permits) => Some(permits),
+            Err(_) => return false,
+        },
+        None => None,
+    };
     let fidelity =
         lock(&shared.env.fidelities).observe(&shared.address, halves.created_ms, &halves.screen);
     state.fidelity = fidelity;
     state.ordered = halves.ordered;
-    state.writers = writers_of(halves);
+    state.writers = writers;
     state.display_open = true;
     state.input_open = halves.input.is_some();
+    state.display_owed = 0;
     #[cfg(feature = "test-support")]
     {
         state.window = i64::from(INITIAL_CREDIT);
@@ -691,7 +782,15 @@ fn install(shared: &Shared, halves: &Halves) {
         shared.emit(generation - 1, AttachEvent::Resized { cols, rows });
         shared.env.control.count_late(2);
     }
-    shared.perform(&state, effects);
+    let frames = shared.frames_of(&state, effects);
+    if let Some(permits) = permits {
+        // The bound counted at enqueue covers every frame the replay can send.
+        debug_assert!(frames.len() <= permits.len());
+        for (permit, bytes) in permits.zip(frames) {
+            permit.send(bytes);
+        }
+    }
+    true
 }
 
 #[async_trait]
@@ -722,15 +821,35 @@ impl Attachment for HerdrCoreAttachment {
     ) -> BackendResult<()> {
         let mut state = lock(&self.shared.state);
         let effects = state.fence.write_automatic(generation, bytes)?;
-        #[cfg(feature = "test-support")]
-        if !effects.is_empty() {
-            self.shared
-                .env
-                .control
-                .record_automatic(&self.shared.address, bytes);
+        let frames = self.shared.frames_of(&state, effects);
+        if frames.is_empty() {
+            return Ok(());
         }
-        self.shared.perform(&state, effects);
-        Ok(())
+        let Some(writer) = state.writers.input.clone() else {
+            return Ok(());
+        };
+        let reserved = writer.try_reserve_many(frames.len());
+        match reserved {
+            Ok(permits) => {
+                #[cfg(feature = "test-support")]
+                self.shared
+                    .env
+                    .control
+                    .record_automatic(&self.shared.address, bytes);
+                debug_assert!(frames.len() <= permits.len());
+                for (permit, bytes) in permits.zip(frames) {
+                    permit.send(bytes);
+                }
+                Ok(())
+            }
+            Err(TrySendError::Full(())) => {
+                Err(BackendError::Failed("input queue full".to_string()))
+            }
+            Err(TrySendError::Closed(())) => {
+                self.shared.input_writer_closed(&mut state);
+                Ok(())
+            }
+        }
     }
 
     async fn resize(
@@ -755,19 +874,21 @@ impl Attachment for HerdrCoreAttachment {
     }
 
     async fn credit(&mut self, bytes: u32) -> BackendResult<()> {
-        #[cfg_attr(not(feature = "test-support"), allow(unused_mut))]
         let mut state = lock(&self.shared.state);
         if !state.fence.credit_gate()? {
             return Ok(());
         }
-        if let Some(writer) = &state.writers.display {
-            writer
-                .try_send(frame::credit(state.writers.display_channel, bytes))
-                .map_err(|_| BackendError::Failed("input queue full".to_string()))?;
-            #[cfg(feature = "test-support")]
-            {
-                state.window += i64::from(bytes);
+        let Some(writer) = state.writers.display.clone() else {
+            return Ok(());
+        };
+        state.display_owed += u64::from(bytes);
+        if let Ok(slot) = writer.try_reserve() {
+            if let Some(owed) = state.take_display_credit() {
+                slot.send(frame::credit(state.writers.display_channel, owed));
             }
+        }
+        if state.display_owed > 0 {
+            self.shared.credit_wake.notify_one();
         }
         Ok(())
     }
@@ -886,5 +1007,583 @@ mod tests {
         let mut fidelities = Fidelities::default();
         assert_eq!(fidelities.observe("t1", 5, "inexact"), Fidelity::Inexact);
         assert_eq!(fidelities.observe("t1", 9, "exact"), Fidelity::Exact);
+    }
+}
+
+/// The handle against an in-memory core: the writer queue fills while the core is not
+/// reading, and credit competes with typed input for it.
+#[cfg(all(test, feature = "test-support"))]
+mod queue_tests {
+    use std::time::Duration;
+
+    use combine_protocol::Display;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
+
+    use super::super::connection::{Connection, WRITER_QUEUE_FRAMES};
+    use super::super::control;
+    use super::super::fencing::REOPEN_QUEUE_REQUESTS;
+    use super::*;
+    use crate::ports::AttachOptions;
+
+    const DISPLAY_CHANNEL: u32 = 1;
+    const INPUT_CHANNEL: u32 = 2;
+    const QUIET: Duration = Duration::from_millis(400);
+
+    /// The core's end of one connection. A task of its own reads whole frames, so a timeout
+    /// on `next` never drops half a frame. It starts only on `resume`, so a test can leave
+    /// the core not reading while the client's writer queue fills.
+    struct Core {
+        frames: mpsc::UnboundedReceiver<Frame>,
+        write: WriteHalf<DuplexStream>,
+        go: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Core {
+        fn new(mut read: ReadHalf<DuplexStream>, write: WriteHalf<DuplexStream>) -> Core {
+            let (tx, frames) = mpsc::unbounded_channel();
+            let (go, wait) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                if wait.await.is_err() {
+                    return;
+                }
+                while let Some(frame) = read_frame(&mut read).await {
+                    if tx.send(frame).is_err() {
+                        return;
+                    }
+                }
+            });
+            Core {
+                frames,
+                write,
+                go: Some(go),
+            }
+        }
+
+        fn resume(&mut self) {
+            if let Some(go) = self.go.take() {
+                let _ = go.send(());
+            }
+        }
+
+        async fn next(&mut self, wait: Duration) -> Option<Frame> {
+            self.resume();
+            tokio::time::timeout(wait, self.frames.recv())
+                .await
+                .ok()
+                .flatten()
+        }
+
+        /// Frames until `done` holds for what has arrived (at most 30 s), then whatever
+        /// else comes before the line is quiet.
+        async fn drain_until(&mut self, done: impl Fn(&[Frame]) -> bool) -> Vec<Frame> {
+            let mut frames = Vec::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while !done(&frames) {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self.next(left).await {
+                    Some(frame) => frames.push(frame),
+                    None => return frames,
+                }
+            }
+            while let Some(frame) = self.next(QUIET).await {
+                frames.push(frame);
+            }
+            frames
+        }
+
+        /// What arrives until the line is quiet.
+        async fn drain(&mut self) -> Vec<Frame> {
+            self.drain_until(|_| true).await
+        }
+    }
+
+    fn display(tag: &str) -> Display {
+        Display {
+            foreground: format!("#{tag}{tag}{tag}"),
+            background: "#000000".to_string(),
+            cursor_color: "#ffffff".to_string(),
+            cell_width: 9,
+            cell_height: 18,
+        }
+    }
+
+    fn env() -> Arc<Env> {
+        Arc::new(Env {
+            config: super::super::HerdrCoreConfig::new("/nonexistent".into()),
+            fence: Mutex::new(HashMap::new()),
+            fidelities: Mutex::new(Fidelities::default()),
+            automatic_feature: true,
+            control: Arc::new(control::Shared::default()),
+        })
+    }
+
+    async fn read_line(read: &mut ReadHalf<DuplexStream>) {
+        let mut byte = [0u8; 1];
+        while read.read_exact(&mut byte).await.is_ok() {
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+    }
+
+    /// A connection to a model core that answers hello. `pipe` is the size of the in-memory
+    /// pipe: a small one makes the writer block, so its queue fills.
+    async fn connect(pipe: usize, channel: u32) -> (Half, Core) {
+        let (client, server) = tokio::io::duplex(pipe);
+        let (mut read, mut write) = tokio::io::split(server);
+        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {
+            "generation": 1, "version": "0.1.21", "framed": true,
+            "core": {"id": "x", "name": "y"},
+            "methods": ["terminal.attach", "terminal.list", "terminal.run", "terminal.kill",
+                        "events.subscribe"],
+            "features": ["automatic_input"]}});
+        let answer = tokio::spawn(async move {
+            read_line(&mut read).await;
+            write
+                .write_all(format!("{hello}\n").as_bytes())
+                .await
+                .expect("hello");
+            (read, write)
+        });
+        let (connection, frames) = Connection::from_stream(client).await.expect("open");
+        let (read, write) = answer.await.expect("core");
+        (
+            Half {
+                connection,
+                frames,
+                channel,
+            },
+            Core::new(read, write),
+        )
+    }
+
+    /// A pair whose input half goes through a `pipe`-byte pipe.
+    async fn halves(pipe: usize) -> (Halves, Core, Core) {
+        let (display_half, display_core) = connect(65_536, DISPLAY_CHANNEL).await;
+        let (input_half, input_core) = connect(pipe, INPUT_CHANNEL).await;
+        let halves = Halves {
+            display: display_half,
+            input: Some(input_half),
+            prefetched: Vec::new(),
+            size: (80, 24),
+            ordered: true,
+            automatic: true,
+            created_ms: 1,
+            screen: "exact".to_string(),
+        };
+        (halves, display_core, input_core)
+    }
+
+    fn options() -> AttachOptions {
+        AttachOptions {
+            cols: 80,
+            rows: 24,
+            display: display("aa"),
+            observe: false,
+            resumed: false,
+            history: 0,
+        }
+    }
+
+    async fn read_frame(read: &mut ReadHalf<DuplexStream>) -> Option<Frame> {
+        let mut header = [0u8; frame::HEADER_LEN];
+        read.read_exact(&mut header).await.ok()?;
+        let channel = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let length = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
+        let mut payload = vec![0u8; length as usize];
+        read.read_exact(&mut payload).await.ok()?;
+        let kind = match header[4] {
+            0 => Kind::Data,
+            1 => Kind::Credit,
+            2 => Kind::Close,
+            3 => Kind::Resize,
+            4 => Kind::Focus,
+            5 => Kind::Facts,
+            _ => Kind::AutomaticInput,
+        };
+        Some(Frame {
+            channel,
+            kind,
+            payload,
+        })
+    }
+
+    fn credited(frames: &[Frame]) -> u64 {
+        frames
+            .iter()
+            .filter(|frame| frame.kind == Kind::Credit)
+            .map(|frame| {
+                let bytes = &frame.payload;
+                u64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            })
+            .sum()
+    }
+
+    fn typed_len(frames: &[Frame]) -> usize {
+        frames
+            .iter()
+            .filter(|frame| frame.kind == Kind::Data)
+            .map(|frame| frame.payload.len())
+            .sum()
+    }
+
+    fn typed(frames: &[Frame]) -> Vec<u8> {
+        frames
+            .iter()
+            .filter(|frame| frame.kind == Kind::Data)
+            .flat_map(|frame| frame.payload.clone())
+            .collect()
+    }
+
+    async fn attach(pipe: usize) -> (Box<dyn Attachment>, Arc<Shared>, Core, Core) {
+        let (halves, display_core, input_core) = halves(pipe).await;
+        let handle = start(env(), "t1", &options(), halves);
+        let shared = Arc::clone(&handle.shared);
+        (Box::new(handle), shared, display_core, input_core)
+    }
+
+    /// The input half's output is credited back byte for byte, though the core stops reading
+    /// while it bursts and the writer queue overflows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_input_half_output_byte_is_credited_back() {
+        let (_attachment, _shared, _display, mut input) = attach(64).await;
+        let total = WRITER_QUEUE_FRAMES * 3;
+        for _ in 0..total {
+            input
+                .write
+                .write_all(&frame::encode(INPUT_CHANNEL, Kind::Data, b"x"))
+                .await
+                .expect("burst");
+        }
+        let mut credit = 0u64;
+        while credit < total as u64 {
+            match input.next(Duration::from_secs(10)).await {
+                Some(frame) if frame.kind == Kind::Credit => {
+                    credit += credited(&[frame]);
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert_eq!(credit, total as u64, "input-half credit was dropped");
+    }
+
+    /// Display credit the daemon grants while the display queue is full is owed, not refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn display_credit_is_never_refused_for_a_full_queue() {
+        let (halves, mut display_core, _input) = {
+            let (display_half, display_core) = connect(64, DISPLAY_CHANNEL).await;
+            let (input_half, input_core) = connect(65_536, INPUT_CHANNEL).await;
+            let halves = Halves {
+                display: display_half,
+                input: Some(input_half),
+                prefetched: Vec::new(),
+                size: (80, 24),
+                ordered: true,
+                automatic: true,
+                created_ms: 1,
+                screen: "exact".to_string(),
+            };
+            (halves, display_core, input_core)
+        };
+        let mut attachment = start(env(), "t1", &options(), halves);
+        let grants = WRITER_QUEUE_FRAMES * 3;
+        for _ in 0..grants {
+            attachment.credit(1).await.expect("credit is never refused");
+        }
+        let mut credit = 0u64;
+        while credit < grants as u64 {
+            match display_core.next(Duration::from_secs(10)).await {
+                Some(frame) => credit += credited(&[frame]),
+                None => break,
+            }
+        }
+        assert_eq!(credit, grants as u64);
+    }
+
+    /// A write that returned `Ok` arrives whole and in order, and every other write was
+    /// refused with "input queue full", while input-half output keeps credit competing for
+    /// the queue. Some writes span several frames.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_accepted_write_is_never_dropped_while_credit_competes() {
+        let (mut attachment, _shared, _display, input) = attach(64).await;
+        let Core { frames, write, go } = input;
+        let mut flood_write = write;
+        let flood = tokio::spawn(async move {
+            for _ in 0..WRITER_QUEUE_FRAMES * 2 {
+                if flood_write
+                    .write_all(&frame::encode(INPUT_CHANNEL, Kind::Data, b"y"))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            flood_write
+        });
+        let mut accepted = Vec::new();
+        let mut refused = 0usize;
+        for index in 0..WRITER_QUEUE_FRAMES * 2 {
+            let len = if index % 40 == 0 { 40_000 } else { 100 };
+            let bytes = vec![u8::try_from(index % 251).unwrap_or(0); len];
+            match attachment.write(OwnershipGeneration(1), &bytes).await {
+                Ok(()) => accepted.extend_from_slice(&bytes),
+                Err(error) => {
+                    assert_eq!(error, BackendError::Failed("input queue full".to_string()));
+                    refused += 1;
+                }
+            }
+            if index % 64 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let mut input = Core {
+            frames,
+            write: flood.await.expect("flood"),
+            go,
+        };
+        let want = accepted.len();
+        let frames = input.drain_until(|frames| typed_len(frames) >= want).await;
+        assert!(refused > 0, "the queue never filled");
+        assert!(
+            typed(&frames) == accepted,
+            "an accepted write was dropped or reordered: sent {} of {} accepted bytes",
+            typed(&frames).len(),
+            accepted.len()
+        );
+    }
+
+    /// At a full queue `write_automatic` is refused, never dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_automatic_at_a_full_queue_fails() {
+        let (mut attachment, _shared, _display, mut input) = attach(64).await;
+        let mut accepted = 0usize;
+        for _ in 0..WRITER_QUEUE_FRAMES * 2 {
+            if attachment
+                .write(OwnershipGeneration(1), b"typed")
+                .await
+                .is_err()
+            {
+                break;
+            }
+            accepted += 1;
+        }
+        assert_eq!(
+            attachment
+                .write_automatic(BackendGeneration(1), b"reply")
+                .await,
+            Err(BackendError::Failed("input queue full".to_string()))
+        );
+        let frames = input
+            .drain_until(|frames| typed_len(frames) >= accepted * 5)
+            .await;
+        assert_eq!(typed(&frames).len(), accepted * 5);
+        assert!(frames
+            .iter()
+            .all(|frame| frame.kind != Kind::AutomaticInput));
+        attachment
+            .write_automatic(BackendGeneration(1), b"reply")
+            .await
+            .expect("room again");
+        let frames = input
+            .drain_until(|frames| frames.iter().any(|f| f.kind == Kind::AutomaticInput))
+            .await;
+        let replies: Vec<&Frame> = frames
+            .iter()
+            .filter(|frame| frame.kind == Kind::AutomaticInput)
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].payload, b"reply");
+    }
+
+    /// The largest reopen queue replays whole into a new pair's writer, once, in order,
+    /// though that writer is not draining while it is installed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_reopen_queue_replays_once_into_the_new_writer() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        lock(&shared.state).fence.begin_reopen();
+        let big = vec![b'a'; 49_152];
+        attachment
+            .write(OwnershipGeneration(5), &big)
+            .await
+            .expect("queued");
+        let mut sent = big;
+        attachment
+            .resize(OwnershipGeneration(1), 100, 30)
+            .await
+            .expect("queued");
+        attachment
+            .set_display(OwnershipGeneration(1), display("bb"))
+            .await
+            .expect("queued");
+        for _ in 0..REOPEN_QUEUE_REQUESTS - 4 {
+            attachment
+                .write(OwnershipGeneration(5), &[b'b'; 16])
+                .await
+                .expect("queued");
+            sent.extend([b'b'; 16]);
+        }
+        attachment
+            .focus(OwnershipGeneration(5))
+            .await
+            .expect("queued");
+        assert_eq!(
+            attachment.write(OwnershipGeneration(5), b"z").await,
+            Err(BackendError::Failed("reopen queue full".to_string()))
+        );
+
+        let (next, _display, mut input) = halves(64).await;
+        assert!(install(&shared, &next));
+        let want = 3 + (REOPEN_QUEUE_REQUESTS - 4) + 3;
+        let frames = input.drain_until(|frames| frames.len() >= want).await;
+        let kinds: Vec<Kind> = frames.iter().map(|frame| frame.kind).collect();
+        assert_eq!(
+            kinds.len(),
+            3 + (REOPEN_QUEUE_REQUESTS - 4) + 3,
+            "{kinds:?}"
+        );
+        assert_eq!(
+            kinds[kinds.len() - 3..],
+            [Kind::Facts, Kind::Resize, Kind::Focus]
+        );
+        assert!(
+            typed(&frames) == sent,
+            "every typed byte goes out once, in order"
+        );
+    }
+
+    /// Makes the input writer closed, as when its connection died.
+    fn close_input_writer(shared: &Shared) {
+        let (dead, queue) = mpsc::channel(8);
+        drop(queue);
+        lock(&shared.state).writers.input = Some(dead);
+    }
+
+    /// Waits until the supervisor has begun rebuilding (both halves marked closed).
+    async fn rebuilding(shared: &Shared) {
+        for _ in 0..500 {
+            if shared.halves_open() == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the supervisor never began the rebuild");
+    }
+
+    /// A request that finds the input writer closed is accepted, the reopen begins, and the
+    /// bytes go out once, in order, to the next pair.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_to_a_closed_writer_is_queued_for_the_reopen() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        close_input_writer(&shared);
+        attachment
+            .write(OwnershipGeneration(1), b"one")
+            .await
+            .expect("accepted");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+        attachment
+            .write(OwnershipGeneration(1), b"two")
+            .await
+            .expect("queued");
+        rebuilding(&shared).await;
+        let (next, _display, mut input) = halves(65_536).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| frames.len() >= 2).await;
+        assert_eq!(frames.len(), 2, "each write goes out once");
+        assert_eq!(typed(&frames), b"onetwo");
+    }
+
+    /// An automatic reply that finds the writer closed is not an error, and the reopen begins.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_automatic_to_a_closed_writer_begins_the_reopen() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        close_input_writer(&shared);
+        attachment
+            .write_automatic(BackendGeneration(1), b"reply")
+            .await
+            .expect("not an error");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+    }
+
+    /// One 64 KiB write (4 frames) and 1,023 resizes make 1,027 frames: more than one per
+    /// request. All of them go out, in order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reopen_queue_of_split_writes_replays_every_frame() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        lock(&shared.state).fence.begin_reopen();
+        let big: Vec<u8> = (0..65_536u32).map(|n| (n % 251) as u8).collect();
+        attachment
+            .write(OwnershipGeneration(5), &big)
+            .await
+            .expect("queued");
+        for n in 0..REOPEN_QUEUE_REQUESTS - 1 {
+            let cols = 100 + u16::try_from(n % 50).unwrap_or(0);
+            attachment
+                .resize(OwnershipGeneration(5), cols, 30)
+                .await
+                .expect("queued");
+        }
+        let (next, _display, mut input) = halves(64).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| frames.len() >= 1_027).await;
+        assert_eq!(frames.len(), 1_027);
+        assert!(frames[..4].iter().all(|frame| frame.kind == Kind::Data));
+        assert!(typed(&frames) == big, "the write arrives whole, in order");
+        for (n, frame) in frames[4..].iter().enumerate() {
+            let cols = 100 + u16::try_from(n % 50).unwrap_or(0);
+            assert_eq!(frame.kind, Kind::Resize);
+            assert_eq!(frame::parse_resize(&frame.payload), Some((cols, 30)));
+        }
+    }
+
+    /// A new pair whose writer can't take the replay is not installed: the attempt fails, the
+    /// queue stays, and the next pair gets it once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pair_that_cannot_take_the_replay_is_not_installed() {
+        let (mut attachment, shared, _display, _input) = attach(65_536).await;
+        lock(&shared.state).fence.begin_reopen();
+        attachment
+            .write(OwnershipGeneration(1), b"kept")
+            .await
+            .expect("queued");
+        let (full, _display, _core) = halves(64).await;
+        let writer = full
+            .input
+            .as_ref()
+            .and_then(|half| half.connection.sender())
+            .expect("a writer");
+        while writer.try_send(frame::credit(INPUT_CHANNEL, 1)).is_ok() {}
+        assert!(!install(&shared, &full), "the queue is full");
+        assert_eq!(lock(&shared.state).fence.phase, Phase::Reopening);
+        assert_eq!(lock(&shared.state).fence.generation, 1);
+        let (next, _display, mut input) = halves(65_536).await;
+        assert!(install(&shared, &next));
+        let frames = input.drain_until(|frames| !frames.is_empty()).await;
+        assert_eq!(typed(&frames), b"kept");
+        assert_eq!(frames.len(), 1);
+    }
+
+    /// A frame the core's line stalls in the middle of arrives whole: reading it is not
+    /// cancelled by the quiet timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_stalled_mid_way_is_read_whole() {
+        let (pair, _display, mut input) = halves(65_536).await;
+        let writer = pair
+            .input
+            .as_ref()
+            .and_then(|half| half.connection.sender())
+            .expect("a writer");
+        let second = frame::encode(INPUT_CHANNEL, Kind::Data, b"second frame");
+        let cut = second.len() - 4;
+        writer
+            .send(frame::encode(INPUT_CHANNEL, Kind::Data, b"first"))
+            .await
+            .expect("first");
+        writer.send(second[..cut].to_vec()).await.expect("part");
+        let first = input.drain().await;
+        assert_eq!(typed(&first), b"first");
+        writer.send(second[cut..].to_vec()).await.expect("rest");
+        let rest = input.drain_until(|frames| !frames.is_empty()).await;
+        assert_eq!(typed(&rest), b"second frame");
     }
 }
