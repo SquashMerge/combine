@@ -21,9 +21,13 @@ function sample() {
 async function mount(port: HostsPort = new MemoryHostsPort(sample())) {
   render(<App port={port} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
+  await act(async () => {});
 }
 
-const open = () => fireEvent.keyDown(window, { key: 'k', metaKey: true });
+const open = async () => {
+  fireEvent.keyDown(window, { key: 'k', metaKey: true });
+  await screen.findByRole('dialog', { name: 'Command palette' });
+};
 const dialog = () => screen.queryByRole('dialog', { name: 'Command palette' });
 const search = () => screen.getByRole('combobox');
 const options = () => within(screen.getByRole('listbox')).getAllByRole('option');
@@ -34,7 +38,7 @@ describe('CommandPalette', () => {
     expect(dialog()).toBeNull();
     fireEvent.keyDown(window, { key: 'k' });
     expect(dialog()).toBeNull();
-    open();
+    await open();
     expect(dialog()).not.toBeNull();
     expect(document.activeElement).toBe(search());
     fireEvent.keyDown(search(), { key: 'Escape' });
@@ -43,7 +47,7 @@ describe('CommandPalette', () => {
 
   it('filters by fuzzy match', async () => {
     await mount();
-    open();
+    await open();
     fireEvent.change(search(), { target: { value: 'mimr' } });
     expect(options().map((o) => o.querySelector('.label')?.textContent)).toEqual(['mimir', 'remote']);
     fireEvent.change(search(), { target: { value: 'zzzz' } });
@@ -52,7 +56,7 @@ describe('CommandPalette', () => {
 
   it('moves with Up and Down', async () => {
     await mount();
-    open();
+    await open();
     expect(options()[0]?.getAttribute('aria-selected')).toBe('true');
     fireEvent.keyDown(search(), { key: 'ArrowDown' });
     expect(options()[1]?.getAttribute('aria-selected')).toBe('true');
@@ -63,7 +67,7 @@ describe('CommandPalette', () => {
 
   it('Enter on space selects like the rail', async () => {
     await mount();
-    open();
+    await open();
     fireEvent.change(search(), { target: { value: 'mimir' } });
     fireEvent.keyDown(search(), { key: 'Enter' });
     expect(dialog()).toBeNull();
@@ -73,7 +77,7 @@ describe('CommandPalette', () => {
 
   it('Enter on terminal selects like the navigator', async () => {
     await mount();
-    open();
+    await open();
     fireEvent.change(search(), { target: { value: 'remote' } });
     expect(options()[0]?.getAttribute('data-palette-entry')).toBe('focus-terminal');
     fireEvent.keyDown(search(), { key: 'Enter' });
@@ -99,7 +103,7 @@ describe('CommandPalette', () => {
       onSnapshot: (listener) => inner.onSnapshot(listener),
       retryHost,
     });
-    open();
+    await open();
     fireEvent.change(search(), { target: { value: 'retry' } });
     expect(options()).toHaveLength(1);
     act(() => {
