@@ -191,7 +191,7 @@ describe('App', () => {
 
     it('selecting writes that host state immediately, stamped by now', async () => {
       let tick = 1000;
-      const clientStatePort = new MemoryClientStatePort();
+      const clientStatePort = new DeferredClientStatePort();
       render(
         <App
           port={new MemoryHostsPort(sample())}
@@ -199,7 +199,13 @@ describe('App', () => {
           now={() => ++tick}
         />,
       );
-      fireEvent.click(await screen.findByRole('button', { name: 'mimir' }));
+      await screen.findByRole('navigation', { name: 'Spaces' });
+      await waitFor(() => expect(clientStatePort.loads).toHaveLength(2));
+      await act(async () => {
+        clientStatePort.resolve(HOST_A, defaultClientState());
+        clientStatePort.resolve(HOST_B, defaultClientState());
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'mimir' }));
       expect(clientStatePort.writes).toEqual([{ kind: 'last', hostId: HOST_B, spaceId: '/src/mimir', selectedAtMs: '1001' }]);
       fireEvent.click(document.querySelector('[data-term-id="t4"] button') as Element);
       expect(clientStatePort.writes).toHaveLength(3);
@@ -223,7 +229,7 @@ describe('App', () => {
         const port = new DeferredClientStatePort();
         render(<App port={hosts} clientStatePort={port} {...(now ? { now } : {})} />);
         await screen.findByRole('navigation', { name: 'Spaces' });
-        await act(async () => {});
+        await waitFor(() => expect(port.loads).toHaveLength(2));
         return { hosts, port };
       }
 
