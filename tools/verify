@@ -46,6 +46,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 step "rust: tests"
 cargo test --workspace --all-features --locked
 
+# The shipped build has no test-support: its fake-backend refusal and the binary users
+# install are otherwise never compiled.
+step "rust: shipped daemon, without test-support"
+cargo clippy -p combined --all-targets --locked -- -D warnings
+cargo test -p combined --locked --test shipped_build
+
 step "architecture: tools/arch-guard"
 python3 -I -B tools/arch-guard/test_check.py
 python3 -I -B tools/arch-guard/check.py

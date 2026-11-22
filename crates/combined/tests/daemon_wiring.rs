@@ -5,17 +5,22 @@ mod common;
 mod daemon_support;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use combine_protocol::{Attach, ClientMessage, RequestId, TermId};
+use combined::adapters::fs::config::{BackendName, DaemonConfigFile};
 use combined::adapters::fs::ids_file;
 use combined::core::{Core, CoreConfig};
 use combined::model::Millis;
 use combined::ports::Capabilities;
+use combined::wiring::backend::{self, BackendChoice};
 use combined::wiring::clock::MonotonicClock;
+use combined::wiring::config::{self, DaemonConfigError, DaemonEnv, HerdrCoreSource};
 use combined::wiring::ids::{IdReservation, ID_BLOCK};
 use common::request_options;
-use daemon_support::{refuse_default_herdr_core, write_daemon_config, DaemonPaths, ShortTempDir};
+use daemon_support::{
+    refuse_default_herdr_core_in, write_daemon_config, DaemonPaths, ShortTempDir,
+};
 
 fn reserved(path: &Path) -> u64 {
     ids_file::load(path).unwrap().unwrap().ids_reserved_through
@@ -142,10 +147,13 @@ fn core_ids_after_restart_exceed_the_previous_high_water() {
 #[should_panic(expected = "herdr-core's default socket")]
 fn test_helpers_refuse_the_default_herdr_core_socket() {
     let scratch = ShortTempDir::new();
+    // The scratch path stands in for the default, through a synthetic environment.
     let default = scratch.path().join("default.sock");
-    // The scratch path stands in for the default: the helper compares against $HC_SOCKET.
-    std::env::set_var("HC_SOCKET", &default);
-    refuse_default_herdr_core(&default, &scratch);
+    let env = DaemonEnv {
+        hc_socket: Some(default.clone()),
+        ..DaemonEnv::default()
+    };
+    refuse_default_herdr_core_in(&default, &scratch, &env);
 }
 
 #[test]
@@ -163,4 +171,270 @@ fn test_helpers_refuse_parent_components_inside_the_scratch_dir() {
     let scratch = ShortTempDir::new();
     let path = scratch.path().join("../x");
     daemon_support::check_in_scratch(&path, &scratch);
+}
+
+// ---- configuration (a synthetic environment; nothing here reads the real one) ----
+
+fn env_with_home() -> DaemonEnv {
+    DaemonEnv {
+        home: Some(PathBuf::from("/Users/me")),
+        ..DaemonEnv::default()
+    }
+}
+
+fn config_file() -> DaemonConfigFile {
+    DaemonConfigFile {
+        version: 1,
+        backend: None,
+        herdr_core_socket: None,
+        data_dir: None,
+        socket: None,
+    }
+}
+
+fn herdr_core(env: &DaemonEnv) -> (PathBuf, HerdrCoreSource) {
+    config::herdr_core_socket(None, env).unwrap()
+}
+
+#[test]
+fn herdr_core_socket_defaults_to_herdr_cores_default_path() {
+    let (path, source) = herdr_core(&env_with_home());
+    assert_eq!(
+        path,
+        Path::new("/Users/me/.local/state/herdr-core/default/default.sock")
+    );
+    assert_eq!(
+        source,
+        HerdrCoreSource::DefaultStateDir {
+            session: "default".to_string()
+        }
+    );
+}
+
+#[test]
+fn hc_socket_overrides_the_default() {
+    let env = DaemonEnv {
+        hc_socket: Some(PathBuf::from("/tmp/hc.sock")),
+        hc_session: Some("other".to_string()),
+        xdg_runtime_dir: Some(PathBuf::from("/run/user")),
+        ..env_with_home()
+    };
+    let (path, source) = herdr_core(&env);
+    assert_eq!(path, Path::new("/tmp/hc.sock"));
+    assert_eq!(source, HerdrCoreSource::HcSocket);
+}
+
+#[test]
+fn hc_session_names_the_socket_under_xdg_state_home() {
+    let env = DaemonEnv {
+        hc_session: Some("work".to_string()),
+        xdg_state_home: Some(PathBuf::from("/Users/me/state")),
+        ..env_with_home()
+    };
+    let (path, _) = herdr_core(&env);
+    assert_eq!(path, Path::new("/Users/me/state/herdr-core/work/work.sock"));
+    let (path, _) = herdr_core(&DaemonEnv {
+        hc_session: Some("work".to_string()),
+        ..env_with_home()
+    });
+    assert_eq!(
+        path,
+        Path::new("/Users/me/.local/state/herdr-core/work/work.sock")
+    );
+}
+
+#[test]
+fn xdg_runtime_dir_holds_the_session_socket() {
+    let env = DaemonEnv {
+        xdg_runtime_dir: Some(PathBuf::from("/run/user/501")),
+        xdg_state_home: Some(PathBuf::from("/Users/me/state")),
+        ..env_with_home()
+    };
+    let (path, source) = herdr_core(&env);
+    assert_eq!(path, Path::new("/run/user/501/herdr-core/default.sock"));
+    assert_eq!(
+        source,
+        HerdrCoreSource::XdgRuntimeDir {
+            session: "default".to_string()
+        }
+    );
+}
+
+#[test]
+fn config_herdr_core_socket_wins_over_the_environment() {
+    let env = DaemonEnv {
+        hc_socket: Some(PathBuf::from("/tmp/hc.sock")),
+        ..env_with_home()
+    };
+    let file = DaemonConfigFile {
+        herdr_core_socket: Some(PathBuf::from("/tmp/configured.sock")),
+        ..config_file()
+    };
+    let resolved = config::resolve(Some(file), &env).unwrap();
+    assert_eq!(
+        resolved.backend,
+        BackendChoice::HerdrCore {
+            socket: PathBuf::from("/tmp/configured.sock"),
+            source: HerdrCoreSource::ConfigFile
+        }
+    );
+}
+
+#[test]
+fn relative_and_overlong_paths_are_refused() {
+    let relative = DaemonEnv {
+        hc_socket: Some(PathBuf::from("hc.sock")),
+        ..env_with_home()
+    };
+    assert!(matches!(
+        config::herdr_core_socket(None, &relative),
+        Err(DaemonConfigError::RelativePath { .. })
+    ));
+    let file = DaemonConfigFile {
+        data_dir: Some(PathBuf::from("data")),
+        ..config_file()
+    };
+    assert!(matches!(
+        config::resolve(Some(file), &env_with_home()),
+        Err(DaemonConfigError::RelativePath { .. })
+    ));
+
+    let long = PathBuf::from(format!("/tmp/{}", "x".repeat(100)));
+    let file = DaemonConfigFile {
+        socket: Some(long.clone()),
+        backend: Some(BackendName::HerdrCore),
+        ..config_file()
+    };
+    assert!(matches!(
+        config::resolve(Some(file), &env_with_home()),
+        Err(DaemonConfigError::SocketTooLong { .. })
+    ));
+    assert!(matches!(
+        config::herdr_core_socket(Some(long), &env_with_home()),
+        Err(DaemonConfigError::SocketTooLong { .. })
+    ));
+}
+
+#[test]
+fn missing_home_without_explicit_paths_is_an_error() {
+    let none = DaemonEnv::default();
+    assert!(matches!(
+        config::herdr_core_socket(None, &none),
+        Err(DaemonConfigError::NoHome { .. })
+    ));
+    assert!(matches!(
+        config::resolve(None, &none),
+        Err(DaemonConfigError::NoHome { .. })
+    ));
+    assert!(config::default_config_path(&none).is_none());
+
+    let explicit = DaemonConfigFile {
+        herdr_core_socket: Some(PathBuf::from("/tmp/hc.sock")),
+        data_dir: Some(PathBuf::from("/tmp/d")),
+        ..config_file()
+    };
+    let resolved = config::resolve(Some(explicit), &none).unwrap();
+    assert_eq!(resolved.data_dir, Path::new("/tmp/d"));
+}
+
+#[test]
+fn socket_defaults_to_combined_sock_in_the_data_dir() {
+    let resolved = config::resolve(None, &env_with_home()).unwrap();
+    assert_eq!(
+        resolved.data_dir,
+        Path::new("/Users/me/Library/Application Support/com.squashmerge.combined")
+    );
+    assert_eq!(resolved.socket, resolved.data_dir.join("combined.sock"));
+
+    let file = DaemonConfigFile {
+        data_dir: Some(PathBuf::from("/tmp/d")),
+        ..config_file()
+    };
+    let resolved = config::resolve(Some(file), &env_with_home()).unwrap();
+    assert_eq!(resolved.socket, Path::new("/tmp/d/combined.sock"));
+}
+
+#[test]
+fn connect_uses_socket_flag_then_config_then_default() {
+    let env = env_with_home();
+    let file = DaemonConfigFile {
+        socket: Some(PathBuf::from("/tmp/config.sock")),
+        data_dir: Some(PathBuf::from("/tmp/d")),
+        ..config_file()
+    };
+    let flag = Some(PathBuf::from("/tmp/flag.sock"));
+    assert_eq!(
+        config::connect_socket(flag, Some(&file), &env).unwrap(),
+        Path::new("/tmp/flag.sock")
+    );
+    assert_eq!(
+        config::connect_socket(None, Some(&file), &env).unwrap(),
+        Path::new("/tmp/config.sock")
+    );
+    let data_only = DaemonConfigFile {
+        socket: None,
+        ..file
+    };
+    assert_eq!(
+        config::connect_socket(None, Some(&data_only), &env).unwrap(),
+        Path::new("/tmp/d/combined.sock")
+    );
+    assert_eq!(
+        config::connect_socket(None, None, &env).unwrap(),
+        Path::new("/Users/me/Library/Application Support/com.squashmerge.combined/combined.sock")
+    );
+}
+
+#[test]
+fn fake_backend_builds_in_test_support_builds() {
+    let file = DaemonConfigFile {
+        backend: Some(BackendName::Fake),
+        ..config_file()
+    };
+    let resolved = config::resolve(Some(file), &env_with_home()).unwrap();
+    assert_eq!(resolved.backend, BackendChoice::Fake);
+    let backend = futures::executor::block_on(backend::build(&resolved.backend)).unwrap();
+    assert_eq!(backend.id(), "fake");
+}
+
+fn herdr_core_choice(socket: PathBuf) -> BackendChoice {
+    BackendChoice::HerdrCore {
+        socket,
+        source: HerdrCoreSource::ConfigFile,
+    }
+}
+
+fn build_error(choice: &BackendChoice) -> combined::wiring::StartError {
+    match futures::executor::block_on(backend::build(choice)) {
+        Ok(_) => panic!("the backend should not build"),
+        Err(error) => error,
+    }
+}
+
+#[test]
+fn herdr_core_backend_with_missing_socket_is_unavailable() {
+    let scratch = ShortTempDir::new();
+    let missing = scratch.path().join("no-hc.sock");
+    let error = build_error(&herdr_core_choice(missing.clone()));
+    assert_eq!(error.exit_code(), 3);
+    let text = error.to_string();
+    assert!(text.contains(missing.to_str().unwrap()), "{text}");
+    assert!(text.contains("daemon.json"), "{text}");
+    assert!(text.contains("unavailable"), "{text}");
+}
+
+#[test]
+fn herdr_core_backend_reports_the_missing_adapter() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.path().join("hc.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    assert!(backend::HERDR_CORE.is_none());
+    let error = build_error(&herdr_core_choice(socket));
+    assert_eq!(error.exit_code(), 3);
+    let text = error.to_string();
+    assert!(
+        text.contains("crates/combined/src/adapters/herdr_core"),
+        "{text}"
+    );
+    assert!(text.contains("#3") && text.contains("#23"), "{text}");
 }
