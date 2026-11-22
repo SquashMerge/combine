@@ -304,6 +304,13 @@ impl Shared {
                 match writer.try_reserve_many(Fence::frames_needed(&request)) {
                     Ok(reserved) => permits = Some(reserved),
                     Err(TrySendError::Full(())) => {
+                        // The request is refused and changes nothing on this attachment, but
+                        // its ownership generation still reached the terminal: record it, as
+                        // a refused reopen-queue request does, so another attachment's older
+                        // deferred request can't replay as current (port contract).
+                        let mut fence = lock(&self.env.fence);
+                        let highest = fence.entry(self.address.clone()).or_insert(0);
+                        *highest = (*highest).max(ownership.0);
                         return Err(BackendError::Failed("input queue full".to_string()));
                     }
                     Err(TrySendError::Closed(())) => self.input_writer_closed(&mut state),
@@ -1394,6 +1401,53 @@ mod queue_tests {
             .collect();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].payload, b"reply");
+    }
+
+    /// A request that a full Ready writer refuses changes nothing on its attachment, but its
+    /// newer ownership generation still supersedes another attachment's older reopen queue:
+    /// that queue's focus doesn't activate, and its typed bytes go out as automatic input.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_ready_queue_still_supersedes_an_older_reopen_queue() {
+        let env = env();
+        let (a_halves, _a_display, _a_input) = halves(65_536).await;
+        let a_handle = start(Arc::clone(&env), "t1", &options(), a_halves);
+        let a_shared = Arc::clone(&a_handle.shared);
+        let mut a: Box<dyn Attachment> = Box::new(a_handle);
+        lock(&a_shared.state).fence.begin_reopen();
+        a.write(OwnershipGeneration(1), b"w").await.expect("queued");
+        a.focus(OwnershipGeneration(1)).await.expect("queued");
+
+        let (b_halves, _b_display, _b_input) = halves(64).await;
+        let b_handle = start(Arc::clone(&env), "t1", &options(), b_halves);
+        let b_shared = Arc::clone(&b_handle.shared);
+        let mut b: Box<dyn Attachment> = Box::new(b_handle);
+        let mut full = false;
+        for _ in 0..WRITER_QUEUE_FRAMES * 2 {
+            if b.write(OwnershipGeneration(1), b"x").await.is_err() {
+                full = true;
+                break;
+            }
+        }
+        assert!(full, "b's writer queue fills");
+        assert_eq!(
+            b.resize(OwnershipGeneration(2), 100, 30).await,
+            Err(BackendError::Failed("input queue full".to_string()))
+        );
+        assert_eq!(
+            lock(&b_shared.state).fence.requested.size,
+            (80, 24),
+            "the refused resize is not applied"
+        );
+
+        let (next, _display, mut input) = halves(65_536).await;
+        assert!(install(&a_shared, &next));
+        let mut frames = Vec::new();
+        while let Some(frame) = input.next(Duration::from_millis(300)).await {
+            frames.push(frame);
+        }
+        let kinds: Vec<Kind> = frames.iter().map(|frame| frame.kind).collect();
+        assert_eq!(kinds, [Kind::AutomaticInput], "{kinds:?}");
+        assert_eq!(frames[0].payload, b"w");
     }
 
     /// The largest reopen queue replays whole into a new pair's writer, once, in order,
