@@ -1,17 +1,14 @@
 import type { HostView, HostsSnapshot, SpaceView } from '../model/hosts';
-import type { HostId, TermId } from '../model/ids';
+import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
 import { groupAllTerminals } from './order';
 
-export interface ActiveTerminal {
-  hostId: HostId;
-  id: TermId;
-}
+export type ActiveTerminals = ReadonlyMap<string, TermId>;
 
 interface TerminalNavigatorProps {
   snapshot: HostsSnapshot;
   selected: SpaceKey | null;
-  active: ActiveTerminal | null;
+  active: ActiveTerminals;
   onSelectTerminal: (space: SpaceKey, id: TermId) => void;
   allSpaces: boolean;
   onToggleAllSpaces: () => void;
@@ -20,7 +17,7 @@ interface TerminalNavigatorProps {
 interface TerminalListProps {
   host: HostView;
   space: SpaceView;
-  active: ActiveTerminal | null;
+  active: ActiveTerminals;
   onSelectTerminal: (space: SpaceKey, id: TermId) => void;
 }
 
@@ -29,8 +26,7 @@ function TerminalList({ host, space, active, onSelectTerminal }: TerminalListPro
   return (
     <ul>
       {space.terminals.map((terminal) => {
-        const isActive =
-          active !== null && active.hostId === space.key.hostId && active.id === terminal.id;
+        const isActive = active.get(spaceKeyId(space.key)) === terminal.id;
         return (
           <li
             key={terminal.id}
@@ -52,7 +48,7 @@ function TerminalList({ host, space, active, onSelectTerminal }: TerminalListPro
 
 interface ListingProps {
   snapshot: HostsSnapshot;
-  active: ActiveTerminal | null;
+  active: ActiveTerminals;
   onSelectTerminal: (space: SpaceKey, id: TermId) => void;
 }
 
