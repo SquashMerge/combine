@@ -16,6 +16,7 @@ use crate::core::layout::{
     validate_layout, FieldPath, LayoutError, LayoutOp, Origins, LAYOUT_MAX_BYTES,
 };
 use crate::model::{ContentHash, LayoutRevision, Millis, SpaceId, SpaceLayout};
+use crate::ports::{StoreError, StoredFile, WriteOutcome};
 
 /// How long the sync waits before writing, and before retrying a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,53 @@ pub enum LayoutWritten {
     /// The project can't be written and there is no fallback.
     ReadOnly(String),
     Failed(String),
+}
+
+impl From<StoredFile> for LayoutRead {
+    fn from(file: StoredFile) -> LayoutRead {
+        LayoutRead::Found {
+            bytes: file.bytes,
+            hash: file.hash,
+            read_only: file.read_only,
+        }
+    }
+}
+
+impl From<Option<StoredFile>> for LayoutRead {
+    fn from(file: Option<StoredFile>) -> LayoutRead {
+        file.map_or(LayoutRead::Missing, LayoutRead::from)
+    }
+}
+
+impl From<StoreError> for LayoutRead {
+    fn from(error: StoreError) -> LayoutRead {
+        LayoutRead::Failed(store_error_detail(error))
+    }
+}
+
+impl From<WriteOutcome> for LayoutWritten {
+    fn from(outcome: WriteOutcome) -> LayoutWritten {
+        LayoutWritten::Ok {
+            hash: outcome.hash,
+            read_only: outcome.read_only,
+        }
+    }
+}
+
+impl From<StoreError> for LayoutWritten {
+    fn from(error: StoreError) -> LayoutWritten {
+        match error {
+            StoreError::ReadOnly(detail) => LayoutWritten::ReadOnly(detail),
+            other => LayoutWritten::Failed(store_error_detail(other)),
+        }
+    }
+}
+
+fn store_error_detail(error: StoreError) -> String {
+    match error {
+        StoreError::InvalidPath => "invalid path".to_string(),
+        StoreError::Unavailable(detail) | StoreError::ReadOnly(detail) => detail,
+    }
 }
 
 /// Work for the server to do and report back with [`Layouts::apply_read`] or
