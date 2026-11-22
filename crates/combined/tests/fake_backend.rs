@@ -5,7 +5,9 @@ mod common;
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Context;
 
 use combine_protocol::{BackendGeneration, CloseReason, Fidelity, OwnershipGeneration, TermId};
 use combined::model::{SpaceId, TermEvent};
@@ -19,6 +21,7 @@ use combined::testing::{
 };
 use common::{display, request_options, spawn_spec};
 use futures::executor::block_on;
+use futures::task::{waker, ArcWake};
 use futures::{FutureExt, StreamExt};
 
 const OWN: OwnershipGeneration = OwnershipGeneration(1);
@@ -899,6 +902,57 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
         }
         assert_eq!(store.revision(&space).await, Ok(StoreRevision(3)));
     });
+}
+
+/// Counts how often it is woken.
+#[derive(Default)]
+struct CountingWaker(AtomicUsize);
+
+impl ArcWake for CountingWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn emitted_output_wakes_a_pending_attachment_stream() {
+    let (backend, control) = fake(FakeConfig::default());
+    let term = spawn(&backend);
+    let mut att = attach(&backend, &term);
+    let mut events = att.events();
+    drain(&mut events);
+
+    let counter = Arc::new(CountingWaker::default());
+    let waker = waker(Arc::clone(&counter));
+    let mut cx = Context::from_waker(&waker);
+    assert!(events.poll_next_unpin(&mut cx).is_pending());
+    assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+    control.emit(&term, b"hello");
+    assert!(counter.0.load(Ordering::SeqCst) >= 1);
+    assert!(matches!(
+        events.poll_next_unpin(&mut cx),
+        std::task::Poll::Ready(Some((_, AttachEvent::Data(bytes)))) if bytes == b"hello"
+    ));
+}
+
+#[test]
+fn spawn_wakes_a_pending_watch_stream() {
+    let (backend, _control) = fake(FakeConfig::default());
+    let mut watch = block_on(backend.watch()).unwrap();
+
+    let counter = Arc::new(CountingWaker::default());
+    let waker = waker(Arc::clone(&counter));
+    let mut cx = Context::from_waker(&waker);
+    assert!(watch.poll_next_unpin(&mut cx).is_pending());
+    assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+    let term = spawn(&backend);
+    assert!(counter.0.load(Ordering::SeqCst) >= 1);
+    assert!(matches!(
+        watch.poll_next_unpin(&mut cx),
+        std::task::Poll::Ready(Some(TermEvent::Created(info))) if info.id == term
+    ));
 }
 
 #[test]

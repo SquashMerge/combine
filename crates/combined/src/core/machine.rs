@@ -32,6 +32,7 @@ const STALE_GENERATION: &str = "stale ownership generation";
 const ZERO_SIZE: &str = "the size must be at least 1 column and 1 row";
 const NOT_SENT: &str = "the cursor names an event that was not sent";
 const UNEXPECTED_HELLO: &str = "unexpected hello";
+const UNEXPECTED_WATCH: &str = "unexpected watch_terminals";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
 const REFUSED_INPUT: &str = "the backend refused input for this attachment";
@@ -391,6 +392,13 @@ impl Core {
                 ErrorCode::InvalidRequest,
                 UNEXPECTED_HELLO,
                 None,
+                None,
+            ),
+            ClientMessage::WatchTerminals(watch) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_WATCH,
+                Some(watch.request),
                 None,
             ),
             ClientMessage::Attach(attach) => self.on_attach(connection, attach),

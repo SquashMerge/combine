@@ -12,7 +12,7 @@ use super::harness::{Failure, Outcome};
 use super::target::{Fault, Target};
 
 /// The SPEC.md revision this suite checks.
-pub const SPEC_REVISION: u32 = 13;
+pub const SPEC_REVISION: u32 = 15;
 
 /// One contract case. `needs` lists the faults the target must be able to produce; without
 /// them the case is skipped. A `heavy` case is left out of the mutation runs.
