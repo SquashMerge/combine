@@ -41,8 +41,13 @@ Known limits, by design:
 - Rust: macros are not expanded; re-exports, glob imports of a parent (`use std::*;`)
   and aliases of a crate root (`use std as s;`) are not followed. File ownership by
   package is by containing directory, not by the module tree.
-- Frontend: JSX text is not modeled; a `.tsx` file whose JSX text holds an unpaired quote
-  may be reported as `guard-parse`.
+- Frontend: in `.tsx` files only, the `/` of a JSX closing tag (`</p>`, `</>`) and of a
+  self-closing tag after `}` (`<Foo {...x} />`) is punctuation. A closing tag is read only
+  when `</name>` or `</>` follows, which holds no quote, backtick or second slash. A `/>`
+  after `}` with another `/` on its line could be a regex starting with `>`, so it is a
+  `guard-parse`. `.ts`, `.mts` and `.cts` files lex with no JSX rule. JSX text is still
+  not modeled; a `.tsx` file whose JSX text holds an unpaired quote may be reported as
+  `guard-parse`, so keep quotes, backticks and slashes out of JSX text.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -746,7 +751,32 @@ def _line_end(src: str, i: int) -> int:
     return min(ends) if ends else len(src)
 
 
-def lex_js(src: str) -> list[Tok]:
+_JSX_CLOSING_TAG = re.compile(r"/(?:>|[A-Za-z_$][\w$.:-]*\s*>)")
+
+
+def _jsx_tag_slash(src: str, i: int, toks: list[Tok]) -> bool:
+    """Whether the `/` at `i` in a `.tsx` file belongs to a JSX tag, not a regex literal.
+    A closing tag is `<` touching `/name>` or `/>`; the text matched holds no quote,
+    backtick or second slash, so reading it as punctuation can't swallow code. A
+    self-closing `/>` after a `}` (`<Foo {...x} />`) could also open a regex starting
+    with `>`; when the line holds another `/` that reading is possible, so the file is
+    reported as `guard-parse` (fail closed) rather than guessed at."""
+    if not toks:
+        return False
+    prev = toks[-1]
+    if prev.kind != "punct":
+        return False
+    if prev.text == "<" and prev.start == i - 1:
+        return _JSX_CLOSING_TAG.match(src, i) is not None
+    if prev.text == "}" and src.startswith("/>", i):
+        ends = [j for j in (src.find(c, i) for c in _J_LINE_BREAKS) if j >= 0]
+        if "/" in src[i + 1:min(ends) if ends else len(src)]:
+            raise LexError(i, "ambiguous JSX self-closing tag or regular expression")
+        return True
+    return False
+
+
+def lex_js(src: str, jsx: bool = False) -> list[Tok]:
     """Tokens of a JS/TS module. Whether `/` starts a regex depends on whether the
     previous token ends an expression, which takes some context: `)` after `if (...)`
     and `}` after a block don't, postfix `x++` and TypeScript's `x!` do."""
@@ -811,6 +841,9 @@ def lex_js(src: str) -> list[Tok]:
                 push("template_expr", "", i, False)
                 braces.append("template")
             i = end
+        elif c == "/" and jsx and _jsx_tag_slash(src, i, toks):
+            push("punct", c, i, False)
+            i += 1
         elif c == "/" and not last_ends_expr():
             j, in_class = i + 1, False
             while j < n:
@@ -979,7 +1012,7 @@ def js_package(spec: str) -> str:
 def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> list[Violation]:
     lines = Lines(src)
     try:
-        toks = lex_js(src)
+        toks = lex_js(src, jsx=rel.endswith(".tsx"))
     except LexError as e:
         return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
     found: list[Violation] = []

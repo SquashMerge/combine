@@ -1,0 +1,32 @@
+.shell {
+  display: flex;
+  height: 100vh;
+}
+
+.shell > nav {
+  flex: 0 0 240px;
+  width: 240px;
+  overflow-y: auto;
+}
+
+.shell > section {
+  flex: 0 0 320px;
+  width: 320px;
+  overflow-y: auto;
+}
+
+[data-dimmed="true"] {
+  opacity: 0.45;
+}
+
+.detail {
+  font-size: 0.85em;
+}
+
+[role="alert"] {
+  color: #b42318;
+}
+
+[aria-current="true"] {
+  font-weight: 600;
+}
