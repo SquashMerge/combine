@@ -158,3 +158,174 @@ async fn pump(
         }
     }
 }
+
+/// The watch CREDIT is sent with `try_send` into the bounded writer queue, so it is dropped
+/// when the queue is full. These tests drive `pump` against an in-memory core that honours
+/// credit windows, with the core not reading the client's side while it bursts.
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    use super::*;
+    use crate::adapters::herdr_core::attachment::Fidelities;
+    use crate::adapters::herdr_core::connection::WRITER_QUEUE_FRAMES;
+    use crate::adapters::herdr_core::{control, HerdrCoreConfig};
+
+    const CHANNEL: u32 = 1;
+
+    /// What the model core saw.
+    #[derive(Debug)]
+    struct Outcome {
+        sent: usize,
+        credited: usize,
+        /// The window was exhausted and no credit came back.
+        stalled: bool,
+    }
+
+    async fn read_line(server: &mut DuplexStream) {
+        let mut byte = [0u8; 1];
+        while server.read_exact(&mut byte).await.is_ok() {
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+    }
+
+    async fn read_frame(server: &mut DuplexStream) -> Option<(u32, u8, Vec<u8>)> {
+        let mut header = [0u8; frame::HEADER_LEN];
+        server.read_exact(&mut header).await.ok()?;
+        let channel = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let length = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
+        let mut body = vec![0u8; length as usize];
+        server.read_exact(&mut body).await.ok()?;
+        Some((channel, header[4], body))
+    }
+
+    /// A core that answers hello and `events.subscribe`, then sends one-byte DATA frames within
+    /// a credit window of `window` bytes, never reading while it sends. After each burst it
+    /// reads credit until the line goes quiet.
+    async fn model_core(mut server: DuplexStream, window: usize, total: usize) -> Outcome {
+        read_line(&mut server).await;
+        let hello = json!({"jsonrpc": "2.0", "id": 0, "result": {
+            "generation": 1, "version": "0.1.21", "framed": true,
+            "core": {"id": "x", "name": "y"},
+            "methods": ["terminal.attach", "terminal.list", "terminal.run", "terminal.kill",
+                        "events.subscribe"],
+            "features": []}});
+        server
+            .write_all(format!("{hello}\n").as_bytes())
+            .await
+            .expect("hello");
+        let (_, _, body) = read_frame(&mut server).await.expect("subscribe");
+        let request: Value = serde_json::from_slice(&body).expect("json");
+        let reply = json!({"jsonrpc": "2.0", "id": request["id"],
+            "result": {"seq": 0, "channel": CHANNEL, "terminals": []}});
+        server
+            .write_all(&frame::rpc(reply.to_string().as_bytes()))
+            .await
+            .expect("reply");
+
+        let (mut sent, mut credited, mut window) = (0usize, 0usize, window);
+        let mut stalled = false;
+        while sent < total {
+            let burst = window.min(total - sent);
+            for _ in 0..burst {
+                server
+                    .write_all(&frame::encode(CHANNEL, Kind::Data, b"\n"))
+                    .await
+                    .expect("data");
+            }
+            sent += burst;
+            window -= burst;
+            let mut got = 0usize;
+            while let Ok(Some((channel, kind, body))) =
+                tokio::time::timeout(Duration::from_millis(300), read_frame(&mut server)).await
+            {
+                if channel == CHANNEL && kind == Kind::Credit as u8 {
+                    got += u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+                }
+            }
+            credited += got;
+            window += got;
+            if window == 0 && sent < total {
+                stalled = true;
+                break;
+            }
+        }
+        Outcome {
+            sent,
+            credited,
+            stalled,
+        }
+    }
+
+    /// Runs `pump` on the client end against the model core and returns what the core saw.
+    async fn run(window: usize, total: usize) -> Outcome {
+        // A 64-byte pipe: the client's writer blocks after a few credit frames while the
+        // core is not reading, so the rest queue up and then drop.
+        let (client, server) = tokio::io::duplex(64);
+        let core = tokio::spawn(model_core(server, window, total));
+        let (connection, frames) = Connection::from_stream(client).await.expect("open");
+        let result = connection
+            .call("events.subscribe", json!({}))
+            .await
+            .expect("subscribe");
+        let snapshot = parse_snapshot(&result).expect("snapshot");
+        let mut subscription = Subscription {
+            connection,
+            frames,
+            channel: snapshot.channel,
+            snapshot,
+        };
+        let env = Env {
+            config: HerdrCoreConfig::new("/nonexistent".into()),
+            fence: Mutex::new(HashMap::new()),
+            fidelities: Mutex::new(Fidelities::default()),
+            automatic_feature: false,
+            control: Arc::new(control::Shared::default()),
+        };
+        let mut state = WatchState::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let pump = tokio::spawn(async move {
+            pump(&env, &mut subscription, &mut state, &tx).await;
+        });
+        let outcome = core.await.expect("core");
+        // The core dropped its end: the pump sees the end of the stream.
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("pump ends with the stream")
+            .expect("pump");
+        outcome
+    }
+
+    /// A burst larger than the writer queue loses credit, but the window never reaches zero
+    /// from those drops alone: it settles near the queue's capacity, so the stream keeps
+    /// moving. This pins "no permanent stall".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_watch_credit_does_not_stall_the_stream() {
+        let window = WRITER_QUEUE_FRAMES * 3;
+        let outcome = run(window, window * 3).await;
+        assert!(!outcome.stalled, "the stream stalled: {outcome:?}");
+        assert_eq!(outcome.sent, window * 3, "{outcome:?}");
+    }
+
+    /// The desired property: every DATA byte read is credited back. Today a full writer queue
+    /// drops CREDIT frames for good, so the window shrinks and never recovers.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "PRODUCTION DEFECT: watch.rs pump sends CREDIT with try_send, so a CREDIT is \
+                dropped when the writer queue is full and the subscription window shrinks \
+                permanently (no stall, but throughput degrades to about the queue size)"]
+    async fn every_watch_data_byte_is_credited_back() {
+        let window = WRITER_QUEUE_FRAMES * 3;
+        let outcome = run(window, window).await;
+        assert_eq!(
+            outcome.credited, outcome.sent,
+            "credit was dropped: {outcome:?}"
+        );
+    }
+}

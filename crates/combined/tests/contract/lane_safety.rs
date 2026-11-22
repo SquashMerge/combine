@@ -486,12 +486,47 @@ mod tests {
             HOME
         )
         .is_err());
-        // Even an exact match is refused once it is too long: pad the home-independent root.
-        let socket = expected_socket("/private/tmp/chc.Ab12Cd", "cAb12Cd");
-        assert!(socket.len() <= SOCKET_PATH_MAX);
-        let over = "a".repeat(SOCKET_PATH_MAX);
-        assert!(over.len() > SOCKET_PATH_MAX - 1);
-        assert!(check_socket_path(&over, "/tmp/chc.Ab12Cd", "cAb12Cd", HOME).is_err());
+    }
+
+    /// The 103-byte length branch of `check_socket_path` cannot be reached by any input that
+    /// passes the checks before it: a root is `/tmp/chc.XXXXXX` or `/private/tmp/chc.XXXXXX`,
+    /// the session is `c` + the six-character suffix, and anything but the exact expected path
+    /// is refused first. So the branch is defence in depth, and the property it guards is
+    /// pinned here instead: the longest socket a valid lane can name fits, with room to spare.
+    #[test]
+    fn longest_valid_lane_socket_fits_the_103_byte_limit() {
+        let root = "/private/tmp/chc.Zz99Zz";
+        let socket = expected_socket(root, "cZz99Zz");
+        assert!(socket.len() <= SOCKET_PATH_MAX, "{}", socket.len());
+        assert!(check_socket_path(&socket, root, "cZz99Zz", HOME).is_ok());
+        // Anything longer than the limit is refused by the equality check, whichever branch
+        // comes first: no over-long path is ever accepted.
+        let long = format!("{root}/run/herdr-core/{}.sock", "c".repeat(SOCKET_PATH_MAX));
+        assert!(long.len() > SOCKET_PATH_MAX);
+        let error = check_socket_path(&long, root, "cZz99Zz", HOME).expect_err("too long");
+        assert!(error.contains("not the lane socket"), "{error}");
+    }
+
+    /// The state-path branch on its own. The state check runs before the equality check, so an
+    /// error naming the state directory proves this branch refused the path, not the equality
+    /// check that would also have refused it. The default socket is one of those paths.
+    #[test]
+    fn state_path_branch_alone_refuses_paths_under_the_state_directory() {
+        let state = format!("{HOME}/.local/state/herdr-core");
+        for path in [
+            format!("{state}/default/default.sock"),
+            format!("{state}/cAb12Cd/x.sock"),
+            state.clone(),
+        ] {
+            let error = check_socket_path(&path, "/tmp/chc.Ab12Cd", "cAb12Cd", HOME)
+                .expect_err("state path");
+            assert!(error.contains("state directory"), "{path}: {error}");
+        }
+        // A path outside it is refused by the equality check instead, so the message tells
+        // the two branches apart.
+        let error = check_socket_path("/tmp/x.sock", "/tmp/chc.Ab12Cd", "cAb12Cd", HOME)
+            .expect_err("other path");
+        assert!(error.contains("not the lane socket"), "{error}");
     }
 
     #[test]

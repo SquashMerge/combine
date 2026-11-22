@@ -321,6 +321,9 @@ async fn capture_scenario(target: &mut HerdrCoreTarget) -> Result<serde_json::Va
         |e| matches!(e, TermEvent::Exited { id, .. } if *id == a),
     )
     .await?;
+    // A destructive call follows a fresh status whose core id passed the pin, as the crash
+    // path does.
+    target.checked_status()?;
     probe
         .call("terminal.rm", json!({"terminal": address}))
         .map_err(|e| e.to_string())?;

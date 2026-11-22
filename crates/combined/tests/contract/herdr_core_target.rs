@@ -244,7 +244,7 @@ impl HerdrCoreTarget {
     }
 
     /// A fresh status whose core id passed the pin: the gate for every destructive call.
-    fn checked_status(&self) -> Result<Value, String> {
+    pub fn checked_status(&self) -> Result<Value, String> {
         let status = self.probe.status()?;
         Self::pinned(&self.lane, &status)?;
         Ok(status)
