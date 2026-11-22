@@ -236,7 +236,9 @@ fn message_types_from_the_other_direction_are_unknown() {
         ClientMessage::decode(&started),
         Err(unknown_type("started"))
     );
-    let hello = control_frame(r#"{"type":"hello","protocol_version":1}"#);
+    let hello = control_frame(&format!(
+        r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION}}}"#
+    ));
     assert_eq!(DaemonMessage::decode(&hello), Err(unknown_type("hello")));
 }
 
@@ -266,11 +268,19 @@ fn bad_json_is_a_typed_error() {
         control_frame(
             r#"{"type":"resize","attachment":7,"cols":70000,"rows":24,"ownership_generation":1}"#,
         ),
-        control_frame(r#"{"type":"hello","protocol_version":1} trailing"#),
+        control_frame(&format!(
+            r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION}}} trailing"#
+        )),
         frame(1, &[0xff, 0xfe]),
         frame(
             1,
-            b"{\"type\":\"hello\",\"protocol_version\":1,\"x\":\"\xff\xfe\"}",
+            &[
+                format!(r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION},"x":""#)
+                    .as_bytes(),
+                b"\xff\xfe",
+                b"\"}",
+            ]
+            .concat(),
         ),
     ];
     for buf in client_cases {
@@ -327,14 +337,14 @@ fn deeply_nested_json_is_bad_json() {
 #[test]
 fn deep_nesting_in_an_unknown_field_is_skipped() {
     let json = format!(
-        r#"{{"type":"hello","protocol_version":1,"x":{}{}}}"#,
+        r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION},"x":{}{}}}"#,
         "[".repeat(100_000),
         "]".repeat(100_000)
     );
     assert_eq!(
         ClientMessage::decode(&control_frame(&json)).unwrap().0,
         ClientMessage::Hello(Hello {
-            protocol_version: 1
+            protocol_version: PROTOCOL_VERSION
         })
     );
 }
@@ -364,7 +374,7 @@ fn long_error_text_is_cut() {
 #[test]
 fn stream_errors_at_message_level_leave_the_next_frame_readable() {
     let hello = ClientMessage::Hello(Hello {
-        protocol_version: 1,
+        protocol_version: PROTOCOL_VERSION,
     });
     let mut wire = Vec::new();
     wire.extend(control_frame("not json"));
@@ -445,7 +455,7 @@ fn reader_retries_interrupted_reads() {
         }
     }
     let hello = ClientMessage::Hello(Hello {
-        protocol_version: 1,
+        protocol_version: PROTOCOL_VERSION,
     });
     let bytes = hello.encode().unwrap();
     let mut reader = Flaky {

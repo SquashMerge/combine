@@ -2,12 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::codec::floor_char_boundary;
 use crate::display::Display;
 use crate::error::EncodeError;
-use crate::frame::MAX_DATA_CHUNK;
+use crate::frame::{MAX_DATA_CHUNK, MAX_ERROR_DETAIL};
 use crate::ids::{
     AttachmentId, BackendGeneration, Cursor, HostId, OwnershipGeneration, RequestId, Seq,
 };
+use crate::terminals::{SpaceInfo, TerminalInfo};
 
 /// The daemon's answer to `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +93,26 @@ pub struct ErrorMessage {
     pub message: String,
     pub request: Option<RequestId>,
     pub attachment: Option<AttachmentId>,
+}
+
+impl ErrorMessage {
+    /// The message cut to at most [`MAX_ERROR_DETAIL`] bytes on a char
+    /// boundary. A receiver shows or logs this, never the raw text: the text
+    /// is a peer's.
+    pub fn trimmed_message(&self) -> &str {
+        &self.message
+            [..floor_char_boundary(&self.message, self.message.len().min(MAX_ERROR_DETAIL))]
+    }
+}
+
+/// A full snapshot of the host's terminals and spaces. It answers a
+/// `watch_terminals` with that `request`, and is pushed with `request: None`
+/// after a change, at most once per flush. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Terminals {
+    pub request: Option<RequestId>,
+    pub terminals: Vec<TerminalInfo>,
+    pub spaces: Vec<SpaceInfo>,
 }
 
 /// Whether the backend reproduced the screen exactly.
@@ -200,6 +222,7 @@ pub enum DaemonMessage {
     Gap(Gap),
     Ownership(Ownership),
     Error(ErrorMessage),
+    Terminals(Terminals),
     Started(Started),
     #[serde(skip)]
     Data(Data),
@@ -220,6 +243,7 @@ impl DaemonMessage {
             Self::Gap(_) => "gap",
             Self::Ownership(_) => "ownership",
             Self::Error(_) => "error",
+            Self::Terminals(_) => "terminals",
             Self::Started(_) => "started",
             Self::Data(_) => "data",
             Self::Resized(_) => "resized",
@@ -256,7 +280,7 @@ impl DaemonMessage {
     /// The stream is an attachment's seven events, in cursor order, plus the
     /// in-order `gap { request: None }` after the last of them. Control
     /// traffic (`welcome`, `attached`, `resumed`, a `gap` answering a resume,
-    /// `ownership` and `error`) is queued ahead of output.
+    /// `ownership`, `error` and `terminals`) is queued ahead of output.
     pub fn stream_attachment(&self) -> Option<AttachmentId> {
         match self {
             Self::Gap(gap) if gap.request.is_none() => Some(gap.attachment),

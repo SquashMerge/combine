@@ -133,26 +133,27 @@ mod tests {
 
     #[test]
     fn version_mismatch_error_frame_is_shown_with_both_versions() {
-        let double = Double::refuse(refusal(
-            ErrorCode::VersionMismatch,
-            "protocol version mismatch: client 1, daemon 2",
-        ));
+        let text = format!(
+            "protocol version mismatch: client {PROTOCOL_VERSION}, daemon {}",
+            PROTOCOL_VERSION + 1
+        );
+        let double = Double::refuse(refusal(ErrorCode::VersionMismatch, &text));
         assert_eq!(
             handshake_with(double).expect_err("refused"),
-            HandshakeFailure::Permanent(FailureText {
-                text: "protocol version mismatch: client 1, daemon 2".to_string(),
-                detail: None
-            })
+            HandshakeFailure::Permanent(FailureText { text, detail: None })
         );
     }
 
     #[test]
     fn welcome_with_other_version_is_a_mismatch() {
-        let double = Double::welcome_version(2, host_id(HOST_A));
+        let other = PROTOCOL_VERSION + 1;
+        let double = Double::welcome_version(other, host_id(HOST_A));
         assert_eq!(
             handshake_with(double).expect_err("mismatch"),
             HandshakeFailure::Permanent(FailureText {
-                text: "protocol version mismatch: client 1, daemon 2".to_string(),
+                text: format!(
+                    "protocol version mismatch: client {PROTOCOL_VERSION}, daemon {other}"
+                ),
                 detail: None
             })
         );
@@ -164,7 +165,9 @@ mod tests {
         assert_eq!(
             handshake_with(double).expect_err("refused"),
             HandshakeFailure::Permanent(FailureText {
-                text: "protocol version mismatch: client 1, daemon unknown".to_string(),
+                text: format!(
+                    "protocol version mismatch: client {PROTOCOL_VERSION}, daemon unknown"
+                ),
                 detail: Some("versions differ".to_string())
             })
         );
@@ -224,13 +227,16 @@ mod tests {
             })
         );
         let mismatch = HandshakeError::VersionMismatch(VersionMismatch {
-            client: 1,
-            daemon: 3,
+            client: PROTOCOL_VERSION,
+            daemon: PROTOCOL_VERSION + 1,
         });
         assert_eq!(
             describe(&mismatch),
             HandshakeFailure::Permanent(FailureText {
-                text: "protocol version mismatch: client 1, daemon 3".to_string(),
+                text: format!(
+                    "protocol version mismatch: client {PROTOCOL_VERSION}, daemon {}",
+                    PROTOCOL_VERSION + 1
+                ),
                 detail: None
             })
         );
