@@ -30,7 +30,7 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 - Output is flushed at most once per 16 ms, at once after an idle frame, up to 1 MiB per connection per flush.
 - Protocol version 2 adds `watch_terminals` and the `terminals` snapshot of a host's terminals and spaces.
 - A first frame that can't be decoded gets `malformed`, and a first message that isn't `hello` gets `invalid_request`, before the close.
-- The protocol crate's `ErrorMessage::trimmed_message` cuts a peer's error text to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. The daemon and the handshake apply it before they log the text or put it in the `Display` of `HandshakeError::Refused`. The client's display rule for daemon text (see Wire protocol, Handshake) is separate and unchanged.
+- The protocol crate's `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. It is applied before a peer's error text is logged or put in the `Display` of `HandshakeError::Refused`. It is not the client's display rule (see Wire protocol, Handshake), which it neither replaces nor restates.
 - The launchd plist ships in `crates/combined/launchd/` and is installed by hand (`docs/daemon.md`).
 
 **Changes from rev 12 (S5, client shell):** the client's `hosts.json` schema and location; two entries never share a host ID; how the client trims daemon text and `ssh` stderr before showing them; reconnect backoff, and which failures stop reconnecting; host state reaches the webview as `hosts-changed` snapshots; every unsigned 64-bit value crosses the Tauri boundary as a decimal string.
@@ -180,7 +180,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   - `code` is one of `version_mismatch`, `malformed`, `unknown_terminal`, `attach_failed`, `unknown_attachment`, `stale_generation`, `watch_only`, `invalid_request` (including a `hello` after the handshake) and `internal`. `message` is for people. `request` or `attachment` names what the error answers.
   - A frame that can't be decoded is a protocol error: truncated, over the cap, an unknown kind or message type, or bad JSON. The receiver closes the connection, and the daemon sends `malformed` first. The codec returns each of these as a typed error and never panics.
   - The daemon answers a first frame that can't be decoded with `malformed`, and a first message that isn't `hello` with `invalid_request`, before it closes. It waits 10 s for the `hello`, and closes without a reply when the time runs out.
-  - `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. The daemon applies it before it logs the text, and the handshake before it puts the text in the `Display` of `HandshakeError::Refused`. It is a different step from the client's display rule under Handshake, which applies afterwards.
+  - `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. It is applied before a peer's error text is logged or put in the `Display` of `HandshakeError::Refused`. It is not the client's display rule (see Handshake), which it neither replaces nor restates.
 - **Neutrality:** protocol types name nothing from a particular backend:
   - no backend name;
   - none of herdr-core's frame-kind spellings (`AUTOMATIC_INPUT`, `CREDIT` and the rest) or kind numbers;

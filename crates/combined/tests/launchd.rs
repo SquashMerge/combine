@@ -99,6 +99,12 @@ fn no_source_writes_launch_agents() {
             .any(|path| path.ends_with("combined/src/main.rs")),
         "the scan found no daemon sources: {sources:?}"
     );
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.starts_with(root.join("app/src-tauri/src"))),
+        "the scan found no app/src-tauri sources: {sources:?}"
+    );
     let offenders: Vec<&PathBuf> = sources
         .iter()
         .filter(|path| fs::read_to_string(path).unwrap().contains("LaunchAgents"))
