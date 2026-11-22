@@ -52,11 +52,18 @@ describe('parseHostsSnapshot', () => {
       'space keyed by another host',
       (j: any) => (j.hosts[0].spaces[0].key.hostId = j.hosts[1].hostId),
     ],
-    ['duplicate host id', (j: any) => (j.hosts[1].hostId = j.hosts[0].hostId)],
+    ['non-u32 retryInMs', (j: any) => (j.hosts[1].connection.retryInMs = 4294967296)],
+    ['negative attempt', (j: any) => (j.hosts[3].connection.attempt = -1)],
   ])('rejects %s', (_name, mutate) => {
     const json = clone();
     mutate(json);
     expect(() => parseHostsSnapshot(json)).toThrow(ModelError);
+  });
+
+  it('rejects two hosts sharing a host id', () => {
+    const json = clone();
+    json.hosts[3].hostId = json.hosts[0].hostId;
+    expect(() => parseHostsSnapshot(json)).toThrow(/two hosts share/);
   });
 
   it('rejects non-objects', () => {
