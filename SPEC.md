@@ -339,11 +339,11 @@ pub trait Attachment: Send {
     fn fidelity(&self) -> Fidelity;                         // Exact | Inexact, as the backend reports it
     fn ordered_resizes(&self) -> bool;                      // Resized events are the backend's own boundaries
     fn events(&mut self) -> BoxStream<'static, (BackendGeneration, AttachEvent)>; // once; a second call gets an empty stream
-    async fn write(&mut self, bytes: &[u8]) -> Result<()>;   // what the user typed
+    async fn write(&mut self, ownership: OwnershipGeneration, bytes: &[u8]) -> Result<()>; // what the user typed
     async fn write_automatic(&mut self, generation: BackendGeneration, bytes: &[u8]) -> Result<()>; // the emulator's own query replies: never takes ownership; dropped unless the pair is at `generation`
-    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()>; // a request: Ok means stored, not that the PTY changed
-    async fn focus(&mut self) -> Result<()>;
-    async fn set_display(&mut self, display: Display) -> Result<()>;
+    async fn resize(&mut self, ownership: OwnershipGeneration, cols: u16, rows: u16) -> Result<()>; // a request: Ok means stored, not that the PTY changed
+    async fn focus(&mut self, ownership: OwnershipGeneration) -> Result<()>;
+    async fn set_display(&mut self, ownership: OwnershipGeneration, display: Display) -> Result<()>;
     async fn credit(&mut self, bytes: u32) -> Result<()>;
     async fn detach(self: Box<Self>) -> Result<()>;
 }
