@@ -50,9 +50,11 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
         (
             "hello",
             ClientMessage::Hello(Hello {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
             }),
-            control_frame(r#"{"type":"hello","protocol_version":1}"#),
+            control_frame(&format!(
+                r#"{{"type":"hello","protocol_version":{PROTOCOL_VERSION}}}"#
+            )),
         ),
         (
             "attach",
@@ -156,12 +158,12 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
         (
             "welcome",
             DaemonMessage::Welcome(Welcome {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
                 host_id: HostId("3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b".into()),
             }),
-            control_frame(
-                r#"{"type":"welcome","protocol_version":1,"host_id":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"}"#,
-            ),
+            control_frame(&format!(
+                r#"{{"type":"welcome","protocol_version":{PROTOCOL_VERSION},"host_id":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"}}"#
+            )),
         ),
         (
             "attached",

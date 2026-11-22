@@ -1,0 +1,102 @@
+# Running the Combine daemon
+
+`combined` is the daemon: one per agent host, running as you. `SPEC.md`, "Hosts and connections", is the design; this page is how to install and check it. Combine never runs the commands below, and never writes `~/Library/LaunchAgents` itself. You run them.
+
+## Paths
+
+| Name | Path | Holds |
+| --- | --- | --- |
+| `<daemon config>` | `~/.config/combine/` | `daemon.json`, the start-up settings |
+| `<daemon data>` | `~/Library/Application Support/com.squashmerge.combined/`, mode 0700 | `host.json`, `ids.json`, `combined.lock`, `combined.sock`, `combined.sock.lock` |
+| `<daemon cache>` | `~/Library/Caches/com.squashmerge.combined/` | cached source data (later milestones) |
+| log | `~/Library/Logs/combined.log` | stdout and stderr when run by launchd |
+
+The daemon's socket is `<daemon data>/combined.sock`, mode 0600. A `hosts.json` entry for this machine uses that path as its `socket`.
+
+## `daemon.json`
+
+Optional. With no file at `~/.config/combine/daemon.json`, every default applies. Every field is optional, paths must be absolute, and an unknown field, another `version`, bad JSON or a relative path stops the start with exit 2.
+
+```json
+{
+  "version": 1,
+  "backend": "herdr-core",
+  "herdr_core_socket": "/Users/me/.local/state/herdr-core/default/default.sock",
+  "data_dir": "/Users/me/Library/Application Support/com.squashmerge.combined",
+  "socket": "/Users/me/Library/Application Support/com.squashmerge.combined/combined.sock"
+}
+```
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `backend` | `herdr-core`. `fake` exists only in builds with the `test-support` feature | `herdr-core` |
+| `herdr_core_socket` | herdr-core's socket | `HC_SOCKET`, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`, else `${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/<session>/<session>.sock`, with `<session>` from `HC_SESSION` or `default` |
+| `data_dir` | the `<daemon data>` directory | see Paths |
+| `socket` | the daemon's socket | `<data_dir>/combined.sock` |
+
+`combined serve --config <path>` reads another file; a missing file named that way stops the start. A socket path is at most 103 bytes.
+
+## Install
+
+From the repository root:
+
+```sh
+cargo build --release -p combined
+install -m 0755 target/release/combined /opt/homebrew/bin/combined
+mkdir -p ~/Library/Logs
+sed "s#__HOME__#$HOME#g" crates/combined/launchd/com.squashmerge.combined.plist \
+  > ~/Library/LaunchAgents/com.squashmerge.combined.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.squashmerge.combined.plist
+launchctl print gui/$(id -u)/com.squashmerge.combined
+```
+
+The plist runs `/opt/homebrew/bin/combined serve` at load and keeps it running (`RunAtLoad`, `KeepAlive`, `ThrottleInterval` 10). Change the path in the installed copy if you put the binary elsewhere.
+
+## Uninstall
+
+```sh
+launchctl bootout gui/$(id -u)/com.squashmerge.combined
+rm ~/Library/LaunchAgents/com.squashmerge.combined.plist
+```
+
+## Fail-fast and restarts
+
+Until #23 wires the herdr-core adapter, `backend = "herdr-core"` exits 3.
+
+The daemon doesn't wait for herdr-core. If its socket is missing at start, or the backend's watch ends while running, `combined` exits 3 and, because of `KeepAlive`, launchd starts it again every 10 s. Clients reconnect and get `gap` for attachments the new process doesn't know.
+
+There is no SIGTERM handler: a stop is handled like a crash. The OS releases both locks, and the next start replaces the stale socket.
+
+## Check the bridge over ssh
+
+With Remote Login on, this sends a `hello` for protocol version 2 through `combined connect` and prints the reply:
+
+```sh
+printf '\000\000\000\046\001{"type":"hello","protocol_version":2}' \
+  | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
+```
+
+Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":2}`. The reply is a control frame holding `{"type":"welcome","protocol_version":2,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+
+## Check that no network port is open
+
+```sh
+lsof -a -p "$(pgrep -x combined)" -i    # prints nothing
+lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
+```
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | `combined connect` ended cleanly: the socket reached EOF or stdout closed (EPIPE). Stdin EOF alone only half-closes the socket |
+| 1 | a runtime failure (for example a failed write to `ids.json`), or `combined connect` couldn't reach a daemon |
+| 2 | bad usage, a bad `daemon.json`, a bad data directory or file in it, or another daemon already serving the socket or data directory |
+| 3 | herdr-core is unavailable: its socket is missing at start, or its watch ended while running |
+
+## Troubleshooting
+
+- **`host.json`:** the daemon writes it once, on first start, and never rewrites it. If it is unreadable, not valid JSON, another version, or holds something that isn't a lowercase UUID, the daemon exits 2 and names the file. Fix or remove it by hand; removing it gives the host a new ID, and clients that stored the old one refuse the host.
+- **`ids.json`:** it reserves attachment IDs so they never repeat across restarts. An invalid one stops the start (exit 2) and is never reset. Deleting it by hand resets the ID counter, so an old client cursor is answered with `gap` unless an ID happens to collide.
+- **herdr-core socket:** an exit 3 names the path, where it came from (`daemon.json`, `HC_SOCKET`, `HC_SESSION` with `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`, or the default) and a hint. launchd starts with a minimal environment, so set `herdr_core_socket` in `daemon.json` if herdr-core's session isn't the default. Check with `ls -l <path>`, and with `hc server status --json` against that session. Never point a test at your default herdr-core.
+- **Another daemon:** exit 2 with "another combined is serving ..." means a daemon holds the socket's lock or the data directory's. Stop it first.
