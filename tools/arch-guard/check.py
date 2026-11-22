@@ -54,8 +54,8 @@ Known limits, by design:
   or `require` anywhere in it must be a load the import reader reported at that offset,
   and a `from` followed by a quote or backtick must belong to a reported `import` or
   `export` load. Comments, strings and JSX text that spell those words are therefore a
-  `guard-parse`, as are `import.meta`, `import x = require(...)`, and keys or methods
-  named `import` or `require`.
+  `guard-parse`, as are `import.meta`, `import x = require(...)`, member access such as
+  `obj.import`, and keys or methods named `import` or `require`.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -1010,6 +1010,9 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
         elif c == "!" and not src.startswith("!=", i) and last_ends_expr():
             push("punct", c, i, True)  # TypeScript non-null assertion: `x!`
             i += 1
+        elif src.startswith("...", i):
+            push("punct", "...", i, False)  # spread or rest, never member access
+            i += 3
         elif src.startswith("=>", i):
             push("punct", "=>", i, False)
             i += 2
@@ -1106,7 +1109,7 @@ def js_package(spec: str) -> str:
 
 
 _GAP = r"(?:\s|/\*[\s\S]*?\*/|//[^\n\r]*)*"  # whitespace and comments
-_RAW_KEYWORD = re.compile(r"(?<![\w$.])(?:import|require)(?![\w$])")
+_RAW_KEYWORD = re.compile(r"(?<![\w$])(?:import|require)(?![\w$])")
 _RAW_FROM = re.compile(r"(?<![\w$.])from(?![\w$])" + _GAP + r"['\"`]")
 
 

@@ -904,6 +904,93 @@ class GuardTest(unittest.TestCase):
         with mock.patch.object(check, "lex_js", broken):
             self._check_matrix()
 
+    # --- spread operands and expression forms (opencode review 16)
+
+    SPECS = (
+        ("'@tauri-apps/api/core'", "tauri-only-in-ipc"),
+        ("'../../test/support/snapshots'", "no-production-dependency-on-non-production"),
+        ("'../ipc/'+'tauri'", "frontend-imports-are-literal"),
+    )
+    SEPS = ("", " ", "/**/", "\n", "//c\n", "/*(){}'`*/")
+    SPREADS = (
+        ("object", "export const a = ({{...{c}}});", "ts"),
+        ("array", "export const a = [...{c}];", "ts"),
+        ("call", "declare function f(...a: unknown[]): void;\nf(...{c});", "ts"),
+        ("jsx-attr", "export const a = <p {{...{c}}} />;", "tsx"),
+        ("jsx-child", "export const a = <p>{{({{...{c}}})}}</p>;", "tsx"),
+    )
+    FORMS = (
+        "CALL", "[CALL]", "({p:CALL})", "({...CALL})", "[...CALL]",
+        "`${CALL}${{}}`", "`${{}}${CALL}`", "`${function f(){}}${CALL}`",
+        "`${/x/}${CALL}`", "`${()=>{}}${CALL}`", "`${CALL}${()=>{}}`",
+        "`${CALL}${({})}`", "`${CALL}${{k:1}}`", "`${CALL}${{k:1}}${CALL}`",
+        "`${CALL}${{}}${/x/}`", "String.raw`${CALL}${{}}`",
+        "((() => CALL)())", "({m(){return CALL}}).m()",
+        "CALL ? /x/ : /y/", "[...await CALL]",
+        "`${`${CALL}${{}}`}${{}}`", "`${{v:`${CALL}${{}}`}}${{}}`",
+        "`${CALL}${`inner ${1}`}`", "`${1}${`${CALL}${{}}`}`",
+    )
+    WRAPS = (
+        ("export const a = BODY;", "ts"),
+        ("export async function f() {return BODY;}", "ts"),
+        ("export const a = [BODY, 1];", "ts"),
+        ("export const a = <p>{BODY}{1}</p>; export const q = /x/;", "tsx"),
+        ("export const a = <P a={BODY} b={1} />;", "tsx"),
+    )
+
+    def _expression_cases(self):
+        for kw in ("import", "require"):
+            for sep in self.SEPS:
+                for spec, rule in self.SPECS:
+                    call = f"{kw}{sep}({spec})"
+                    for name, shape, ext in self.SPREADS:
+                        yield f"spread/{name}/{kw}/{sep!r}/{rule}", shape.format(c=call), ext, rule
+                    for form in self.FORMS:
+                        for wrap, ext in self.WRAPS:
+                            src = wrap.replace("BODY", form.replace("CALL", call))
+                            yield f"form/{form}/{wrap}/{kw}/{sep!r}/{rule}", src, ext, rule
+
+    def _check_expression_cases(self, tsx_only=False):
+        cfg = check.load_config(CONFIG)
+        count = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in BASE.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            for name, src, ext, rule in self._expression_cases():
+                if tsx_only and ext != "tsx":
+                    continue
+                count += 1
+                rel = f"app/web/src/shell/Probe.{ext}"
+                found = {v.rule for v in check.check_js_file(rel, src, cfg, root)}
+                with self.subTest(case=name, ext=ext):
+                    self.assertTrue(found, f"clean: {src!r}")
+                    self.assertTrue(found <= {rule, "guard-parse"}, (found, src))
+        return count
+
+    def test_spread_and_expression_forms_are_never_clean(self):
+        self.assertEqual(self._check_expression_cases(), 2 * 6 * 3 * (5 + 24 * 5))
+
+    def test_spread_and_expression_forms_with_the_reader_blind_to_spread(self):
+        real = check.lex_js
+
+        def blind(src, jsx=False):
+            out = []
+            for t in real(src, jsx=jsx):
+                if t.is_("punct", "..."):
+                    out += [check.Tok("punct", ".", t.start + k) for k in range(3)]
+                else:
+                    out.append(t)
+            return out
+
+        with mock.patch.object(check, "lex_js", blind):
+            self._check_expression_cases(tsx_only=True)
+
+    def test_member_access_named_import_fails_closed_in_tsx(self):
+        src = "declare const o: any;\nexport const a = o.import('x');\n"
+        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
     def test_backstop_keyword_without_a_following_paren(self):
         for src in (
             "export const a = <p>{import/**/('@tauri-apps/api/core')}{{}}</p>;\n",
