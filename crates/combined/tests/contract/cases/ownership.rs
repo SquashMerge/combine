@@ -1,4 +1,4 @@
-//! Cases 34-39: who owns a terminal's size and input when several attachments share it.
+//! Cases 34-39 and 43: who owns a terminal's size and input when several attachments share it.
 
 use combine_protocol::{
     AttachmentId, ClientMessage, ErrorCode, OwnershipGeneration, Resize, TermId,
@@ -47,6 +47,14 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
             needs: &[Fault::HalfFailure, Fault::Observation],
             heavy: false,
             run: |t| ownership_changes_while_a_pair_is_reopening(t).boxed_local(),
+        },
+        Case {
+            name: "queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen",
+            needs: &[Fault::HalfFailure, Fault::Observation],
+            heavy: false,
+            run: |t| {
+                queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen(t).boxed_local()
+            },
         },
     ]
 }
@@ -396,6 +404,53 @@ pub async fn ownership_changes_while_a_pair_is_reopening<T: Target>(t: &mut T) -
         "pty-size",
         size == (100, 30),
         "the PTY is {size:?}, expected B's size (100, 30)"
+    );
+    h.finish(&[&ca, &cb])
+}
+
+/// Case 43: requests an owner queued while its pair reopened do not take the terminal back
+/// from the attachment that became the owner meanwhile. Its queued typed bytes still reach the
+/// program, once.
+pub async fn queued_requests_of_a_superseded_owner_do_not_take_over_on_reopen<T: Target>(
+    t: &mut T,
+) -> Outcome {
+    let mut h = Harness::new(t, CoreConfig::default())?;
+    let term = h.spawn("p", 80, 24).await?;
+    let mut ca = h.client();
+    let mut cb = h.client();
+    let (a, b) = owner_and_second(&mut h, &term, &mut ca, &mut cb, (100, 30)).await?;
+
+    h.target.fail_half(&term, 0, Half::Input)?;
+    h.type_input(&mut ca, a, b"a").await?;
+    h.focus(&mut ca, a).await?;
+    h.type_input(&mut cb, b, b"b").await?;
+    h.settle(&mut [&mut ca, &mut cb]).await?;
+
+    ensure!(
+        "new-epoch",
+        ca.view(a).is_some_and(|view| view.started.len() == 2),
+        "A's pair should have reopened with one new Started"
+    );
+    let size = h.target.pty_size(&term)?;
+    ensure!(
+        "pty-size",
+        size == (100, 30),
+        "the PTY is {size:?}: A's queued requests took B's size back, expected (100, 30)"
+    );
+    ensure!(
+        "owner",
+        heard(&ca, a)?.1 == Some(b) && heard(&cb, b)?.1 == Some(b),
+        "core and the clients should agree that B owns; A heard {:?}, B heard {:?}",
+        heard(&ca, a),
+        heard(&cb, b)
+    );
+    let mut typed = h.target.typed_input(&term)?;
+    typed.sort_unstable();
+    ensure!(
+        "typed-once",
+        typed == b"ab",
+        "each typed byte should be written exactly once; got {:?}",
+        String::from_utf8_lossy(&typed)
     );
     h.finish(&[&ca, &cb])
 }

@@ -56,6 +56,8 @@ struct Terminal {
     delayed: bool,
     failing_opens: u32,
     active: Option<u64>,
+    /// How many times any attachment has become the active viewer.
+    activations: u64,
     typed: Vec<u8>,
     automatic: Vec<Vec<u8>>,
 }
@@ -85,6 +87,12 @@ enum State {
     Closed,
 }
 
+/// A request held for the reopen, with the terminal's activation count when it was queued.
+struct Queued {
+    request: Request,
+    activations: u64,
+}
+
 enum Request {
     Write(Vec<u8>),
     Resize(u16, u16),
@@ -111,7 +119,7 @@ struct Att {
     pipe: VecDeque<Piped>,
     outbox: VecDeque<(BackendGeneration, AttachEvent)>,
     waker: Option<Waker>,
-    queue: VecDeque<Request>,
+    queue: VecDeque<Queued>,
     queued_input: usize,
     attempts: u32,
     mutated: bool,
@@ -309,6 +317,7 @@ impl World {
             delayed: false,
             failing_opens: 0,
             active: None,
+            activations: 0,
             typed: Vec::new(),
             automatic: Vec::new(),
         };
@@ -340,6 +349,7 @@ impl World {
             delayed: false,
             failing_opens: 0,
             active: None,
+            activations: 0,
             typed: Vec::new(),
             automatic: Vec::new(),
         };
@@ -611,6 +621,7 @@ impl World {
         let ((cols, rows), _) = att.requested;
         let index = self.index(&att.address).expect("terminal");
         self.terminals[index].active = Some(id);
+        self.terminals[index].activations += 1;
         self.set_pty(index, cols, rows);
     }
 
@@ -711,6 +722,9 @@ impl World {
     fn queue_request(&mut self, id: u64, request: Request) -> BackendResult<()> {
         let limit = self.config.reopen_queue_limit;
         let input_limit = self.config.reopen_input_limit;
+        let att = self.attachments.get(&id).expect("attachment");
+        let index = self.index(&att.address).expect("terminal");
+        let activations = self.terminals[index].activations;
         let att = self.attachments.get_mut(&id).expect("attachment");
         let input = match &request {
             Request::Write(bytes) => bytes.len(),
@@ -720,7 +734,10 @@ impl World {
             return Err(BackendError::Failed("reopen queue full".to_string()));
         }
         att.queued_input += input;
-        att.queue.push_back(request);
+        att.queue.push_back(Queued {
+            request,
+            activations,
+        });
         Ok(())
     }
 
@@ -754,6 +771,20 @@ impl World {
                     self.deliver(id);
                 }
             }
+        }
+    }
+
+    /// A request queued before another attachment became the active viewer. Typed bytes were
+    /// accepted while this attachment owned the terminal, so they are still written, without
+    /// making it active. Every other request would change the size, display or focus the new
+    /// owner holds, and is dropped.
+    fn apply_superseded(&mut self, id: u64, request: Request) {
+        if let Request::Write(bytes) = request {
+            let index = self
+                .index(&self.attachments[&id].address)
+                .expect("terminal");
+            self.terminals[index].typed.extend_from_slice(&bytes);
+            self.emit_at(index, &bytes);
         }
     }
 
@@ -1004,11 +1035,16 @@ impl World {
             att.pipe(old, AttachEvent::Data(b"<late>".to_vec()), false);
             att.pipe(old, AttachEvent::Resized { cols, rows }, false);
         }
-        let queued: Vec<Request> = att.queue.drain(..).collect();
+        let queued: Vec<Queued> = att.queue.drain(..).collect();
         att.queued_input = 0;
         self.deliver(id);
-        for request in queued {
-            self.apply(id, request);
+        let activations = self.terminals[index].activations;
+        for queued in queued {
+            if queued.activations == activations {
+                self.apply(id, queued.request);
+            } else {
+                self.apply_superseded(id, queued.request);
+            }
         }
         self.deliver(id);
     }

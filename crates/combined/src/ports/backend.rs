@@ -141,6 +141,11 @@ pub trait TerminalBackend: Send + Sync {
 ///   in order once it is ready. `write_automatic` and `credit` are dropped. The queue is
 ///   bounded by the adapter; a request beyond the bound returns `Err(BackendError::Failed(..))`
 ///   and is not applied.
+/// - A queued owner-affecting request (`focus`, `resize`, `set_display` and the activation a
+///   `write` brings) is not applied on reopen if another attachment of the terminal became the
+///   active viewer after it was queued: it must not make this attachment active or change the
+///   terminal's size or display. Typed bytes in such a `write` were accepted while the
+///   attachment owned the terminal, so they are still written, once, without activating it.
 #[async_trait]
 pub trait Attachment: Send {
     /// Of the current generation.
