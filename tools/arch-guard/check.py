@@ -41,13 +41,15 @@ Known limits, by design:
 - Rust: macros are not expanded; re-exports, glob imports of a parent (`use std::*;`)
   and aliases of a crate root (`use std as s;`) are not followed. File ownership by
   package is by containing directory, not by the module tree.
-- Frontend: in `.tsx` files only, the `/` of a JSX closing tag (`</p>`, `</>`) and of a
-  self-closing tag after `}` (`<Foo {...x} />`) is punctuation. A closing tag is read only
-  when `</name>` or `</>` follows, which holds no quote, backtick or second slash. A `/>`
-  after `}` with another `/` on its line could be a regex starting with `>`, so it is a
-  `guard-parse`. `.ts`, `.mts` and `.cts` files lex with no JSX rule. JSX text is still
-  not modeled; a `.tsx` file whose JSX text holds an unpaired quote may be reported as
-  `guard-parse`, so keep quotes, backticks and slashes out of JSX text.
+- Frontend: in `.tsx` files only, JSX is modeled: an element opens at a `<` in
+  expression-start position followed by a name or `>` (`<T,>` and `<T extends U>` are
+  generic parameter lists), its attributes lex as strings and `{...}` expressions, and its
+  children are raw text up to the next `<` or `{`, so quotes, backticks and slashes in
+  JSX text are text, never code. A mismatched or missing closing tag, or an element the
+  lexer can't place, is a `guard-parse`; it never continues silently. The residual: a
+  generic function type written `<T>(x: T) => T` in type position after `=` reads as an
+  element and fails closed, and type arguments on a JSX tag (`<Foo<string> />`) fail
+  closed too. `.ts`, `.mts` and `.cts` files lex with no JSX rule.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -751,29 +753,26 @@ def _line_end(src: str, i: int) -> int:
     return min(ends) if ends else len(src)
 
 
-_JSX_CLOSING_TAG = re.compile(r"/(?:>|[A-Za-z_$][\w$.:-]*\s*>)")
+@dataclass
+class _JsxTag:
+    name: str
+    closing: bool
+    origin: str  # the mode to return to once the element is complete: js, children or tag
+    start: int
 
 
-def _jsx_tag_slash(src: str, i: int, toks: list[Tok]) -> bool:
-    """Whether the `/` at `i` in a `.tsx` file belongs to a JSX tag, not a regex literal.
-    A closing tag is `<` touching `/name>` or `/>`; the text matched holds no quote,
-    backtick or second slash, so reading it as punctuation can't swallow code. A
-    self-closing `/>` after a `}` (`<Foo {...x} />`) could also open a regex starting
-    with `>`; when the line holds another `/` that reading is possible, so the file is
-    reported as `guard-parse` (fail closed) rather than guessed at."""
-    if not toks:
-        return False
-    prev = toks[-1]
-    if prev.kind != "punct":
-        return False
-    if prev.text == "<" and prev.start == i - 1:
-        return _JSX_CLOSING_TAG.match(src, i) is not None
-    if prev.text == "}" and src.startswith("/>", i):
-        ends = [j for j in (src.find(c, i) for c in _J_LINE_BREAKS) if j >= 0]
-        if "/" in src[i + 1:min(ends) if ends else len(src)]:
-            raise LexError(i, "ambiguous JSX self-closing tag or regular expression")
+_JSX_NAME = re.compile(r"[A-Za-z_$][\w$.:-]*")
+_GENERIC_PARAMS = re.compile(r"\s*(?:,|extends(?![\w$]))")
+
+
+def _starts_jsx_element(src: str, i: int) -> bool:
+    """Whether the `<` at `i`, in expression-start position of a `.tsx` file, opens a JSX
+    element (`<name`, `<a.b`, `<>`) and not a TSX generic parameter list (`<T,>`,
+    `<T extends U>`)."""
+    if src.startswith("<>", i):
         return True
-    return False
+    m = _JSX_NAME.match(src, i + 1)
+    return m is not None and _GENERIC_PARAMS.match(src, m.end()) is None
 
 
 def lex_js(src: str, jsx: bool = False) -> list[Tok]:
@@ -804,6 +803,27 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
     def last_ends_expr() -> bool:
         return bool(toks) and len(toks) - 1 in ends_expr
 
+    mode = "js"  # js, or inside a JSX tag (`tag`) or a JSX element's children (`children`)
+    pending: list[_JsxTag] = []  # tags whose `>` has not been read
+    elems: list[_JsxTag] = []  # opened elements awaiting their closing tag
+
+    def open_tag(at: int, origin: str) -> int:
+        nonlocal mode
+        j = at + 1
+        closing = src.startswith("/", j)
+        if closing:
+            j += 1
+        m = _JSX_NAME.match(src, j)
+        name = m.group(0) if m else ""
+        pending.append(_JsxTag(name, closing, origin, at))
+        mode = "tag"
+        return m.end() if m else j
+
+    def finish_element(origin: str, at: int) -> None:
+        nonlocal mode
+        push("jsx", "", at, True)
+        mode = origin
+
     def push(kind: str, text: str, at: int, value_end: bool) -> None:
         if value_end:
             ends_expr.add(len(toks))
@@ -811,6 +831,69 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
 
     while i < n:
         c = src[i]
+        if mode == "children":
+            j = i
+            while j < n and src[j] not in "<{":
+                j += 1
+            if j >= n:
+                raise LexError(elems[-1].start, "unterminated JSX element")
+            i = j
+            if src[i] == "{":
+                braces.append("jsx_child")
+                push("punct", "{", i, False)
+                mode = "js"
+                i += 1
+            elif src.startswith("</", i) or _starts_jsx_element(src, i):
+                i = open_tag(i, "children")
+            else:
+                raise LexError(i, "unexpected < in JSX text")
+            continue
+        if mode == "tag":
+            tag = pending[-1]
+            if c.isspace():
+                i += 1
+            elif src.startswith("//", i):
+                i = _line_end(src, i)
+            elif src.startswith("/*", i):
+                j = src.find("*/", i + 2)
+                if j < 0:
+                    raise LexError(i, "unterminated block comment")
+                i = j + 2
+            elif src.startswith("/>", i):
+                if tag.closing:
+                    raise LexError(i, "self-closing JSX closing tag")
+                pending.pop()
+                finish_element(tag.origin, tag.start)
+                i += 2
+            elif c == ">":
+                pending.pop()
+                if tag.closing:
+                    if not elems or elems[-1].name != tag.name:
+                        raise LexError(tag.start, "mismatched JSX closing tag")
+                    finish_element(elems.pop().origin, tag.start)
+                else:
+                    elems.append(tag)
+                    mode = "children"
+                i += 1
+            elif tag.closing and not (c.isalnum() or c in "_$-:."):
+                raise LexError(i, "unexpected character in JSX closing tag")
+            elif c == "{":
+                braces.append("jsx_attr")
+                push("punct", "{", i, False)
+                mode = "js"
+                i += 1
+            elif c in "'\"":
+                j = src.find(c, i + 1)
+                if j < 0:
+                    raise LexError(i, "unterminated JSX attribute string")
+                i = j + 1
+            elif c == "<" and _starts_jsx_element(src, i):
+                i = open_tag(i, "tag")
+            elif c.isalnum() or c in "_$-:.=":
+                i += 1
+            else:
+                raise LexError(i, "unexpected character in JSX tag")
+            continue
         if c.isspace():
             i += 1
         elif src.startswith("//", i):
@@ -841,9 +924,8 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
                 push("template_expr", "", i, False)
                 braces.append("template")
             i = end
-        elif c == "/" and jsx and _jsx_tag_slash(src, i, toks):
-            push("punct", c, i, False)
-            i += 1
+        elif c == "<" and jsx and not last_ends_expr() and _starts_jsx_element(src, i):
+            i = open_tag(i, "js")
         elif c == "/" and not last_ends_expr():
             j, in_class = i + 1, False
             while j < n:
@@ -892,6 +974,10 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
                     braces.append("template")
                 i = end
                 continue
+            if kind in ("jsx_child", "jsx_attr"):
+                mode = "children" if kind == "jsx_child" else "tag"
+                i += 1
+                continue
             push("punct", c, i, kind == "object")
             i += 1
         elif c == "(":
@@ -925,6 +1011,8 @@ def lex_js(src: str, jsx: bool = False) -> list[Tok]:
         else:
             push("punct", c, i, False)
             i += 1
+    if mode != "js":
+        raise LexError((pending or elems)[-1].start, "unterminated JSX element")
     return toks
 
 

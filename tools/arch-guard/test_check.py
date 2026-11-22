@@ -718,11 +718,106 @@ class GuardTest(unittest.TestCase):
             {"app/web/src/shell/probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.tsx")
         )
 
-    def test_tsx_ambiguous_self_closing_tag_fails_closed(self):
+    def test_tsx_regex_starting_with_gt_after_block_is_a_regex(self):
         src = "declare const x: any;\nif (x) { } />`/;\nimport { invoke } from '@tauri-apps/api/core';\n/`/;\n"
         self.assertFlags(
-            {"app/web/src/shell/probe.tsx": src}, ("guard-parse", "app/web/src/shell/probe.tsx")
+            {"app/web/src/shell/probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.tsx")
         )
+
+    # --- JSX children are text, never code (opencode review 11)
+
+    def _probe_tsx(self, middle, *expected, head="export const a = <div><span>x</span>\"</div>;"):
+        src = f"{head} {middle} export const q = /\"/;\n"
+        self.assertFlags({"app/web/src/shell/Probe.tsx": src}, *[(r, "app/web/src/shell/Probe.tsx") for r in expected])
+
+    def test_quote_in_jsx_text_does_not_hide_a_tauri_import(self):
+        self._probe_tsx("import { invoke } from '@tauri-apps/api/core';", "tauri-only-in-ipc")
+
+    def test_quote_in_jsx_text_does_not_hide_a_test_path_import(self):
+        self._probe_tsx("import '../../test/support/snapshots';", "no-production-dependency-on-non-production")
+
+    def test_quote_in_jsx_text_does_not_hide_a_computed_import(self):
+        self._probe_tsx("export const load = import('../ipc/' + 'tauri');", "frontend-imports-are-literal")
+
+    def test_quote_in_text_after_an_opening_tag(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <div>say \"hi</div>;",
+        )
+
+    def test_backtick_in_jsx_text(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <p>use `x</p>;",
+        )
+
+    def test_slash_in_jsx_text(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <p>and/or // not a comment</p>;",
+        )
+
+    def test_apostrophe_in_jsx_text_then_import_on_the_next_line(self):
+        src = "export const a = <p>don't</p>;\nimport { invoke } from '@tauri-apps/api/core';\n"
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_nested_jsx_inside_an_expression_child(self):
+        src = (
+            "declare const cond: boolean;\n"
+            "export const a = <p>{cond && <b>it's</b>}</p>;\n"
+            "import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_import_inside_a_jsx_expression_is_seen(self):
+        src = "export const a = <p>{import('@tauri-apps/api/core')}</p>;\n"
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_unbalanced_jsx_fails_closed(self):
+        for src in (
+            "export const a = <div><span>x</div>;\n",
+            "export const a = <div>text\n",
+            "export const a = <div x=\"y>text</div>;\n",
+            "export const a = <div></span>;\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags(
+                    {"app/web/src/shell/Probe.tsx": src}, ("guard-parse", "app/web/src/shell/Probe.tsx")
+                )
+
+    def test_clean_tsx_lexes_clean(self):
+        src = """\
+        declare const p: object, a: number, b: number, c: number, s: string;
+        export const id = <T,>(x: T) => x;
+        export const id2 = <T extends object>(x: T) => x;
+        export const d = a < b / c;
+        export const t = a < b && b > c;
+        export function Foo(props: object) {
+          return (
+            <section aria-label="x" data-q='y'>
+              <p>don't "quote" `tick` and/or // fine</p>
+              <Foo {...p} />
+              <div><Foo {...p} /></div>
+              <>
+                {s.replace(/"|'/g, "")}
+                {a > 1 ? <b>yes</b> : <i>no</i>}
+                {/* a comment */}
+              </>
+              <Foo render={<br />} cb={() => <hr />} />
+            </section>
+          );
+        }
+        """
+        self.assertFlags({"app/web/src/shell/Probe.tsx": src})
 
     def test_regex_literals_still_lex_in_tsx(self):
         src = """\
