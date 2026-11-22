@@ -18,7 +18,7 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
 
-**Changes from rev 13 (panel kinds):** panel kinds are data, not code. A kind is a file in the host's kind library: a record schema, a view that binds fields to a built-in renderer, and a selection key. Any service's group fills it, so an issue list from GitHub, Jira or Linear is the same panel. Kits bundle kinds and groups for a kind of user, such as a developer or a marketer. No Rust or TypeScript names a kind. The GitHub group gains issue list and issue detail panels, and M4's done criterion covers issues and a second issue backend.
+**Changes from rev 13 (panel kinds and the view language):** panel kinds are data, not code. A kind is a file in the host's kind library. It holds a record JSON Schema, a selection contract, optional paging, and a view written in Combine's view language. Any service's group fills a kind, so an issue list from GitHub, Jira or Linear is the same panel. The view language is a small declarative tree of built-in nodes, rendered by React. It supports actions on elements and on visibility, keyboard collection navigation with virtualized scrolling, pagination, named animations, timers and tooltips, and it runs no code. Kind content is part of a run's identity, and one validation pipeline covers loader, source and static data. Two fallbacks follow: sanitized logic-less templates, then a scripted sandbox behind trust approval. The GitHub group gains issue list and issue detail panels, and M4's done criterion covers issues and a second issue backend.
 
 **Changes from rev 12 (S5, client shell):** the client's `hosts.json` schema and location; two entries never share a host ID; how the client trims daemon text and `ssh` stderr before showing them; reconnect backoff, and which failures stop reconnecting; host state reaches the webview as `hosts-changed` snapshots; every unsigned 64-bit value crosses the Tauri boundary as a decimal string.
 
@@ -47,7 +47,7 @@ The app is one window over every space on every host you use, with agent-built p
 - Panels can carry JS loaders that run allowlisted CLIs and MCP tools on the agent's host and correlate the results.
 - Panel groups (GitHub, Jira, Linear, Trellis) hold several related views of one service, linked by a shared selection.
 - Panel kinds: an issue list, an issue detail or a PR list looks and behaves the same whichever service its data comes from. A group for GitHub, Jira or Linear fills the same kinds, so the client draws them with the same panels.
-- Kinds and groups are data, installed per host as kits, so the product fits how each person works. A developer's kit has issue, PR and Trellis panels over Linear, GitHub and Trellis. A marketer's kit might have design-file and doc-page panels over Figma and Notion. Neither needs a code change.
+- Kinds and groups are data in each host's libraries, so the product fits how each person works. A developer might use issue, PR and Trellis panels over Linear, GitHub and Trellis. A marketer might use design-file and doc-page panels over Figma and Notion. Neither needs a code change.
 - Mermaid diagrams rendered with [Pele](https://pele.run).
 
 **Non-goals for v1**
@@ -193,13 +193,14 @@ SplitNode   = Split { dir: H | V, ratio, a, b } | Tile { id: TileId, panels: [Pa
 
 PanelSpec     { version, id, title, lifetime: Persistent | Scratch, group?: GroupInstanceId,
                 content: Terminal { slot: String, template: SpawnSpec, follow_active }
-                       | View { kind?: KindId, renderer, loader?: "loader.js", sources: [Source],
+                       | View { kind?: KindId, renderer?, loader?: "loader.js", sources: [Source],   // exactly one of kind or renderer
                                 refresh, params: Map<String, Value | GroupRef> },
                 created_by: User | Agent { slot } }
 
 GroupInstance { id, group: "github", params: { repo: "SquashMerge/trellis" } }
 
 KindId      = String   // a kind in the host's kind library, e.g. "issue-list"; opaque to the daemon and the client code (see Panel kinds)
+// A View names either a kind (its view decides the renderers) or a single renderer (no kind, e.g. a Mermaid diagram); naming both is a validation error.
 
 // Daemon runtime state: <daemon data>/state.json
 SpaceBinding  { space_id, slots: Map<slot, TermId>, trust: TrustRecord, file_hashes: Map<path, hash> }
@@ -237,10 +238,11 @@ No database: every panel is a directory of plain files on the space's host, so a
   panels/<panel-id>/
     panel.json                        PanelSpec: renderer, refresh, params, group
     loader.js                         optional; runs in the daemon
-    view.html                         optional; CustomHtml only
+    view.html                         optional; Template or CustomHtml views only
 
 <daemon config>/                      per host, e.g. ~/.config/combine/
   settings.json                       CLI allowlist, approved MCP servers and tools, limits
+  kinds/<kind-id>/kind.json           kind library: record schema, selection, paging, view
   groups/<group>/                     group library: github, jira, trellis, ...
     group.json                        name, params schema, panel templates
     lib.js                            helpers shared by the group's loaders
@@ -259,7 +261,7 @@ No database: every panel is a directory of plain files on the space's host, so a
 ```
 
 - **Authority:** the daemon is the sole authority for mutations made through the API (clients and MCP tools). The files stay editable by agents, editors and `git`; the daemon treats those as outside edits.
-- **Watching:** the daemon watches `.workspace/` and the group library and reloads on change.
+- **Watching:** the daemon watches `.workspace/`, the group library and the kind library, and reloads on change.
 - **Self-write detection:** the daemon records the hash of every file it writes, and ignores watcher events whose content matches.
 - **Conflicts:** if an outside edit lands while the daemon holds an unsaved change to the same file, the outside edit wins. The daemon re-applies its pending change on top only if it touches different fields; otherwise it drops it and reports that in `list_panels`.
 - **Invalid files:** invalid JSON or an unsupported `version` leaves that panel showing the error and its last good spec; the daemon never overwrites a file it can't parse.
@@ -473,7 +475,7 @@ herdr-core already arbitrates between viewers: the last active viewer to attach,
 
 ## Panels, loaders and groups
 
-A panel is a loader (optional JS, run in the daemon) that produces data, plus a built-in renderer that draws it in the client; groups bundle related panels for one service around a shared selection.
+A panel is a loader (optional JS, run in the daemon) that produces data, plus a built-in renderer that draws it in the client. Data panels usually declare a panel kind, whose view (written in the view language below) chooses and arranges the built-in renderers. Groups bundle related panels for one service around a shared selection.
 
 **Renderers** (in the client)
 
@@ -482,10 +484,13 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 | Terminal | A live herdr/Rex terminal | Terminal slot | xterm.js with WebGL; follows the active terminal or is pinned |
 | Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele `render()`; Mermaid 12.1.0 syntax; themed with `--pele-*` variables |
 | Markdown | Notes, summaries, agent reports | Markdown text | Sanitized; code blocks highlighted |
-| Table | Lists of records | JSON rows + column hints | Sort, filter, copy; a row click can set group state |
+| View | A kind's view, or an inline one | View tree + data | The view language below; arranges the other renderers as nodes |
+| Table | Lists of records | JSON rows + column hints | Sort, filter, copy; keyboard navigation; virtualized; a row click can set group state |
+| Diff | Unified diffs | Diff text, or file hunks | Line numbers, collapse unchanged runs, side by side or inline |
 | Chart | Metrics over time or across items | JSON rows + chart spec | Line, bar, area |
 | Log | Streaming text | Text stream | Tail with pause |
-| CustomHtml | Anything else | HTML/JS + JSON | Sandboxed iframe, data only through `postMessage` |
+| Template | Fixed layouts the view language can't express | Logic-less HTML template + JSON | Filled by the client, sanitized with DOMPurify, no scripts; host-wired `data-action` attributes |
+| CustomHtml | Anything else | HTML/JS + JSON | Scripted sandboxed iframe, data only through `postMessage`; needs trust approval |
 
 **Loaders** (in the daemon, on the agent's host)
 
@@ -501,12 +506,12 @@ export default async function load(ctx) {
 
 - The loader's only I/O is `ctx`: `cli.run(id, args)`, `mcp.call(server, tool, args)`, `files.read(path)` inside the project, `terminal.read(slot)`, `params`, and the group's `state` and `lib`.
 - It runs in an embedded JS isolate in the daemon with no filesystem, network or process access, a time limit and a memory cap. Engine choice is open (deno_core or QuickJS).
-- Its return value is validated against the renderer's input, and against its panel kind's schema when the panel declares a `kind`, before it reaches a client. Both checks run inside the isolate, so the daemon's Rust code only carries the schema and the result as opaque JSON.
+- Its return value goes through the validation pipeline (see Panel kinds) before it reaches a client.
 - A panel with no loader uses a single declared source or static content.
 
 **Loader runs**
 
-- A run's **effective input** is the panel revision plus its resolved params, including the requesting client's group state. Effective inputs key the cache and shared computation.
+- A run's **effective input** is the panel revision, the content hash of its panel kind (when it declares one), its resolved params including the requesting client's group state, and its page cursor. Effective inputs key the cache and shared computation, so editing a kind invalidates its cached results.
 - Each request gets a monotonically increasing **request generation** per (space, panel, client), and records its effective input and panel revision.
 - A result is published to a client only if its request is still that client's current generation and revision. If PR 456 is selected after PR 123, a late result for 123 can still fill the cache, but never replaces the client's PR 456 view.
 - A newer request asks older ones for the same (space, panel, client) to cancel. The generation check, not cancellation, is what guarantees correctness.
@@ -524,59 +529,160 @@ export default async function load(ctx) {
 
 **Panel kinds**
 
-A panel kind is a data contract that several services can fill. The kind fixes the record schema, the selection a row sets, and how the client draws it. The service only decides where the data comes from. An issue list from GitHub, Jira or Linear is the same `issue-list` panel, with the same columns, filters, keyboard handling and click-through, fed by a different group's loader.
+A panel kind is a data contract that several services can fill. The kind fixes the record schema, the selection a row sets, and how the client draws it. The service only decides where the data comes from. An issue list from GitHub, Jira or Linear is the same `issue-list` panel, with the same columns, keyboard handling and click-through, fed by a different group's loader.
 
 **Kinds are data, not code.**
-- A kind lives in the host's kind library as `kinds/<kind-id>/kind.json`, next to the group library. It holds:
+- A kind lives in the host's kind library as `kinds/<kind-id>/kind.json`. It holds:
   - `version`;
-  - a JSON Schema for its records;
-  - a `view` that binds record fields to one of the built-in renderers (for example a Table's columns, or a detail layout of header fields, a Markdown body and a list section);
-  - the selection key a row click sets (`selects`), or the one it reads (`reads`).
+  - `record`, a JSON Schema (draft 2020-12) for each record;
+  - `selection` (below);
+  - optional `paging` (below);
+  - `view`, written in the view language.
 - No Rust and no TypeScript names a kind or its fields:
-  - The daemon treats a `KindId` as an opaque string and passes `kind.json` and loader results through as JSON.
-  - Schema validation runs in the loader isolate (see Loaders), next to the renderer-input check.
-  - The client draws a kind with the generic built-in renderers by following its `view`.
-- Adding, changing or removing a kind is editing files. A malformed `kind.json` is an error on the panels that use it, never a crash.
+  - The daemon treats a `KindId` as an opaque string. It carries `kind.json` and results as JSON.
+  - The client's view renderer interprets the view language, the kind metamodel, and nothing kind-specific.
+- Adding, changing or removing a kind means editing files.
 
-```
-// kinds/issue-list/kind.json  (abridged)
-{ "version": 1, "id": "issue-list",
-  "record": { "$ref": "#/defs/IssueRow" }, "selects": "selected_issue",
-  "view": { "renderer": "table", "key": "/ref",
-            "columns": [ { "field": "/ref/id", "label": "ID" }, { "field": "/title", "label": "Title" },
-                         { "field": "/state", "label": "State", "detail": "/native_state" },
-                         { "field": "/assignees", "label": "Assignees" }, { "field": "/updated_at", "label": "Updated" } ] },
-  "defs": { "IssueRef": { "backend": "string", "id": "string" },
-            "IssueRow": { "ref": "IssueRef", "title": "string", "state": "Open | InProgress | Closed",
-                          "native_state": "string", "assignees": ["string"], "labels": ["string"],
-                          "updated_at": "time", "url": "url", "extra?": "object" } } }
-```
+**Selection contract.** `selection` says what a click stores and what a panel reads.
+- `{ "sets": "selected_issue", "value": "/ref", "schema": { ... } }`: the value is extracted from the clicked record by JSON pointer and validated against `schema` before it enters group state. A value that fails is dropped, and the panel reports it.
+- `{ "reads": "selected_issue" }`: the panel's loader receives the value through `ctx.params` (a `GroupRef` param bound to that key). A missing or cleared value means "nothing selected", and the view shows its `empty` node.
+- Clearing a selection (Escape in a list, or the selected record vanishing from a refreshed list) stores `null`.
+- Values are compared, and enter cache keys, as canonical JSON: keys sorted, no insignificant whitespace, numbers in shortest form. So `{"id":"7","backend":"linear"}` equals `{"backend":"linear","id":"7"}`.
+- Kinds set or read only the keys they declare. Group state is per client and per group instance, as before.
 
-The starter kinds, which ship as files in the developer kit:
+**Paging.** `paging: { "cursor": true }` makes the loader receive `ctx.page.cursor`, which is `null` for the first page. The loader returns `{ "records": [...], "next_cursor": <string or null> }` instead of a bare array.
+- The cursor is part of the run's effective input, so each page caches separately, and late pages are dropped by the generation rule.
+- The client appends pages in order and keeps the selection when a page loads.
+- A refresh reloads the first page and discards the rest.
 
-| Kind | Record | Drawn as | Selection |
+**Validation pipeline.** It is the same for loader results, single-source data and static content:
+1. Validate each record against the kind's `record` schema.
+2. Bind the view: resolve its JSON pointers against the records.
+3. Check each node's input against that renderer's input contract.
+
+A failure at any step is an error on the panel, with the step and the JSON pointer. It is never a broken view. Steps 1 and 3 run in the daemon's isolate, because the daemon validates without a client attached. Step 2 runs in the client. The daemon's Rust code carries schemas and results only as opaque JSON.
+
+**Kind changes.**
+- Editing a `kind.json` changes its content hash. Every panel using it re-validates its cached results and re-runs with the new hash in its effective input. The client receives the kind definition and the results together, tagged with that hash, so it never draws a result against a different definition.
+- A missing or invalid `kind.json` is an error on the panels that use it. Their last good results stay greyed out until the kind is fixed.
+- What needs approval:
+  - Edits that change only `view` or labels are presentation, so they need no approval.
+  - Edits to `selection` or `paging` change what group state a panel's params can bind. They are part of the panel's execution manifest (see Security model), so they suspend the panel until re-approved.
+
+**Starter kinds** (files in the kind library):
+
+| Kind | Record | View | Selection |
 | --- | --- | --- | --- |
-| `issue-list` | `IssueRow` per issue | Table with the kind's columns | Sets `selected_issue` |
-| `issue-detail` | One `IssueDetail` (row, `body_markdown`, comments, links) | Header fields, the body as Markdown, then comments | Reads `selected_issue` |
-| `pr-list` | `PrRow` per pull request | Table | Sets `selected_pr` |
-| `pr-detail`, `checks`, `diff` | One record for `selected_pr` | Detail, table and diff views | Read `selected_pr` |
+| `issue-list` | `IssueRow` | Table with ID, title, state, assignees and updated columns; paged | Sets `selected_issue` = `/ref` |
+| `issue-detail` | `IssueDetail` | Fields, then the body as Markdown, then a list of comments and links | Reads `selected_issue` |
+| `pr-list` | `PrRow` | Table; paged | Sets `selected_pr` = `/ref` |
+| `pr-detail`, `checks`, `diff` | One record for `selected_pr` | Fields with Markdown, Table, Diff | Read `selected_pr` |
 
-- `IssueRow.state` is the normalized value every backend maps to. `native_state` keeps the service's own name ("In Review", "Triage"), and the view shows it next to the normalized one.
-- A loader for a kind returns records in the kind's schema. A record that fails the schema is a loader error shown on the panel.
-- Backends add fields through `extra`. The view can show them as optional columns, but nothing in the kind depends on them.
+**Issue records.** These are the normative shapes. Their JSON Schemas ship in the kind files.
+- `IssueRef { backend: string, scope: string, id: string }`.
+  - `backend` is the service (`github`, `jira`, `linear`, ...).
+  - `scope` is the group instance's identity for it: `owner/name` for GitHub, the site and project for Jira, the workspace and team for Linear.
+  - `id` is the service's own key (`123`, `PROJ-45`, `LIN-7`).
+  - The three together are globally unique.
+- `IssueRow` has these fields:
+  - `ref`, `title`, `state`, `native_state` and `url`, all required;
+  - `assignees` and `labels`, both string lists, required (an empty list is allowed);
+  - `updated_at`, an RFC 3339 time, required;
+  - `extra`, an optional object.
+- `IssueDetail { row: IssueRow, body_markdown: string, comments: [{ author, created_at, body_markdown }], links: [{ kind: "pr" | "issue" | "url", label, url }] }`. `comments` and `links` are required (empty allowed).
+- Unknown top-level fields are refused. Anything backend-specific goes in `extra`, which the view can show as optional columns. A column bound to an absent `extra` field shows blank.
+- The loader converts rich text to Markdown. Jira's format, for example, never reaches the client.
+
+**State normalization.** The loader maps each service's state into `Open`, `InProgress` or `Closed`, and keeps the original in `native_state`.
+
+| Service | `Open` | `InProgress` | `Closed` |
+| --- | --- | --- | --- |
+| GitHub issues | open | (none; a label is not a state) | closed (completed or not planned) |
+| Jira | status category To Do | status category In Progress | status category Done |
+| Linear | backlog, unstarted, triage | started | completed, canceled |
+
+A cancelled, duplicate or won't-do outcome stays in `native_state` (and `extra` if needed). The three normalized states don't grow.
+
 - A space may hold issue lists from several backends. Each is its own group instance with its own selection. Merging them into one list is a later feature.
 
-**Kits**
+**The view language**
 
-- A kit is a named bundle of kinds and groups for one way of working, installed into a host's libraries. Examples:
-  - a `developer` kit: issue, PR, checks and diff kinds, with GitHub, Linear, Jira and Trellis groups;
-  - a `marketing` kit: design-file, doc-page and asset kinds, with Figma and Notion groups.
-- Kits are files only. Installing, swapping or removing one never needs a new build of the app or the daemon.
-- Two kits may both provide a kind with the same ID only if their `kind.json` files are identical. Otherwise installing the second is refused and names both, so groups from different kits never disagree on a shared kind.
+A view is a JSON tree of built-in nodes, rendered by the client's React components. It describes what to draw and how to react. It never runs code: every behaviour is a typed, declarative property, implemented once in the client. That is what lets a kind be files only.
+
+*Nodes*
+
+| Group | Nodes |
+| --- | --- |
+| Layout | `stack` (vertical), `row` (horizontal), `section` (titled, collapsible), `tabs`, `empty` (shown when there's no data or no selection) |
+| Data | `fields` (label → value pairs), `table`, `list` (an item template repeated per record), `markdown`, `diff`, `chart`, `log` |
+| Pieces | `text`, `badge` (value → tone mapping), `chips` (a string list), `time` (absolute or relative), `link`, `avatar`, `image` (data URLs or approved hosts only) |
+
+*Bindings*
+- Values are JSON pointers into the record (`/title`, `/ref/id`), or small templates (`"{/ref/id} · {/native_state}"`). There is no expression language beyond pointer substitution, defaults (`{/extra/priority|none}`) and the formatters `time`, `relative`, `number`, `bytes`, `join` and `truncate`.
+- A list or table iterates records. Inside an item template, pointers are relative to that item.
+
+*Actions* (`on: { click, double_click, context_menu, key: { "Enter": ... } }`)
+
+An action is one of a closed set:
+- `select { value: <pointer> }`: sets the kind's selection key. It is validated by the selection contract.
+- `open_url { url: <pointer> }`: opened by the host in the system browser. The webview never navigates.
+- `set_state { key, value }`: view-local state, per client. Examples: expanding a row, switching a tab.
+- `refresh`: requests a new run of this panel. It is subject to the refresh policy.
+- `copy { value }`: copies to the clipboard.
+- `emit { event, value }`: a group event that other panels in the same group instance can use as an `OnEvent` trigger.
+
+Several actions can be listed in order. Unknown action types are a validation error.
+
+*Visibility actions* (`on: { appear, disappear }`)
+- Backed by IntersectionObserver, with `threshold` (the visible fraction, default 0.5) and `dwell_ms` (default 0).
+- They fire once per appearance and are debounced while scrolling.
+- Uses: lazy-loading a section, marking an item seen through `emit`, and loading the next page at a list's end.
+
+*Collections* (`table` and `list`)
+- **Keyboard:**
+  - roving focus with Up, Down, Home, End, Page Up and Page Down;
+  - type-ahead on the first text column;
+  - Enter runs `on.click`;
+  - Escape clears the selection.
+- **Selection:** the selected item is kept scrolled into view, including after a refresh or a new page.
+- **Virtualization:** rows are virtualized, so a list stays fast at thousands of records.
+- **Persistence:** scroll position and focused item are per-client view state, so they survive space switches and restarts (`ClientSpaceState.group_state`).
+- **Sorting and filtering:** `table` columns can declare them. They act on the loaded pages only, and the panel says so when more pages exist.
+- **Pagination UI:** `paging: "button"` shows "Load more". `paging: "infinite"` puts an `appear` sentinel at the end that loads the next page.
+
+*Animation* (`animate: { enter, exit, change }`)
+- Named transitions only: `fade`, `slide-up`, `slide-down`, `expand` and `highlight`. `highlight` flashes a value that changed on refresh.
+- They are applied with CSS classes from the app's own stylesheet, so they work under the strict CSP.
+- With `prefers-reduced-motion`, they become instant.
+
+*Timers*
+- `time` nodes in `relative` mode tick on a shared client clock: every second under a minute, then every minute.
+- `timer { every_ms, do: <action> }` and `countdown { until: <pointer>, then: <action> }` are client-side only:
+  - They pause while the panel is hidden.
+  - They can't fire faster than once a second.
+  - A `refresh` they trigger is still limited by the panel's refresh policy (minimum 10 s).
+- Notices can auto-dismiss after `dismiss_after_ms`.
+
+*Tooltips* (`tooltip: <template>` on any node)
+- They show on hover after a short delay, and on keyboard focus, so they are accessible.
+- They are text only and not interactive. Truncated cells show their full value as a tooltip by default.
+
+*Theming*
+- Nodes take semantic tones (`neutral`, `info`, `success`, `warning`, `danger`, `muted`), not colours. Tones map to the app's CSS variables, so light and dark themes come for free.
+- A view can't set arbitrary colours or fonts.
+
+*Fallbacks*, for layouts the view language can't express:
+1. **Template:** `view.html`, a logic-less (Mustache-style) template filled from the record by the client.
+   - The result is sanitized with DOMPurify and has no scripts.
+   - Interactivity comes from `data-action` attributes that map to the same closed action set.
+   - It needs no approval.
+2. **CustomHtml:** HTML and JS in a sandboxed iframe (see Security model). It talks to the host only by `postMessage`, through a small SDK: `combine.data`, `combine.select(value)` and `combine.theme`. It is repo-origin code, so it needs trust approval like a loader.
+
+Adding a node type, action or animation is a client change. The set is meant to stay small and grow from real kinds. A richer declarative card format, such as DivKit (spiked 2026-11-22), is a possible later node type if card-heavy kinds need it.
 
 **Panel groups**
 
-- A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks, diff, issue list and issue detail. Each template names the `KindId` it fills, and the kind must be in the host's kind library.
+- A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks, diff, issue list and issue detail. Each template names the `KindId` it fills, and the kind must be in the host's kind library. The group's params supply the `scope` of the references it produces.
 - Issue backends are groups that fill the same issue kinds:
   - `groups/github/` fills them with the `gh-issues` and `gh-issue` CLI entries.
   - `groups/jira/` fills them through an approved Jira MCP server.
@@ -584,7 +690,7 @@ The starter kinds, which ship as files in the developer kit:
 
   Adding another service means writing a group whose loaders map that service's data into the kind schema. Neither the client nor the daemon changes.
 - A space instantiates a group with params; the instance is one entry in `layout.json` plus its panels. The `trellis` space might hold a GitHub group for `SquashMerge/trellis` and a Trellis group for its index.
-- Group state holds the selection and is per client. It is a map from selection keys to JSON values, and the keys are named by the kinds (`selects` and `reads`), never by code. Clicking a row in the PR list sets `selected_pr` for that client, and clicking an issue sets `selected_issue`. Every panel whose params bind to that selection reloads for that client.
+- Group state holds the selection and is per client. It is a map from selection keys to JSON values. The keys are named by the kinds' selection contracts, never by code. Clicking a row in the PR list sets `selected_pr` for that client, and clicking an issue sets `selected_issue`. Every panel whose params bind to that selection reloads for that client.
 - By default a group opens as one tile with its panels as tabs; panels can be split out and stay in the group.
 - Agents can create group definitions and instances through MCP tools or by writing the files directly.
 
@@ -634,8 +740,13 @@ The daemon discovers the MCP servers the host's agents have, but treats each one
 - Stored in the host's `settings.json`, optionally narrowed per project. It never lives in the repo, so a repo can't widen its own allowlist.
 - Each entry names a command, fixed args, the args a loader may set with a type or pattern each, the output format, and the env it runs with.
   - `gh-prs = gh pr list --json number,title,author,state --repo {repo}`, with `repo` matching `owner/name`.
-  - `gh-issues = gh issue list --json number,title,state,assignees,labels,updatedAt,url --repo {repo}`.
-  - `gh-issue = gh issue view {number} --json number,title,state,assignees,labels,updatedAt,url,body,comments --repo {repo}`, with `number` a positive integer.
+  - `gh-issues = gh issue list --json number,title,state,assignees,labels,updatedAt,url --repo {repo} --state {state} --limit {limit}`, with:
+    - `repo` matching `owner/name`;
+    - `state` one of `open`, `closed` or `all`;
+    - `limit` an integer from 1 to 200.
+
+    `gh issue list` has no cursor, so this group pages by raising `limit` (the loader's `next_cursor` is the next limit) up to 200, and says when more exist.
+  - `gh-issue = gh issue view {number} --json number,title,state,assignees,labels,updatedAt,url,body,comments --repo {repo}`, with `number` a positive integer and `repo` matching `owner/name`.
 
 **Refresh and cache**
 
@@ -753,14 +864,22 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 - **MCP server (for agents):** a Unix socket with user-only permissions. Its tools change panels and run loaders in the sandbox. Through loaders and `run_loader` they can cause approved CLIs and MCP tools to run, never anything else.
 - **Loaders:** an isolate with no filesystem, network or process access. All I/O goes through `ctx`, which enforces the CLI allowlist, approved MCP servers and tools, and file containment. Time and memory limits apply.
 - **Authorization per source:** every CLI entry, MCP server launch definition and MCP tool is approved individually in `settings.json`, with typed args, a fixed cwd and env. Avoiding shell interpolation prevents injection; approval is what keeps commands safe.
-- **Repo-origin trust:** nothing from a repo runs until the user approves it. The daemon builds a normalized **execution manifest** per panel: its spawn spec, declared sources, loader bytes, every group `lib.js` and definition it imports, its params and group params, and which group state its params may bind. Approval is a hash of that manifest.
+- **Repo-origin trust:** nothing from a repo runs until the user approves it. The daemon builds a normalized **execution manifest** per panel. Approval is a hash of that manifest, which contains:
+  - its spawn spec and declared sources;
+  - its loader bytes, and every group `lib.js` and definition it imports;
+  - its CustomHtml bytes, if it has any;
+  - its params and group params;
+  - which group state its params may bind, including its kind's `selection` and `paging`.
+
+  A kind's `view`, and Template views, are presentation and stay outside the manifest.
     - Any change to the manifest suspends that panel until re-approved, so a changed `lib.js` suspends every loader that imports it. Moving a tile, renaming a panel or editing a title is outside the manifest and needs no approval.
     - Interactive selection within approved bindings (choosing PR 456 instead of 123) needs no approval; a change that widens access (a different repo param, a new source) does.
     - The daemon runs the exact bytes it approved: it keeps the approved copy in memory and refuses to run if the file on disk no longer matches.
     - Changes written through the MCP tools by a local agent need no prompt.
 - **File containment:** `files.read` and `File` sources resolve paths with symlinks followed and refuse anything outside the project root, plus `.git/` and files over 10 MB.
 - **Webview:** Tauri capabilities limit IPC to the app's own commands; no shell or filesystem plugin is exposed to the frontend.
-- **CustomHtml:** `<iframe sandbox="allow-scripts">` without `allow-same-origin`, a strict CSP with no network, data only via `postMessage`.
+- **Views:** the view language and Template views run no code. Templates are sanitized with DOMPurify. Images load only from data URLs or approved hosts. Links open in the system browser.
+- **CustomHtml:** `<iframe sandbox="allow-scripts">` without `allow-same-origin`, a strict CSP with no network, data only via `postMessage`, and trust approval as repo-origin code.
 - **SVG and Markdown:** always sanitized with DOMPurify before insertion, whatever Pele escapes itself.
 - **Audit:** every panel records which slot created it, and the panel header shows it.
 
@@ -815,7 +934,7 @@ app/
   web/                              TypeScript frontend (package.json)
     src/main.ts, src/shell/         rail, navigator, palette, layout
     src/panels/                     panel host: lifetime, attach, data delivery
-    src/renderers/                  terminal, Mermaid, Markdown, table, chart, log, CustomHtml
+    src/renderers/                  view language, terminal, Mermaid, Markdown, table, diff, chart, log, Template, CustomHtml
     src/ipc/                        the only code that calls Tauri
     src/model/                      shared types
     test/
@@ -863,14 +982,14 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 0. **M0: Terminal fidelity spike. Done 2026-11-20** (`spike/m0/FINDINGS.md`): go for the opaque relay with paired viewers; first-paint losses decided above. Moved to M1: local-network latency, a visual xterm.js client, the crash path. The `show_diagram` repair loop is M2's done criterion. Original scope: one daemon, one herdr-core terminal, one xterm.js client over SSH on the local network. Prove: `attach` with no lost or duplicated output across hide/show and reconnect during heavy output; a full-screen TUI and alternate screen; resize; two clients attached; attaching to a full-screen program started before the daemon; a daemon restart and a herdr-core `server.restart` while it runs; an `hc attach` alongside; keystroke latency. Then a real agent calls a minimal `show_diagram`, gets a validation error, and repairs the same panel; a restart restores layout and binding. Go/no-go: a fresh attach must restore screen, cursor, alternate screen and input modes from herdr-core's first paint (see Where the first paint comes from); a result that usually looks right doesn't pass. M0 also pins down herdr-core's frame encodings, credit units and whether the end of the first paint is visible, and confirms that no terminal query reaches xterm.js unanswered.
 1. **M1: Daemon, streaming terminals, hosts.** Daemon with the herdr-core adapter (paired viewers) over `terminal.attach` and `events.subscribe`, the fake backend and the contract test suite, a clean `trellis rules check`, the wire protocol (`combine-protocol`) with output batched per display frame, SSH bridge and host IDs, client with a rail across hosts, terminal panels, navigator, palette, per-client state, ownership protocol, layouts in `.workspace/` with the conflict policy, and the minimum trust gate: a layout's spawn templates don't run until approved. Done when a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts, and keystroke echo over the local network stays within the latency budget.
 2. **M2: Agent-built diagrams.** MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation. Done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.
-3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` and Jira data shows live and survives a daemon restart.
-4. **M4: Panel groups and kinds.** Group and kind libraries, kits, params, and per-client selection. It ships the developer kit, with the issue and PR kinds and a GitHub group as the first template, with PR and issue panels. A second issue backend (Jira or Linear) fills the same issue kinds. Done when:
+3. **M3: Loaders and data panels.** JS isolate with the `ctx` API, CLI allowlist, MCP server proposals and approvals, Table / Chart / Log renderers, refresh policies, cache freshness and deduplication, run generations, full dependency-set trust, limits and scheduling. Done when a loader correlating `gh` data with an approved issue service's data (Jira or Linear) shows live and survives a daemon restart.
+4. **M4: Panel groups, kinds and the view language.** Group and kind libraries, params, per-client selection, the view language (nodes, actions, visibility actions, collections and paging, animation, timers, tooltips), and the starter issue and PR kinds. A GitHub group is the first template, with PR and issue panels. A second issue backend (Jira or Linear) fills the same issue kinds. Done when:
    - clicking a PR in the list updates its detail, checks and diff panels;
    - clicking an issue updates its issue detail panel;
    - the same issue panels show GitHub issues and the second backend's issues;
-   - a new kind added to a host as files only (no build of the app or the daemon) renders and selects correctly.
+   - a new kind added to a host as files only (no build of the app or the daemon) renders, pages and selects correctly.
 5. **M5: Rex adapter (after v1).** Passes the shared contract tests. The goal is no changes outside the adapter; any trait change it needs is reviewed as a design change. Rex spaces appear on the rail. Requires the `rex` CLI.
-6. **M6: Polish.** CustomHtml sandbox, `push_panel_data`, and after M5, attention badges from Rex output heuristics.
+6. **M6: Polish.** Template views and the CustomHtml sandbox, `push_panel_data`, and after M5, attention badges from Rex output heuristics.
 
 ## Open questions
 
@@ -896,8 +1015,8 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 - [ ] Which second issue backend ships in M4, Jira or Linear? It depends on which approved MCP server is available on the hosts.
 - [ ] Should a space be able to show one merged issue list across backends, with one selection? It is out of scope for M4.
-- [ ] How expressive must a kind's `view` be before a kind needs its own renderer? The rule so far is that kinds compose built-in renderers only, and anything more is CustomHtml.
-- [ ] Are kits per host, or synced between hosts? This goes with the group-library question below.
+- [ ] Which view-language nodes and actions do the first non-developer kinds (Figma files, Notion pages) need beyond the starter set? Is a richer card format, such as DivKit, worth adding as a node type? The 2026-11-22 spike found it workable but costly: about 130 KB gzip, a second UI runtime, and a CSP patch.
+- [ ] Is the kind library per host, or synced between hosts? This goes with the group-library question below.
 
 **From rev 2**
 
