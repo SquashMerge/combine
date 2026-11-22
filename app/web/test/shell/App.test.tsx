@@ -5,6 +5,7 @@ import type { DecimalU64, HostId, TermId } from '../../src/model/ids';
 import type { HostsPort } from '../../src/ipc/port';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
+import { DeferredClientStatePort } from '../support/deferredClientStatePort';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
 
@@ -210,6 +211,118 @@ describe('App', () => {
       });
       expect(clientStatePort.writes[2]).toMatchObject({ kind: 'last', selectedAtMs: '1002' });
       expect(document.querySelector('[data-term-id="t4"][aria-current="true"]')).not.toBeNull();
+    });
+
+    describe('with loads that settle separately', () => {
+      const macState = saved('/src/alpha', '5', 't2');
+      const miniState = saved('/src/mimir', '9', 't4');
+      const settleTask = () => act(async () => new Promise((done) => setTimeout(done, 0)));
+
+      async function mountDeferred(now?: () => number) {
+        const hosts = new MemoryHostsPort(sample());
+        const port = new DeferredClientStatePort();
+        render(<App port={hosts} clientStatePort={port} {...(now ? { now } : {})} />);
+        await screen.findByRole('navigation', { name: 'Spaces' });
+        await act(async () => {});
+        return { hosts, port };
+      }
+
+      it('loads each host once across several snapshots', async () => {
+        const { hosts, port } = await mountDeferred();
+        act(() => hosts.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+        act(() => hosts.setConnection('mac', connected));
+        await act(async () => port.resolve(HOST_A, macState));
+        act(() => hosts.setConnection('mini', { kind: 'reconnecting', attempt: 1 }));
+        await settleTask();
+        expect([...port.loads].sort()).toEqual([HOST_A, HOST_B].sort());
+      });
+
+      it('keeps a load that is pending when a new snapshot arrives', async () => {
+        const { hosts, port } = await mountDeferred();
+        act(() => hosts.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+        await act(async () => port.resolve(HOST_A, macState));
+        await act(async () => port.resolve(HOST_B, miniState));
+        await waitFor(() => expect(current()[0]?.textContent).toBe('mimir'));
+        expect(document.querySelector('[data-term-id="t4"][aria-current="true"]')).not.toBeNull();
+        expect(port.loads).toHaveLength(2);
+        expect(port.writes).toEqual([]);
+      });
+
+      it('shows the alert for an invalid file that settles after a new snapshot, with no writes', async () => {
+        const { hosts, port } = await mountDeferred();
+        act(() => hosts.setConnection('mini', { kind: 'reconnecting', attempt: 1 }));
+        await act(async () => port.resolve(HOST_A, defaultClientState('bad file')));
+        await act(async () => port.resolve(HOST_B, defaultClientState()));
+        expect((await screen.findByRole('alert')).textContent).toContain('Client state for mac: bad file');
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        await settleTask();
+        expect(port.writes).toEqual([]);
+      });
+
+      it.each([
+        ['older host first', HOST_A, macState, HOST_B, miniState],
+        ['newer host first', HOST_B, miniState, HOST_A, macState],
+      ] as const)('newest last space wins when the %s settles first', async (_name, first, firstState, second, secondState) => {
+        const { port } = await mountDeferred();
+        await act(async () => port.resolve(first, firstState));
+        await settleTask();
+        expect(current()).toHaveLength(0);
+        await act(async () => port.resolve(second, secondState));
+        await waitFor(() => expect(current()[0]?.textContent).toBe('mimir'));
+      });
+
+      it('a rejected load shows the banner, uses defaults and writes nothing', async () => {
+        const { port } = await mountDeferred();
+        await act(async () => port.reject(HOST_A, 'ipc exploded'));
+        await act(async () => port.resolve(HOST_B, defaultClientState()));
+        expect((await screen.findByRole('alert')).textContent).toContain('Client state for mac: ipc exploded');
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        await settleTask();
+        expect(current()[0]?.textContent).toBe('alpha');
+        expect(port.writes).toEqual([]);
+      });
+
+      it('a selection before the host settles writes nothing until it does, then keeps the choice', async () => {
+        let tick = 0;
+        const { port } = await mountDeferred(() => ++tick);
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        fireEvent.click(document.querySelector('[data-term-id="t1"] button') as Element);
+        expect(port.writes).toEqual([]);
+        expect(document.querySelector('[data-term-id="t1"][aria-current="true"]')).not.toBeNull();
+        const stored = {
+          ...saved('/src/alpha', '1', 't2'),
+          spaces: {
+            '/src/alpha': {
+              spaceId: '/src/alpha',
+              focusedTile: 'tile',
+              activeTerminal: 't2' as TermId,
+              activeTabs: { tile: 'p1' },
+              groupState: { keep: true },
+            },
+          },
+        };
+        await act(async () => port.resolve(HOST_A, stored));
+        await settleTask();
+        expect(document.querySelector('[data-term-id="t1"][aria-current="true"]')).not.toBeNull();
+        expect(port.writes.find((write) => write.kind === 'space')).toMatchObject({
+          kind: 'space',
+          path: '/src/alpha',
+          state: { focusedTile: 'tile', activeTabs: { tile: 'p1' }, groupState: { keep: true }, activeTerminal: 't1' },
+        });
+        expect(port.writes.filter((write) => write.kind === 'last')).toHaveLength(2);
+      });
+
+      it('shows a failed write, and clears it after a later write succeeds', async () => {
+        const { port } = await mountDeferred();
+        await act(async () => port.resolve(HOST_A, defaultClientState()));
+        await act(async () => port.resolve(HOST_B, defaultClientState()));
+        port.failWrites = new Error('disk full');
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        expect((await screen.findByRole('alert')).textContent).toContain('Cannot save client state for mac: disk full');
+        port.failWrites = null;
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+      });
     });
   });
 });
