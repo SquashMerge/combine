@@ -210,12 +210,12 @@ fn tick_leaves_no_deadline_at_or_before_now() {
         .next_deadline()
         .is_none_or(|deadline| deadline > now));
     sim.mutate(alternate(1), Millis(600)).unwrap();
-    sim.layouts.tick(Millis(1_100));
+    sim.layouts.tick(Millis(1_200));
     sim.layouts.take_effects();
     assert!(sim
         .layouts
         .next_deadline()
-        .is_none_or(|deadline| deadline > Millis(1_100)));
+        .is_none_or(|deadline| deadline > Millis(1_200)));
 }
 
 #[test]
@@ -452,38 +452,62 @@ fn reapply_invalid_result_drops() {
 #[test]
 fn rebase_recomputes_touched_and_origins() {
     let mut sim = Sim::open(&two_tiles());
-    sim.mutate(
-        vec![
-            LayoutOp::SplitTile {
-                tile: t("a"),
-                dir: combined::model::SplitDir::V,
-                new_tile: t("c"),
-                ratio: 0.5,
-                panel: None,
-            },
-            set_ratio(&["a", "b", "c"], 0.4),
-        ],
-        Millis(0),
-    )
-    .unwrap();
-    // A disjoint outside edit: only b's active panel changes.
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    // A disjoint outside edit that changes structure: b splits into {b, d}.
     let outside = layout(split(
         0.5,
         tile("a", &["p1", "p2", "p3"], Some("p2")),
-        tile("b", &["p4", "p5"], Some("p4")),
+        split(0.5, tile("b", &["p4"], Some("p4")), tile("d", &[], None)),
     ));
     sim.outside_write(bytes_of(&outside), Millis(10));
     assert_eq!(sim.layouts.status(&space("main")).unwrap().dropped, None);
 
-    // The origin map was rebuilt, so the split keeps its origin {a, b}.
-    sim.mutate(vec![set_ratio(&["a", "b", "c"], 0.35)], Millis(20))
+    // The origins were rebuilt for the new tree, so this ratio is keyed by the root's origin.
+    sim.mutate(vec![set_ratio(&["a", "b", "d"], 0.4)], Millis(20))
         .unwrap();
     sim.outside_write(bytes_of(&with_ratio(&outside, 0.7)), Millis(30));
 
-    let dropped = sim.layouts.status(&space("main")).unwrap().dropped.unwrap();
-    let key = SplitKey([t("a"), t("b")].into_iter().collect());
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(root_ratio(&status.layout), 0.7);
+    let key = SplitKey([t("a"), t("b"), t("d")].into_iter().collect());
+    let dropped = status.dropped.unwrap();
     assert!(dropped.fields.contains(&FieldPath::Ratio(key)));
-    assert_eq!(dropped.op_count, 3);
+    assert_eq!(dropped.op_count, 2);
+}
+
+#[test]
+fn write_ack_retires_only_the_ops_it_carried() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.layouts.tick(Millis(500));
+    let effects = sim.layouts.take_effects();
+    let [LayoutEffect::Write {
+        space: written,
+        bytes,
+        op_count: 1,
+    }] = effects.as_slice()
+    else {
+        panic!("expected one write of one op, got {effects:?}");
+    };
+    sim.mutate(vec![set_active("a", "p1")], Millis(600))
+        .unwrap();
+
+    sim.layouts.apply_write(
+        written,
+        LayoutWritten::Ok {
+            hash: hash(bytes),
+            read_only: false,
+        },
+        Millis(700),
+    );
+
+    assert_eq!(active_of(&sim.current("main"), "a").as_deref(), Some("p1"));
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(1_200)));
+    sim.layouts.tick(Millis(1_200));
+    assert_eq!(
+        write_effects(&sim.layouts.take_effects()),
+        [("main".to_string(), 1)]
+    );
 }
 
 fn three_tiles_closable() -> SpaceLayout {
