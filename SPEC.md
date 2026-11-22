@@ -237,7 +237,8 @@ SpaceBinding  { space_id, slots: Map<slot, TermId>, trust: TrustRecord, file_has
 // Per-client state: <client data>/hosts/<host-id>.json
 ClientSpaceState { space_id, focused_tile: TileId, active_terminal: slot,
                    active_tabs: Map<TileId, PanelId>,                     // overrides Tile.active
-                   group_state: Map<GroupInstanceId, Map<String, Value>> }   // selection keys named by kinds, e.g. selected_issue
+                   group_state: Map<GroupInstanceId, Map<String, Value>>,   // selection keys named by kinds, e.g. selected_issue
+                   view_state: Map<PanelId, Map<String, Value>> }            // scroll, focus, set_state; never reloads loaders
 ```
 
 **Who owns which state**
@@ -587,17 +588,28 @@ A panel kind is a data contract that several services can fill. The kind fixes t
 - Values are compared, and enter cache keys, as canonical JSON: keys sorted, no insignificant whitespace, numbers in shortest form. So `{"id":"7","backend":"linear"}` equals `{"backend":"linear","id":"7"}`.
 - Kinds set or read only the keys they declare. Group state is per client and per group instance, as before.
 
-**Paging.** `paging: { "cursor": true }` makes the loader receive `ctx.page.cursor`, which is `null` for the first page. The loader returns `{ "records": [...], "next_cursor": <string or null> }` instead of a bare array.
-- The cursor is part of the run's effective input, so each page caches separately, and late pages are dropped by the generation rule.
-- The client appends pages in order and keeps the selection when a page loads.
-- A refresh reloads the first page and discards the rest.
+**Paging.** `paging: { "mode": "append" | "snapshot", "key": <pointer> }` makes the loader receive `ctx.page.cursor`, which is `null` for the first page. The loader returns `{ "records": [...], "next_cursor": <string or null>, "truncated": <bool> }` instead of a bare array.
+- **Append mode:** each page holds new records only, and the client appends them in order.
+- **Snapshot mode:** each result is the whole list so far, and the client replaces what it shows. This is for sources that can only return "the first N", like `gh issue list --limit`.
+- **Record identity:** in both modes, records are identified by `key`, a pointer to a stable identity such as `/ref`, compared as canonical JSON.
+  - A record whose key already appears is replaced in place, never duplicated. So a list that shifts between pages can't show an item twice.
+  - The selection is kept by key across pages and refreshes.
+- **Caching and staleness:** the cursor is part of the run's effective input, so each page caches separately, and late pages are dropped by the generation rule.
+- **Refresh:** a refresh reloads the first page and discards the rest.
+- **More than the source will return:** `truncated: true` says more records exist than the source can return. The panel shows "showing the first N" instead of offering more.
 
 **Validation pipeline.** It is the same for loader results, single-source data and static content:
 1. Validate each record against the kind's `record` schema.
 2. Bind the view: resolve its JSON pointers against the records.
 3. Check each node's input against that renderer's input contract.
 
-A failure at any step is an error on the panel, with the step and the JSON pointer. It is never a broken view. Steps 1 and 3 run in the daemon's isolate, because the daemon validates without a client attached. Step 2 runs in the client. The daemon's Rust code carries schemas and results only as opaque JSON.
+- **Kind is optional.** Step 1 runs only when the panel declares a kind. A panel that names a single renderer, such as a Mermaid diagram, has no record schema and starts at step 3.
+- **Errors.** A failure at any step is an error on the panel, with the step and the JSON pointer. It is never a broken view.
+- **Where each step runs.** All three steps run in the daemon's isolate, so validation works with no client attached. The client runs step 2 again to draw.
+- **One binder.** The isolate and the client run the same binder: one pure, generic implementation of pointer resolution, item contexts, defaults and formatters. It ships as a single TypeScript module, compiled for the isolate and imported by the client.
+  - A set of conformance fixtures pins its behaviour, so the two sides can't drift. Each fixture gives a view, records and the expected bound tree, and includes nested lists such as an issue's comments.
+- **Checking the view itself.** A kind's `view` (nodes, actions, bindings) is validated against the view-language schema in the isolate when the kind loads. An unknown node or action is a kind error.
+- **Rust stays opaque.** The daemon's Rust code carries schemas, views and results only as opaque JSON.
 
 **Kind changes.**
 - Editing a `kind.json` changes its content hash. Every panel using it re-validates its cached results and re-runs with the new hash in its effective input. The client receives the kind definition and the results together, tagged with that hash, so it never draws a result against a different definition.
@@ -652,7 +664,7 @@ A view is a JSON tree of built-in nodes, rendered by the client's React componen
 | --- | --- |
 | Layout | `stack` (vertical), `row` (horizontal), `section` (titled, collapsible), `tabs`, `empty` (shown when there's no data or no selection) |
 | Data | `fields` (label → value pairs), `table`, `list` (an item template repeated per record), `markdown`, `diff`, `chart`, `log` |
-| Pieces | `text`, `badge` (value → tone mapping), `chips` (a string list), `time` (absolute or relative), `link`, `avatar`, `image` (data URLs or approved hosts only) |
+| Pieces | `text`, `badge` (value → tone mapping), `chips` (a string list), `time` (absolute or relative), `link`, `avatar`, `image` (`data:` URLs only; see the action dispatcher) |
 
 *Bindings*
 - Values are JSON pointers into the record (`/title`, `/ref/id`), or small templates (`"{/ref/id} · {/native_state}"`). There is no expression language beyond pointer substitution, defaults (`{/extra/priority|none}`) and the formatters `time`, `relative`, `number`, `bytes`, `join` and `truncate`.
@@ -670,10 +682,38 @@ An action is one of a closed set:
 
 Several actions can be listed in order. Unknown action types are a validation error.
 
+*The action dispatcher* is the one boundary for effects. Built-in nodes, Template `data-action` attributes and the CustomHtml SDK all send actions through it. It runs in the client's trusted host code, outside any view.
+- **Arguments are checked at dispatch.** An action's arguments are validated when it is dispatched, not only when the view is checked.
+  - `select` values go through the selection contract.
+  - `set_state` writes only view-local state, a namespace separate from group selection (below).
+  - Bound strings are always text. A value can never become an action or markup.
+- **Which actions need a click or key.**
+
+  | Action | Allowed from |
+  |---|---|
+  | `open_url`, `copy`, `select` | A direct user gesture only: click, key or context menu |
+  | `set_state`, `emit`, `refresh` | Any trigger, including timers and visibility (see Scheduling) |
+
+  A timer, a countdown or a visibility trigger that names a gesture-only action is a validation error.
+- **What `open_url` accepts.** The host parses the URL and allows only `https:` and `http:`. Anything else is refused, including `javascript:`, `data:`, `file:` and other app schemes. The URL opens in the system browser, and the webview never navigates.
+- **Images.** The client never loads remote URLs. That keeps the webview's CSP at `img-src 'self' data:`, and applies the same rule to `image`, `avatar`, Templates, Markdown and SVG.
+  - A remote image reaches a panel only as a `data:` URL that its loader fetched through an approved source, such as an allowlisted CLI or an approved MCP tool.
+  - Templates, Markdown and SVG are sanitized with remote `src`, `srcset` and `href` resources removed. Their links go through `open_url`.
+
+*Scheduling of automatic triggers.* An action fired by a timer, a countdown or a visibility change is automatic, and so is anything it causes downstream: an `emit` that triggers an `OnEvent` panel, a `set_state`, a `refresh`. The daemon's scheduler keeps that provenance through every chain and admits automatic runs at one shared point:
+- An **Interval** panel runs no more often than its interval, whatever triggers it.
+- An **OnEvent** panel coalesces automatic events, and runs at most once per 10 s per (panel, client). Bursts collapse into one run, and repeated bursts back off. Events from a user gesture or an outside change, such as a file or backend event, are not limited this way.
+- A **Manual** panel never runs from an automatic trigger. Only a user gesture or an agent call runs it.
+- **The limits are aggregate.** They count every automatic trigger for that panel and client together, whatever timers, rows or panels produced them.
+- **Emit rate.** `emit` from automatic triggers is limited to 1/s per view.
+
+Views stay outside the execution manifest, because these rules bound what any view can cause, approved or not.
+
 *Visibility actions* (`on: { appear, disappear }`)
 - Backed by IntersectionObserver, with `threshold` (the visible fraction, default 0.5) and `dwell_ms` (default 0).
 - They fire once per appearance and are debounced while scrolling.
 - Uses: lazy-loading a section, marking an item seen through `emit`, and loading the next page at a list's end.
+- They can trigger only the actions that don't need a user gesture, and they are scheduled as automatic triggers.
 
 *Collections* (`table` and `list`)
 - **Keyboard:**
@@ -683,7 +723,7 @@ Several actions can be listed in order. Unknown action types are a validation er
   - Escape clears the selection.
 - **Selection:** the selected item is kept scrolled into view, including after a refresh or a new page.
 - **Virtualization:** rows are virtualized, so a list stays fast at thousands of records.
-- **Persistence:** scroll position and focused item are per-client view state, so they survive space switches and restarts (`ClientSpaceState.group_state`).
+- **Persistence:** scroll position, the focused item and `set_state` values are per-client view state, kept in `ClientSpaceState.view_state`, so they survive space switches and restarts. View state is a separate namespace from group selection. Writing it never reloads a loader.
 - **Sorting and filtering:** `table` columns can declare them. They act on the loaded pages only, and the panel says so when more pages exist.
 - **Pagination UI:** `paging: "button"` shows "Load more". `paging: "infinite"` puts an `appear` sentinel at the end that loads the next page.
 
@@ -697,7 +737,8 @@ Several actions can be listed in order. Unknown action types are a validation er
 - `timer { every_ms, do: <action> }` and `countdown { until: <pointer>, then: <action> }` are client-side only:
   - They pause while the panel is hidden.
   - They can't fire faster than once a second.
-  - A `refresh` they trigger is still limited by the panel's refresh policy (minimum 10 s).
+  - Whatever they cause is admitted under *Scheduling of automatic triggers* above.
+  - They can't open URLs, copy or select.
 - Notices can auto-dismiss after `dismiss_after_ms`.
 
 *Tooltips* (`tooltip: <template>` on any node)
@@ -711,9 +752,9 @@ Several actions can be listed in order. Unknown action types are a validation er
 *Fallbacks*, for layouts the view language can't express:
 1. **Template:** `view.html`, a logic-less (Mustache-style) template filled from the record by the client.
    - The result is sanitized with DOMPurify and has no scripts.
-   - Interactivity comes from `data-action` attributes that map to the same closed action set.
+   - Interactivity comes from `data-action` attributes, which go through the action dispatcher like any node's actions, with the same argument checks and gesture rules.
    - It needs no approval.
-2. **CustomHtml:** HTML and JS in a sandboxed iframe (see Security model). It talks to the host only by `postMessage`, through a small SDK: `combine.data`, `combine.select(value)` and `combine.theme`. It is repo-origin code, so it needs trust approval like a loader.
+2. **CustomHtml:** HTML and JS in a sandboxed iframe (see Security model). It talks to the host only by `postMessage`, through a small SDK: `combine.data`, `combine.select(value)`, `combine.action(...)` and `combine.theme`. Messages are accepted only from the panel's own frame. Each request goes through the same action dispatcher, with the same argument checks and gesture rules. It is repo-origin code, so it needs trust approval like a loader.
 
 Adding a node type, action or animation is a client change. The set is meant to stay small and grow from real kinds. A richer declarative card format, such as DivKit (spiked 2026-11-22), is a possible later node type if card-heavy kinds need it.
 
@@ -782,7 +823,10 @@ The daemon discovers the MCP servers the host's agents have, but treats each one
     - `state` one of `open`, `closed` or `all`;
     - `limit` an integer from 1 to 200.
 
-    `gh issue list` has no cursor, so this group pages by raising `limit` (the loader's `next_cursor` is the next limit) up to 200, and says when more exist.
+    `gh issue list` has no cursor, so this group's issue list uses snapshot paging keyed by `/ref`.
+    - Each "load more" re-runs with a larger `limit`: 30, then 60, and so on up to 200. The loader's `next_cursor` is the next limit.
+    - The client replaces the list, so the first page is never duplicated.
+    - At 200 the loader returns `truncated: true` when the count reached the limit.
   - `gh-issue = gh issue view {number} --json number,title,state,assignees,labels,updatedAt,url,body,comments --repo {repo}`, with `number` a positive integer and `repo` matching `owner/name`.
 
 **Refresh and cache**
@@ -809,7 +853,8 @@ The coding agent already running in the space builds panels through the local da
 | Tool | Purpose | Returns |
 | --- | --- | --- |
 | `list_panels` | Panels and groups in the caller's space, with specs, revisions, states and last errors | Panel list |
-| `create_panel` | New panel: title, lifetime, renderer, loader code or sources, params, group, placement hint, idempotency key | Panel ID + revision + state |
+| `create_panel` | New panel: title, lifetime, `kind` or `renderer` (exactly one), loader code or sources, params, group, placement hint, idempotency key | Panel ID + revision + state |
+| `list_kinds` / `get_kind` | Installed kinds, and one kind's record schema, selection, paging and view | Kind list / kind definition |
 | `update_panel` | Change a panel's spec, loader or content | New revision + state |
 | `panel_status` | State of a panel at a revision | State + errors |
 | `remove_panel` | Close a panel | OK |
@@ -833,7 +878,7 @@ Tool descriptions state the rules: Mermaid 12.1.0 syntax, the renderer list and 
 
 ## Architecture
 
-The daemon on each host holds every outside connection and listens on nothing but a Unix socket; the client only draws, so agent-made panels can't reach any machine.
+The daemon on each host holds every outside connection and listens on nothing but a Unix socket; the client only draws, so agent-made panels can't reach any machine. The client's only outward effect is opening an `https:` or `http:` link in the system browser on a user's click. It loads no remote images or other resources.
 
 ```mermaid
 flowchart TB
@@ -915,7 +960,13 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
     - Changes written through the MCP tools by a local agent need no prompt.
 - **File containment:** `files.read` and `File` sources resolve paths with symlinks followed and refuse anything outside the project root, plus `.git/` and files over 10 MB.
 - **Webview:** Tauri capabilities limit IPC to the app's own commands; no shell or filesystem plugin is exposed to the frontend.
-- **Views:** the view language and Template views run no code. Templates are sanitized with DOMPurify. Images load only from data URLs or approved hosts. Links open in the system browser.
+- **Views:** the view language and Template views run no code. Every effect goes through the action dispatcher:
+  - external links accept `https:`/`http:` only, open on a user gesture only, and open in the system browser;
+  - clipboard writes and selections also need a user gesture;
+  - images are `data:` URLs only, so the CSP stays at `img-src 'self' data:`;
+  - automatic triggers are rate-limited at the scheduler.
+
+  Templates are sanitized with DOMPurify, with remote resources removed, and their `data-action` arguments are checked at dispatch.
 - **CustomHtml:** `<iframe sandbox="allow-scripts">` without `allow-same-origin`, a strict CSP with no network, data only via `postMessage`, and trust approval as repo-origin code.
 - **SVG and Markdown:** always sanitized with DOMPurify before insertion, whatever Pele escapes itself.
 - **Audit:** every panel records which slot created it, and the panel header shows it.
