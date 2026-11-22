@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
@@ -76,6 +76,20 @@ describe('TerminalNavigator', () => {
     const dim = (id: string) => navigator().querySelector(`[data-term-id="${id}"]`)?.getAttribute('data-dimmed');
     expect(dim('t1')).toBe('false');
     expect(dim('t4')).toBe('true');
+  });
+
+  it('prompts again when the selected space disappears', async () => {
+    const port = new MemoryHostsPort(sample());
+    render(<App port={port} />);
+    await screen.findByRole('navigation', { name: 'Spaces' });
+    fireEvent.click(spaceButton('mac', 'alpha'));
+    expect(navigator().querySelectorAll('li')).toHaveLength(2);
+    act(() =>
+      port.push(
+        snapshot([host('mac', HOST_A, connected, [space(HOST_A, '/src/zed', [terminal('t3', 'last')])])], '2'),
+      ),
+    );
+    expect(within(navigator()).getByText('Select a space to see its terminals.')).toBeTruthy();
   });
 
   it('shows No terminals when nothing remains', async () => {

@@ -21,6 +21,39 @@ describe('App', () => {
     expect(screen.getByRole('region', { name: 'r11' })).toBeTruthy();
   });
 
+  it('orders revisions above 2^53 exactly', async () => {
+    const port = new MemoryHostsPort(snapshot([host('a', null, connecting)], '9007199254740992'));
+    render(<App port={port} />);
+    await screen.findByRole('region', { name: 'a' });
+    act(() => port.push(snapshot([host('b', null, connecting)], '9007199254740993')));
+    expect(screen.getByRole('region', { name: 'b' })).toBeTruthy();
+    act(() => port.push(snapshot([host('c', null, connecting)], '9007199254740992')));
+    expect(screen.queryByRole('region', { name: 'c' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'b' })).toBeTruthy();
+  });
+
+  it('subscribes before it fetches, so a snapshot pushed in between is kept', async () => {
+    const calls: string[] = [];
+    const inner = new MemoryHostsPort(snapshot([host('old', null, connecting)], '1'));
+    const port: HostsPort = {
+      onSnapshot: async (listener) => {
+        calls.push('subscribe');
+        const stop = await inner.onSnapshot(listener);
+        inner.push(snapshot([host('pushed', null, connecting)], '5'));
+        return stop;
+      },
+      getSnapshot: () => {
+        calls.push('get');
+        return Promise.resolve(snapshot([host('stale', null, connecting)], '3'));
+      },
+      retryHost: () => Promise.resolve(),
+    };
+    render(<App port={port} />);
+    await screen.findByRole('region', { name: 'pushed' });
+    expect(calls).toEqual(['subscribe', 'get']);
+    expect(screen.queryByRole('region', { name: 'stale' })).toBeNull();
+  });
+
   it('unsubscribes on unmount', async () => {
     const port = new MemoryHostsPort(snapshot([host('a', null, connecting)]));
     const view = render(<App port={port} />);
