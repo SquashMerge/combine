@@ -5,7 +5,8 @@
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -25,6 +26,7 @@ const MAX_DESTINATION_BYTES: usize = 255;
 const MAX_COMBINED_PATH_BYTES: usize = 1024;
 const TEMP_PREFIX: &str = ".hosts.json.";
 const MAX_TEMP_ATTEMPTS: u64 = 16;
+const MAX_LOCK_ATTEMPTS: u32 = 8;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -328,12 +330,32 @@ impl HostsStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn read_current(&self) -> Result<Vec<u8>, StoreError> {
-        match fs::read(&self.path) {
-            Ok(bytes) => Ok(bytes),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(StoreError::Io(e.to_string())),
+    /// Takes an exclusive advisory lock on `hosts.json` itself, so concurrent store instances
+    /// and processes serialize their whole read-compare-write. The file is opened read-only and
+    /// never created: `None` means it does not exist. A writer renames a new file over the old
+    /// one, so after locking, the handle must still be the file at the path; otherwise it is
+    /// released and the lock is retaken on the new file.
+    fn lock_file(&self) -> Result<Option<fs::File>, StoreError> {
+        for _ in 0..MAX_LOCK_ATTEMPTS {
+            let file = match fs::File::open(&self.path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(StoreError::Io(e.to_string())),
+            };
+            file.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+            let held = file.metadata().map_err(|e| StoreError::Io(e.to_string()))?;
+            match fs::metadata(&self.path) {
+                Ok(at_path) if (at_path.dev(), at_path.ino()) == (held.dev(), held.ino()) => {
+                    return Ok(Some(file))
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e.to_string())),
+            }
         }
+        Err(StoreError::Io(
+            "hosts.json kept being replaced while locking it".to_string(),
+        ))
     }
 
     fn temp_path(&self, n: u64) -> PathBuf {
@@ -400,8 +422,14 @@ impl HostIdStore for HostsStore {
         let StoreState::Loaded { bytes: loaded } = &*state else {
             return Err(StoreError::Invalid);
         };
-        let current = self.read_current()?;
-        if current != *loaded {
+        let loaded = loaded.clone();
+        let lock = self.lock_file()?;
+        let mut current = Vec::new();
+        if let Some(mut file) = lock.as_ref() {
+            file.read_to_end(&mut current)
+                .map_err(|e| StoreError::Io(e.to_string()))?;
+        }
+        if current != loaded {
             return Err(StoreError::ChangedOnDisk);
         }
         if current.is_empty() {
@@ -429,6 +457,7 @@ impl HostIdStore for HostsStore {
             serde_json::to_vec_pretty(&file).map_err(|e| StoreError::Io(e.to_string()))?;
         out.push(b'\n');
         self.write_safely(&out)?;
+        drop(lock);
         *state = StoreState::Loaded { bytes: out };
         Ok(())
     }
@@ -912,6 +941,45 @@ mod tests {
             .expect("recorded");
         let mode = fs::metadata(dir.file()).expect("meta").permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn concurrent_store_instances_never_lose_a_record() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for round in 0..60 {
+            let dir = TestDir::new();
+            fs::write(dir.file(), TWO_HOSTS).expect("write");
+            let (first, _) = HostsStore::load(dir.file());
+            let (second, _) = HostsStore::load(dir.file());
+            let barrier = Barrier::new(2);
+            let (a, b) = thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    barrier.wait();
+                    first.record_first_contact("mini", &id(ID_A))
+                });
+                let b = scope.spawn(|| {
+                    barrier.wait();
+                    second.record_first_contact("spare", &id(ID_B))
+                });
+                (a.join().expect("thread a"), b.join().expect("thread b"))
+            });
+            let file: HostsFileV1 =
+                serde_json::from_slice(&fs::read(dir.file()).expect("read")).expect("valid json");
+            let recorded: Vec<Option<&str>> =
+                file.hosts.iter().map(|h| h.host_id.as_deref()).collect();
+            match (a, b) {
+                (Ok(()), Err(StoreError::ChangedOnDisk)) => {
+                    assert_eq!(recorded, [Some(ID_A), None], "round {round}")
+                }
+                (Err(StoreError::ChangedOnDisk), Ok(())) => {
+                    assert_eq!(recorded, [None, Some(ID_B)], "round {round}")
+                }
+                other => panic!("round {round}: unexpected outcomes {other:?}"),
+            }
+            assert!(temp_leftovers(&dir).is_empty(), "round {round}");
+        }
     }
 
     #[test]
