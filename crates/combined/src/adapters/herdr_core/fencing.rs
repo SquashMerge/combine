@@ -41,7 +41,7 @@ struct Queued {
 
 /// A size and display: what was asked for, or what the pair's active viewer was last given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Facts {
+pub(super) struct ViewerSettings {
     pub size: (u16, u16),
     pub display: Display,
 }
@@ -78,15 +78,15 @@ pub(super) struct Fence {
     pub automatic: bool,
     /// The backend generation of the current pair.
     pub generation: u64,
-    pub requested: Facts,
-    pub sent: Facts,
+    pub requested: ViewerSettings,
+    pub sent: ViewerSettings,
     queue: VecDeque<Queued>,
     queued_input: usize,
     queued_frames: usize,
 }
 
 impl Fence {
-    pub(super) fn new(watch_only: bool, requested: Facts) -> Self {
+    pub(super) fn new(watch_only: bool, requested: ViewerSettings) -> Self {
         Fence {
             phase: Phase::Ready,
             watch_only,
@@ -291,7 +291,7 @@ mod tests {
     fn fence(watch_only: bool, automatic: bool) -> Fence {
         let mut fence = Fence::new(
             watch_only,
-            Facts {
+            ViewerSettings {
                 size: (80, 24),
                 display: display("aa"),
             },

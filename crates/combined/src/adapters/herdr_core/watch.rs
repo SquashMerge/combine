@@ -294,7 +294,7 @@ mod tests {
         };
         let env = Env {
             config: HerdrCoreConfig::new("/nonexistent".into()),
-            fence: Mutex::new(HashMap::new()),
+            highest_ownership: Mutex::new(HashMap::new()),
             fidelities: Mutex::new(Fidelities::default()),
             automatic_feature: false,
             control: Arc::new(control::Shared::default()),
