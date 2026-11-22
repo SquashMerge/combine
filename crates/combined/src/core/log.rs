@@ -87,16 +87,9 @@ pub struct LogStats {
 
 #[derive(Debug)]
 struct Entry {
+    cursor: Cursor,
     message: DaemonMessage,
     cost: usize,
-}
-
-impl Entry {
-    fn cursor(&self) -> Cursor {
-        self.message
-            .cursor()
-            .expect("log entries are attachment events")
-    }
 }
 
 #[derive(Debug)]
@@ -211,10 +204,14 @@ impl EventLog {
         self.open = false;
     }
 
-    fn push(&mut self, message: DaemonMessage) {
+    fn push(&mut self, cursor: Cursor, message: DaemonMessage) {
         let cost = entry_cost(&message);
         self.retained_bytes += cost;
-        self.entries.push_back(Entry { message, cost });
+        self.entries.push_back(Entry {
+            cursor,
+            message,
+            cost,
+        });
     }
 
     /// Ends the log with the gap: the stream runs to the last retained entry, then the gap.
@@ -253,14 +250,17 @@ impl EventLog {
         self.epoch += 1;
         self.next_seq = 0;
         let cursor = self.take_cursor();
-        self.push(DaemonMessage::Started(Started {
+        self.push(
             cursor,
-            backend_generation: generation,
-            cols,
-            rows,
-            fidelity,
-            ordered_resizes,
-        }));
+            DaemonMessage::Started(Started {
+                cursor,
+                backend_generation: generation,
+                cols,
+                rows,
+                fidelity,
+                ordered_resizes,
+            }),
+        );
         self.outstanding = allowance;
         self.touch();
         Appended::Yes
@@ -276,38 +276,39 @@ impl EventLog {
             AttachEvent::Started { .. } => Appended::Ignored,
             AttachEvent::Data(bytes) => self.append_data(bytes),
             AttachEvent::Resized { cols, rows } => {
+                let cursor = self.cursor_for(self.next_seq);
                 let message = DaemonMessage::Resized(Resized {
-                    cursor: self.cursor_for(self.next_seq),
+                    cursor,
                     cols: *cols,
                     rows: *rows,
                 });
-                self.append_margin(message)
+                self.append_margin(cursor, message)
             }
             AttachEvent::Facts(display) => {
+                let cursor = self.cursor_for(self.next_seq);
                 let message = DaemonMessage::Facts(Facts {
-                    cursor: self.cursor_for(self.next_seq),
+                    cursor,
                     display: display.clone(),
                 });
-                self.append_margin(message)
+                self.append_margin(cursor, message)
             }
             AttachEvent::Resynced => {
-                let message = DaemonMessage::Resynced(Resynced {
-                    cursor: self.cursor_for(self.next_seq),
-                });
-                self.append_margin(message)
+                let cursor = self.cursor_for(self.next_seq);
+                let message = DaemonMessage::Resynced(Resynced { cursor });
+                self.append_margin(cursor, message)
             }
             AttachEvent::Closed(reason) => {
+                let cursor = self.cursor_for(self.next_seq);
                 let message = DaemonMessage::Closed(Closed {
-                    cursor: self.cursor_for(self.next_seq),
+                    cursor,
                     reason: *reason,
                 });
-                self.append_final(message)
+                self.append_final(cursor, message)
             }
             AttachEvent::Lost => {
-                let message = DaemonMessage::Lost(Lost {
-                    cursor: self.cursor_for(self.next_seq),
-                });
-                self.append_final(message)
+                let cursor = self.cursor_for(self.next_seq);
+                let message = DaemonMessage::Lost(Lost { cursor });
+                self.append_final(cursor, message)
             }
         }
     }
@@ -341,6 +342,7 @@ impl EventLog {
             if let Some(Entry {
                 message: DaemonMessage::Data(data),
                 cost,
+                ..
             }) = self.entries.back_mut()
             {
                 data.bytes.extend_from_slice(head);
@@ -350,10 +352,13 @@ impl EventLog {
         }
         for chunk in tail.chunks(MAX_DATA_CHUNK) {
             let cursor = self.take_cursor();
-            self.push(DaemonMessage::Data(Data {
+            self.push(
                 cursor,
-                bytes: chunk.to_vec(),
-            }));
+                DaemonMessage::Data(Data {
+                    cursor,
+                    bytes: chunk.to_vec(),
+                }),
+            );
             self.open = true;
         }
         self.outstanding = outstanding;
@@ -362,7 +367,7 @@ impl EventLog {
     }
 
     /// Appends an entry that must leave the data margin free.
-    fn append_margin(&mut self, message: DaemonMessage) -> Appended {
+    fn append_margin(&mut self, cursor: Cursor, message: DaemonMessage) -> Appended {
         let cost = entry_cost(&message);
         if !self.fits_margin(
             self.retained_bytes + cost,
@@ -373,12 +378,12 @@ impl EventLog {
         }
         self.seal();
         self.next_seq += 1;
-        self.push(message);
+        self.push(cursor, message);
         self.touch();
         Appended::Yes
     }
 
-    fn append_final(&mut self, message: DaemonMessage) -> Appended {
+    fn append_final(&mut self, cursor: Cursor, message: DaemonMessage) -> Appended {
         let cost = entry_cost(&message);
         let (free_bytes, free_events) = self.headroom(
             self.retained_bytes + cost,
@@ -390,7 +395,7 @@ impl EventLog {
         }
         self.seal();
         self.next_seq += 1;
-        self.push(message);
+        self.push(cursor, message);
         self.ended = Some(LogEnd::Final);
         self.outstanding = 0;
         self.touch();
@@ -435,11 +440,11 @@ impl EventLog {
             }
         }
         if let Some(first) = self.entries.front() {
-            if key(cursor) < key(first.cursor()) {
+            if key(cursor) < key(first.cursor) {
                 return Ok(false);
             }
         }
-        let Some(index) = self.entries.iter().position(|e| e.cursor() == cursor) else {
+        let Some(index) = self.entries.iter().position(|e| e.cursor == cursor) else {
             return Err(AckError::NotSent);
         };
         if index >= self.next_send {
@@ -468,7 +473,7 @@ impl EventLog {
             let index = self
                 .entries
                 .iter()
-                .position(|e| e.cursor() == cursor)
+                .position(|e| e.cursor == cursor)
                 .filter(|index| *index < self.next_send)
                 .ok_or(ResumeError::NotServable)?;
             self.trim_through(index);
@@ -483,7 +488,7 @@ impl EventLog {
         }
         self.seal();
         self.next_send = 0;
-        Ok(self.entries.back().map(Entry::cursor))
+        Ok(self.entries.back().map(|entry| entry.cursor))
     }
 
     /// Whether the open entry may be sent: always once the log has ended, and while live only

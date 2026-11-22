@@ -190,6 +190,34 @@ fn core_ports_and_model_do_no_io_or_read_a_clock() {
     }
 }
 
+/// Production code in the layers never panics on a `None` or an `Err`. The scan reads whole
+/// lines and skips only those that start with `//`, so no comment stripper (which can misread a
+/// lifetime tick) can hide a call: a spelling in a trailing comment fails the test too.
+#[test]
+fn core_ports_and_model_have_no_unwrap_or_expect() {
+    for file in layer_sources() {
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("cfg(test)"),
+            "{} has inline test code; this scan assumes none",
+            file.display()
+        );
+        for (number, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in [".unwrap()", ".expect("] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{} uses {banned}",
+                    file.display(),
+                    number + 1
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn traits_are_object_safe() {
     fn _backend(_: &dyn TerminalBackend) {}
