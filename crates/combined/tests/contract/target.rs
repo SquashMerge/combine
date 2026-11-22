@@ -66,8 +66,8 @@ pub trait Target: Sized + 'static {
 
     async fn emit(&mut self, term: &TermId, bytes: &[u8]) -> Result<(), Unsupported>;
 
-    /// Gives the backend up to one quiet interval to make progress, and says whether it did
-    /// something. Fake: runs `control.step()` until it returns false and reports whether any
+    /// Gives the backend up to one quiet interval to make progress, and returns true while the
+    /// backend reports work in progress. Fake: runs `control.step()` until it returns false and reports whether any
     /// step ran, with no waiting. A real target sleeps its quiet interval on its runtime and
     /// returns false.
     async fn idle(&mut self) -> bool;
@@ -84,10 +84,18 @@ pub trait Target: Sized + 'static {
     fn open_halves(&self, term: &TermId) -> Result<usize, Unsupported>;
     fn set_inexact(&mut self, term: &TermId) -> Result<(), Unsupported>;
     fn remote_twin(&mut self, local: &TermId) -> Result<TermId, Unsupported>;
+    /// A real target holds output the backend has already sent.
     fn delay_output(&mut self, term: &TermId) -> Result<(), Unsupported>;
     fn release_output(&mut self, term: &TermId) -> Result<(), Unsupported>;
 
-    /// `index` is the attach order on `term`, from 0.
+    /// How the backend's in-band repaint begins, for a backend without `resync_signal`; a test
+    /// oracle only.
+    fn paint_start(&self) -> Option<&'static [u8]> {
+        None
+    }
+
+    /// `index` is the attach order on `term`, from 0. A real target may overflow the backend's
+    /// own buffer; a case reasons only about its own payload.
     fn force_resync(&mut self, term: &TermId, index: usize) -> Result<(), Unsupported>;
 
     /// `index` is the attach order on `term`, from 0.

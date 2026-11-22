@@ -7,7 +7,9 @@ use std::sync::Arc;
 use combine_protocol::TermId;
 use combined::model::SpawnSpec;
 use combined::ports::TerminalBackend;
-use combined::testing::{FakeBackend, FakeConfig, FakeControl, Half, Mutation};
+use combined::testing::{
+    FakeBackend, FakeConfig, FakeControl, Half, Mutation, ResyncMode, FAKE_PAINT_START,
+};
 
 use super::target::{Fault, Target, Unsupported};
 
@@ -49,6 +51,14 @@ impl FakeTarget {
         })
     }
 
+    /// A fake that repaints in band, with no resync signal.
+    pub fn silent() -> Self {
+        Self::with_config(FakeConfig {
+            resync: ResyncMode::Silent,
+            ..FakeConfig::default()
+        })
+    }
+
     /// The fake's own handle, for a test of the fake itself.
     pub fn control(&self) -> &FakeControl {
         &self.control
@@ -65,8 +75,13 @@ impl Target for FakeTarget {
     fn describe(&self) -> String {
         match self.config.mutation {
             Some(mutation) => format!("fake (mutation {mutation:?})"),
+            None if self.config.resync == ResyncMode::Silent => "fake-silent".to_string(),
             None => "fake".to_string(),
         }
+    }
+
+    fn paint_start(&self) -> Option<&'static [u8]> {
+        Some(FAKE_PAINT_START)
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

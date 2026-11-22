@@ -15,7 +15,7 @@ use combined::ports::{
 };
 use combined::testing::{
     FakeAttachmentRef, FakeBackend, FakeCall, FakeConfig, FakeControl, Half, MemoryFileStore,
-    Mutation, ResyncMode, FAKE_PAINT_END, FAKE_PAINT_START,
+    Mutation, ResyncMode, FAKE_PAINT_END, FAKE_PAINT_START, LATE_RESIZED,
 };
 use common::{display, request_options, spawn_spec};
 use futures::executor::block_on;
@@ -525,7 +525,7 @@ fn late_old_generation_events_follow_the_new_started() {
     assert!(matches!(seen[0], (2, AttachEvent::Started { .. })));
     assert!(matches!(&seen[1], (2, AttachEvent::Data(bytes)) if is_paint(bytes)));
     assert_eq!(seen[2], (1, AttachEvent::Data(b"<late>".to_vec())));
-    assert_eq!(seen[3], (1, resized(80, 24)));
+    assert_eq!(seen[3], (1, resized(LATE_RESIZED.0, LATE_RESIZED.1)));
 }
 
 #[test]
