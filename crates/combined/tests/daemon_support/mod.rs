@@ -8,6 +8,7 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use combined::ports::TerminalBackend;
 use combined::rpc::{self, ServeOptions, ServerHandle, ServerParts};
 use combined::testing::FakeBackend;
 use combined::wiring::clock::MonotonicClock;
+use combined::wiring::config::{self, DaemonEnv};
 use combined::wiring::ids::IdReservation;
 
 /// The longest socket path macOS accepts.
@@ -84,20 +86,16 @@ pub fn check_in_scratch(path: &Path, scratch: &ShortTempDir) {
     );
 }
 
-/// Panics on a path outside the scratch dir and on every spelling of herdr-core's default socket.
+/// Panics on a path outside the scratch dir and on herdr-core's default socket for the
+/// process's own environment.
 pub fn refuse_default_herdr_core(path: &Path, scratch: &ShortTempDir) {
+    refuse_default_herdr_core_in(path, scratch, &DaemonEnv::from_process());
+}
+
+/// As [`refuse_default_herdr_core`], against the environment `env` describes.
+pub fn refuse_default_herdr_core_in(path: &Path, scratch: &ShortTempDir, env: &DaemonEnv) {
     check_in_scratch(path, scratch);
-    let mut defaults = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        defaults.push(Path::new(&home).join(".local/state/herdr-core/default/default.sock"));
-    }
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
-        defaults.push(Path::new(&state).join("herdr-core/default/default.sock"));
-    }
-    if let Some(socket) = std::env::var_os("HC_SOCKET") {
-        defaults.push(PathBuf::from(socket));
-    }
-    for default in defaults {
+    if let Ok((default, _)) = config::herdr_core_socket(None, env) {
         assert!(
             path != default,
             "{} is herdr-core's default socket",
@@ -109,6 +107,8 @@ pub fn refuse_default_herdr_core(path: &Path, scratch: &ShortTempDir) {
 /// The three paths a daemon needs, all inside the scratch dir.
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {
+    /// The directory under the scratch dir that holds this daemon's config, log and data.
+    pub name: String,
     pub data_dir: PathBuf,
     pub socket: PathBuf,
     pub herdr_core_socket: PathBuf,
@@ -119,6 +119,7 @@ impl DaemonPaths {
         let base = scratch.path().join(name);
         let data_dir = base.join("data");
         DaemonPaths {
+            name: name.to_string(),
             socket: data_dir.join("combined.sock"),
             data_dir,
             herdr_core_socket: base.join("no-hc.sock"),
@@ -128,6 +129,12 @@ impl DaemonPaths {
     pub fn with_socket(mut self, scratch: &ShortTempDir, socket: PathBuf) -> DaemonPaths {
         refuse_default_herdr_core(&socket, scratch);
         self.socket = socket;
+        self
+    }
+
+    pub fn with_data_dir(mut self, scratch: &ShortTempDir, data_dir: PathBuf) -> DaemonPaths {
+        check_in_scratch(&data_dir, scratch);
+        self.data_dir = data_dir;
         self
     }
 
@@ -142,12 +149,15 @@ impl DaemonPaths {
     }
 }
 
-/// Writes `<scratch>/<name>/daemon.json` with every field set, and returns its path.
+/// Writes `<scratch>/<name>/daemon.json` with every field set, and returns its path. Two
+/// daemons with different names get different files.
 pub fn write_daemon_config(scratch: &ShortTempDir, paths: &DaemonPaths, backend: &str) -> PathBuf {
     for path in [&paths.data_dir, &paths.socket, &paths.herdr_core_socket] {
         refuse_default_herdr_core(path, scratch);
     }
-    let config = scratch.path().join("daemon.json");
+    let dir = scratch.path().join(&paths.name);
+    fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("daemon.json");
     let text = serde_json::json!({
         "version": 1,
         "backend": backend,
@@ -327,4 +337,269 @@ pub fn fake_server(
         options,
     )
     .unwrap()
+}
+
+/// `combined` with a cleared environment: only `HOME=<scratch>/home`, so nothing inherits
+/// `HC_*` or `XDG_*`.
+pub fn combined_command(scratch: &ShortTempDir) -> Command {
+    let home = scratch.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_combined"));
+    command.env_clear().env("HOME", home);
+    command
+}
+
+/// Waits for `child` to exit, killing it and panicking if it takes longer than `timeout`.
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the process did not exit within {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A real `combined serve`, killed and reaped on drop. Its stderr goes to
+/// `<scratch>/<name>/daemon.log`.
+pub struct DaemonProcess {
+    child: Child,
+    socket: PathBuf,
+    log: PathBuf,
+}
+
+impl DaemonProcess {
+    /// Writes the config for `paths` and starts the daemon on it.
+    pub fn spawn(scratch: &ShortTempDir, paths: &DaemonPaths, backend: &str) -> DaemonProcess {
+        let config = write_daemon_config(scratch, paths, backend);
+        DaemonProcess::spawn_with(scratch, paths, &["serve", "--config"], &config)
+    }
+
+    /// Starts `combined <args> <config>` and logs under `paths.name`.
+    pub fn spawn_with(
+        scratch: &ShortTempDir,
+        paths: &DaemonPaths,
+        args: &[&str],
+        config: &Path,
+    ) -> DaemonProcess {
+        check_in_scratch(config, scratch);
+        let log = scratch.path().join(&paths.name).join("daemon.log");
+        let log_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        let child = combined_command(scratch)
+            .args(args)
+            .arg(config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log_file)
+            .spawn()
+            .unwrap();
+        DaemonProcess {
+            child,
+            socket: paths.socket.clone(),
+            log,
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Everything the daemon has written to stderr.
+    pub fn log(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Waits until the socket accepts, and panics if the daemon exits first.
+    pub fn wait_ready(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                panic!(
+                    "the daemon exited with {status} before it served:\n{}",
+                    self.log()
+                );
+            }
+            if UnixStream::connect(&self.socket).is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon did not serve:\n{}",
+                self.log()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+
+    /// Waits for the daemon to exit by itself.
+    pub fn wait_exit(&mut self) -> ExitStatus {
+        wait_for_exit(&mut self.child, Duration::from_secs(10))
+    }
+
+    /// Kills the daemon and waits for it, as a crash would.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+static NEXT_BRIDGE: AtomicU32 = AtomicU32::new(0);
+
+/// A `combined connect --socket` process spoken to over its stdin and stdout, killed and reaped
+/// on drop. Its stderr goes to a file in the scratch dir.
+pub struct BridgeClient {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    frames: mpsc::Receiver<DaemonMessage>,
+    stderr: PathBuf,
+}
+
+impl BridgeClient {
+    pub fn spawn(scratch: &ShortTempDir, socket: &Path) -> BridgeClient {
+        BridgeClient::spawn_command(scratch, &["connect", "--socket"], socket)
+    }
+
+    fn spawn_command(scratch: &ShortTempDir, args: &[&str], socket: &Path) -> BridgeClient {
+        check_in_scratch(socket, scratch);
+        let n = NEXT_BRIDGE.fetch_add(1, Ordering::SeqCst);
+        let stderr = scratch.path().join(format!("bridge-{n}.err"));
+        let mut child = combined_command(scratch)
+            .args(args)
+            .arg(socket)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, frames) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(Some(message)) = read_message::<DaemonMessage, _>(&mut stdout) {
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        BridgeClient {
+            child,
+            stdin,
+            frames,
+            stderr,
+        }
+    }
+
+    /// Connects through the bridge and says `hello` at the current protocol version.
+    pub fn open(scratch: &ShortTempDir, socket: &Path) -> (BridgeClient, Welcome) {
+        let mut bridge = BridgeClient::spawn(scratch, socket);
+        bridge.send(&ClientMessage::Hello(combine_protocol::Hello {
+            protocol_version: combine_protocol::PROTOCOL_VERSION,
+        }));
+        match bridge.recv() {
+            DaemonMessage::Welcome(welcome) => (bridge, welcome),
+            other => panic!("expected welcome, got {other:?}"),
+        }
+    }
+
+    pub fn send(&mut self, message: &ClientMessage) {
+        let stdin = self.stdin.as_mut().expect("stdin is closed");
+        write_message(stdin, message).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    pub fn send_bytes(&mut self, bytes: &[u8]) {
+        let stdin = self.stdin.as_mut().expect("stdin is closed");
+        stdin.write_all(bytes).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    pub fn ack(&mut self, cursor: Cursor) {
+        self.send(&ClientMessage::Ack(Ack { cursor }));
+    }
+
+    /// The next message from the bridge's stdout; panics if none arrives in [`RECV_TIMEOUT`].
+    pub fn recv(&self) -> DaemonMessage {
+        match self.frames.recv_timeout(RECV_TIMEOUT) {
+            Ok(message) => message,
+            Err(RecvTimeoutError::Timeout) => panic!("no message within {RECV_TIMEOUT:?}"),
+            Err(RecvTimeoutError::Disconnected) => panic!("the bridge closed its stdout"),
+        }
+    }
+
+    /// Closes the bridge's stdin: the bridge half-closes the socket.
+    pub fn close_stdin(&mut self) {
+        self.stdin = None;
+    }
+
+    /// Waits for the bridge to exit by itself.
+    pub fn wait_exit(&mut self) -> ExitStatus {
+        wait_for_exit(&mut self.child, Duration::from_secs(10))
+    }
+
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// What the bridge wrote to stderr.
+    pub fn stderr(&self) -> String {
+        fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+}
+
+impl Drop for BridgeClient {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Runs a command to completion, killing it if it takes longer than `timeout`. Its stdin is the
+/// caller's to set.
+pub fn run_to_exit(mut command: Command, timeout: Duration) -> std::process::Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut bytes);
+        bytes
+    });
+    let err = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+        bytes
+    });
+    let status = wait_for_exit(&mut child, timeout);
+    std::process::Output {
+        status,
+        stdout: out.join().unwrap(),
+        stderr: err.join().unwrap(),
+    }
 }

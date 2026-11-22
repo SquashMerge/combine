@@ -1,0 +1,304 @@
+#![cfg(feature = "test-support")]
+//! The real `combined connect` bridge in front of a daemon in this process, on the fake
+//! backend, over real Unix sockets and pipes.
+
+mod common;
+mod daemon_support;
+
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use combine_protocol::{
+    AttachmentId, ClientMessage, CloseReason, Cursor, DaemonMessage, Detach, ErrorCode, HostId,
+    RequestId, Resume, TermId, WatchTerminals, PROTOCOL_VERSION,
+};
+use combined::rpc::ServeOptions;
+use combined::testing::{FakeBackend, FakeConfig};
+use common::{request_options, spawn_spec};
+use daemon_support::{
+    combined_command, fake_server, run_to_exit, wait_until, work_dir, BridgeClient, DaemonPaths,
+    ShortTempDir,
+};
+use futures::executor::block_on;
+
+const HOST: &str = "5b0c1f3e-6a3d-4c52-9d0e-2f7a1b8c4d90";
+
+/// Attaches through the bridge, reading up to and including `started`.
+fn attach(bridge: &mut BridgeClient, term: &TermId) -> AttachmentId {
+    bridge.send(&ClientMessage::Attach(combine_protocol::Attach {
+        request: RequestId(2),
+        terminal: term.clone(),
+        options: request_options(80, 24, false),
+    }));
+    let mut attachment = None;
+    loop {
+        match bridge.recv() {
+            DaemonMessage::Attached(attached) => attachment = Some(attached.attachment),
+            DaemonMessage::Started(_) => return attachment.expect("started before attached"),
+            _ => {}
+        }
+    }
+}
+
+/// Reads the attachment's events until its data ends with `tail`, acking each when `ack`.
+/// Returns the data and every event cursor.
+fn read_until_tail(bridge: &mut BridgeClient, tail: &[u8], ack: bool) -> (Vec<u8>, Vec<Cursor>) {
+    let mut bytes = Vec::new();
+    let mut cursors = Vec::new();
+    while !bytes.ends_with(tail) {
+        let message = bridge.recv();
+        if let Some(cursor) = message.cursor() {
+            cursors.push(cursor);
+            if let DaemonMessage::Data(data) = &message {
+                bytes.extend_from_slice(&data.bytes);
+            }
+            if ack {
+                bridge.ack(cursor);
+            }
+        }
+    }
+    (bytes, cursors)
+}
+
+fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = u32::try_from(payload.len() + 1)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    bytes.push(kind);
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+#[test]
+fn attach_replay_and_resume_through_combined_connect() {
+    let scratch = ShortTempDir::new();
+    let (backend, control) = FakeBackend::new(FakeConfig::default());
+    let work = work_dir(&scratch);
+    let term = block_on(combined::ports::TerminalBackend::spawn(
+        &*backend,
+        spawn_spec(work.to_str().unwrap(), 80, 24),
+    ))
+    .unwrap();
+    let server = fake_server(
+        &scratch,
+        "d",
+        Arc::clone(&backend),
+        HOST,
+        ServeOptions::default(),
+    );
+    let stats = server.stats();
+    let socket = DaemonPaths::in_scratch(&scratch, "d").socket;
+
+    let (mut first, welcome) = BridgeClient::open(&scratch, &socket);
+    assert_eq!(welcome.host_id, HostId(HOST.to_string()));
+    first.send(&ClientMessage::WatchTerminals(WatchTerminals {
+        request: RequestId(1),
+    }));
+    let listed = loop {
+        if let DaemonMessage::Terminals(terminals) = first.recv() {
+            break terminals;
+        }
+    };
+    assert_eq!(listed.request, Some(RequestId(1)));
+    assert_eq!(listed.terminals[0].id, term);
+
+    let attachment = attach(&mut first, &listed.terminals[0].id);
+    control.emit(&term, b"one");
+    let (_, cursors) = read_until_tail(&mut first, b"one", true);
+    let c1 = *cursors.last().unwrap();
+    control.emit(&term, b"two");
+    read_until_tail(&mut first, b"two", false);
+
+    first.kill();
+    assert!(
+        wait_until(Duration::from_secs(5), || stats.connections() == 0),
+        "the daemon kept the connection of the killed bridge"
+    );
+    control.emit(&term, b"three");
+
+    let (mut second, _) = BridgeClient::open(&scratch, &socket);
+    second.send(&ClientMessage::Resume(Resume {
+        request: RequestId(3),
+        cursor: c1,
+    }));
+    let replay_through = loop {
+        match second.recv() {
+            DaemonMessage::Resumed(resumed) => {
+                assert_eq!(resumed.attachment, attachment);
+                break resumed.replay_through.expect("something was replayed");
+            }
+            DaemonMessage::Terminals(_) => {}
+            other => panic!("expected resumed, got {other:?}"),
+        }
+    };
+    let (replayed, cursors) = read_until_tail(&mut second, b"twothree", true);
+    assert_eq!(replayed, b"twothree");
+    assert!(cursors.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    assert!(cursors[0].seq > c1.seq);
+    assert_eq!(*cursors.last().unwrap(), replay_through);
+
+    control.emit(&term, b"four");
+    let (live, cursors) = read_until_tail(&mut second, b"four", true);
+    assert_eq!(live, b"four");
+    assert_eq!(cursors[0].seq.0, replay_through.seq.0 + 1);
+
+    second.send(&ClientMessage::Detach(Detach { attachment }));
+    loop {
+        match second.recv() {
+            DaemonMessage::Closed(closed) => {
+                assert_eq!(closed.reason, CloseReason::Detached);
+                break;
+            }
+            DaemonMessage::Data(_) => {}
+            other => panic!("expected closed, got {other:?}"),
+        }
+    }
+
+    second.close_stdin();
+    assert_eq!(second.wait_exit().code(), Some(0));
+    assert_eq!(second.stderr(), "");
+}
+
+#[test]
+fn combined_connect_relays_only_frames_and_exits_0_when_the_daemon_closes() {
+    let scratch = ShortTempDir::new();
+    let (backend, _control) = FakeBackend::new(FakeConfig::default());
+    let _server = fake_server(&scratch, "d", backend, HOST, ServeOptions::default());
+    let socket = DaemonPaths::in_scratch(&scratch, "d").socket;
+
+    let (mut bridge, welcome) = BridgeClient::open(&scratch, &socket);
+    assert_eq!(welcome.protocol_version, PROTOCOL_VERSION);
+    // An undecodable frame makes the daemon answer and close; stdin stays open.
+    bridge.send_bytes(&frame(1, b"not json"));
+    match bridge.recv() {
+        DaemonMessage::Error(error) => assert_eq!(error.code, ErrorCode::Malformed),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(bridge.wait_exit().code(), Some(0));
+    assert_eq!(bridge.stderr(), "");
+}
+
+#[test]
+fn combined_connect_without_a_daemon_fails_on_stderr_only() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.sock("none.sock");
+    let mut command = combined_command(&scratch);
+    command
+        .args(["connect", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::null());
+    let output = run_to_exit(command, Duration::from_secs(10));
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("combined: "), "{stderr}");
+    assert!(stderr.contains(socket.to_str().unwrap()), "{stderr}");
+    assert!(!socket.exists(), "connect must not create the socket");
+}
+
+#[test]
+fn v1_client_through_combined_connect_gets_version_mismatch() {
+    let scratch = ShortTempDir::new();
+    let (backend, _control) = FakeBackend::new(FakeConfig::default());
+    let _server = fake_server(&scratch, "d", backend, HOST, ServeOptions::default());
+    let socket = DaemonPaths::in_scratch(&scratch, "d").socket;
+
+    let mut bridge = BridgeClient::spawn(&scratch, &socket);
+    bridge.send(&ClientMessage::Hello(combine_protocol::Hello {
+        protocol_version: 1,
+    }));
+    match bridge.recv() {
+        DaemonMessage::Error(error) => {
+            assert_eq!(error.code, ErrorCode::VersionMismatch);
+            assert_eq!(
+                error.message,
+                format!("protocol version mismatch: client 1, daemon {PROTOCOL_VERSION}")
+            );
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(bridge.wait_exit().code(), Some(0));
+}
+
+#[test]
+fn combined_connect_exits_1_when_stdin_cannot_be_read() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.sock("stdin.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // Reading a directory is an error on every platform Combine runs on.
+    let unreadable = File::open(scratch.path()).unwrap();
+    let mut command = combined_command(&scratch);
+    command
+        .args(["connect", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::from(unreadable));
+    let runner = thread::spawn(move || run_to_exit(command, Duration::from_secs(10)));
+    let (_daemon_side, _) = listener.accept().unwrap();
+    let output = runner.join().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+}
+
+/// The daemon has closed while the bridge is still stuck writing to a stdout nobody reads, and
+/// then input reaches the dead socket: the write fails with a broken pipe and the half-close
+/// with `ENOTCONN`. Both mean the daemon closed, so the bridge still exits 0.
+#[test]
+fn combined_connect_exits_0_when_input_reaches_a_socket_the_daemon_already_closed() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.sock("closed.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut child = combined_command(&scratch)
+        .args(["connect", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (daemon_side, _) = listener.accept().unwrap();
+
+    // Fill the bridge's way to stdout: it stops reading the socket once its stdout pipe is
+    // full, so it cannot see the daemon's close until the test drains the pipe.
+    daemon_side.set_nonblocking(true).unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut last_progress = Instant::now();
+    while last_progress.elapsed() < Duration::from_millis(300) {
+        match (&daemon_side).write(&chunk) {
+            Ok(_) => last_progress = Instant::now(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    drop(daemon_side);
+
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"after the close").unwrap();
+    drop(stdin);
+    // Give the input thread time to hit the closed socket. A shorter wait can only make this
+    // test pass without exercising that path; it cannot make it fail.
+    thread::sleep(Duration::from_millis(300));
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut relayed = Vec::new();
+    stdout.read_to_end(&mut relayed).unwrap();
+    let mut errors = String::new();
+    stderr.read_to_string(&mut errors).unwrap();
+    let status = child.wait().unwrap();
+
+    assert!(relayed.iter().all(|byte| *byte == b'x'));
+    assert_eq!(errors, "");
+    assert_eq!(status.code(), Some(0));
+    assert!(fs::metadata(&socket).is_ok());
+}
