@@ -12,3 +12,8 @@ test-support = []
 
 [dependencies]
 combine-protocol = { path = "../combine-protocol" }
+async-trait = "=0.1.89"
+futures = { version = "=0.3.32", default-features = false, features = ["std", "executor"] }
+
+[dev-dependencies]
+sha2 = "=0.10.9"
