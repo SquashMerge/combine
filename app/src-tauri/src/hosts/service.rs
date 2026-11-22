@@ -386,9 +386,11 @@ mod tests {
         let snapshot = f.service.snapshot();
         let names: Vec<&str> = snapshot.hosts.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, ["zeta", "alpha"]);
-        for name in ["zeta", "alpha"] {
-            wait_failed(&f, name);
-        }
+        wait_for_snapshot(&f.snapshots, |s| {
+            s.hosts
+                .iter()
+                .all(|h| matches!(h.connection, ConnectionState::Failed { .. }))
+        });
         f.service.stop();
     }
 
