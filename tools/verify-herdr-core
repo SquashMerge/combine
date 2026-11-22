@@ -93,6 +93,9 @@ lane_down() {
       echo "verify-herdr-core: refusing to stop a core that is not the lane's own" >&2
       status=1
     fi
+  elif [ "$started" = 1 ]; then
+    echo "verify-herdr-core: the lane core's socket never returned; its core may still run (root $LANE_ROOT, session $LANE_SESSION)" >&2
+    status=1
   fi
   if lane_check_root "$LANE_ROOT"; then
     rm -rf -- "$LANE_ROOT"

@@ -12,7 +12,7 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::connection::{CallError, Connection};
+use super::connection::{reserve_slot, CallError, Connection};
 use super::events::{parse_snapshot, DiffMode, Snapshot, WatchState};
 use super::frame::{self, Frame, Kind};
 use super::Env;
@@ -108,7 +108,8 @@ async fn run(
     }
 }
 
-/// Reads the subscription until it ends.
+/// Reads the subscription until it ends. Credit that finds the writer queue full is owed and
+/// sent when a slot frees, so every byte read is credited once.
 async fn pump(
     env: &Env,
     subscription: &mut Subscription,
@@ -117,9 +118,21 @@ async fn pump(
 ) -> Ended {
     let mut buffer: Vec<u8> = Vec::new();
     let writer = subscription.connection.sender();
+    let mut owed = 0u64;
     loop {
         let frame = tokio::select! {
             frame = subscription.frames.recv() => frame,
+            slot = reserve_slot(writer.as_ref()), if owed > 0 => {
+                match (slot, subscription.channel) {
+                    (Some(slot), Some(channel)) => {
+                        let bytes = u32::try_from(owed).unwrap_or(u32::MAX);
+                        owed -= u64::from(bytes);
+                        slot.send(frame::credit(channel, bytes));
+                    }
+                    _ => owed = 0,
+                }
+                continue;
+            }
             () = tx.closed() => return Ended::Gone,
         };
         let Some(frame) = frame else {
@@ -133,11 +146,8 @@ async fn pump(
             Kind::Data => {}
             _ => continue,
         }
-        if !env.watch_credit_stalled() {
-            if let (Some(writer), Some(channel)) = (&writer, subscription.channel) {
-                let bytes = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX);
-                let _ = writer.try_send(frame::credit(channel, bytes));
-            }
+        if !env.watch_credit_stalled() && writer.is_some() && subscription.channel.is_some() {
+            owed += frame.payload.len() as u64;
         }
         buffer.extend_from_slice(&frame.payload);
         while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
@@ -159,9 +169,9 @@ async fn pump(
     }
 }
 
-/// The watch CREDIT is sent with `try_send` into the bounded writer queue, so it is dropped
-/// when the queue is full. These tests drive `pump` against an in-memory core that honours
-/// credit windows, with the core not reading the client's side while it bursts.
+/// The watch CREDIT goes into the bounded writer queue, and what the full queue can't take
+/// is owed. These tests drive `pump` against an in-memory core that honours credit windows,
+/// with the core not reading the client's side while it bursts.
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use std::collections::HashMap;
@@ -303,9 +313,8 @@ mod tests {
         outcome
     }
 
-    /// A burst larger than the writer queue loses credit, but the window never reaches zero
-    /// from those drops alone: it settles near the queue's capacity, so the stream keeps
-    /// moving. This pins "no permanent stall".
+    /// A burst larger than the writer queue never stalls the stream: owed credit is sent as the
+    /// queue drains.
     #[tokio::test(flavor = "multi_thread")]
     async fn dropped_watch_credit_does_not_stall_the_stream() {
         let window = WRITER_QUEUE_FRAMES * 3;
@@ -314,12 +323,9 @@ mod tests {
         assert_eq!(outcome.sent, window * 3, "{outcome:?}");
     }
 
-    /// The desired property: every DATA byte read is credited back. Today a full writer queue
-    /// drops CREDIT frames for good, so the window shrinks and never recovers.
+    /// Every DATA byte read is credited back, even when the writer queue is full while the
+    /// core bursts: the credit is owed until the queue has room.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "PRODUCTION DEFECT: watch.rs pump sends CREDIT with try_send, so a CREDIT is \
-                dropped when the writer queue is full and the subscription window shrinks \
-                permanently (no stall, but throughput degrades to about the queue size)"]
     async fn every_watch_data_byte_is_credited_back() {
         let window = WRITER_QUEUE_FRAMES * 3;
         let outcome = run(window, window).await;

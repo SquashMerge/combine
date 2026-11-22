@@ -12,6 +12,11 @@ use crate::ports::{AttachEvent, BackendError, BackendResult};
 pub(super) const REOPEN_QUEUE_REQUESTS: usize = 1_024;
 /// Bytes of typed input held while a pair reopens.
 pub(super) const REOPEN_QUEUE_INPUT: usize = 65_536;
+/// Most frames a full reopen queue can replay: one per request, the extra frames of a split
+/// write, and the FACTS and RESIZE a first Focus catches up.
+pub(super) const REOPEN_QUEUE_FRAMES: usize =
+    REOPEN_QUEUE_REQUESTS + REOPEN_QUEUE_INPUT / super::frame::DATA_FRAME_MAX + 2;
+const _: () = assert!(REOPEN_QUEUE_FRAMES <= super::connection::WRITER_QUEUE_FRAMES);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase {
@@ -77,6 +82,7 @@ pub(super) struct Fence {
     pub sent: Facts,
     queue: VecDeque<Queued>,
     queued_input: usize,
+    queued_frames: usize,
 }
 
 impl Fence {
@@ -90,6 +96,7 @@ impl Fence {
             requested,
             queue: VecDeque::new(),
             queued_input: 0,
+            queued_frames: 0,
         }
     }
 
@@ -106,8 +113,14 @@ impl Fence {
     pub(super) fn frames_needed(request: &Request) -> usize {
         match request {
             Request::Write(bytes) => bytes.len().div_ceil(super::frame::DATA_FRAME_MAX).max(1),
-            _ => 3,
+            Request::Resize(..) | Request::SetDisplay(_) => 1,
+            Request::Focus => 3,
         }
+    }
+
+    /// Frames the queued requests replay, at most. A new pair reserves this before the replay.
+    pub(super) fn queued_frames_bound(&self) -> usize {
+        self.queued_frames + 2
     }
 
     /// Handles a request that carries an ownership generation. `highest` is the highest one any
@@ -140,6 +153,10 @@ impl Fence {
             return Err(BackendError::Failed("reopen queue full".to_string()));
         }
         self.queued_input += input;
+        self.queued_frames += match &request {
+            Request::Write(_) => Fence::frames_needed(&request),
+            _ => 1,
+        };
         self.queue.push_back(Queued {
             request,
             generation,
@@ -242,6 +259,7 @@ impl Fence {
         self.phase = Phase::Ready;
         let queued: Vec<Queued> = self.queue.drain(..).collect();
         self.queued_input = 0;
+        self.queued_frames = 0;
         queued
             .into_iter()
             .flat_map(|queued| self.apply(highest, queued.generation, queued.request))
@@ -252,6 +270,7 @@ impl Fence {
         self.phase = Phase::Closed;
         self.queue.clear();
         self.queued_input = 0;
+        self.queued_frames = 0;
     }
 }
 
@@ -494,6 +513,38 @@ mod tests {
             fence.write_automatic(BackendGeneration(1), b"r"),
             Err(BackendError::Closed)
         );
+    }
+
+    #[test]
+    fn frames_needed_bounds_the_frames_a_request_sends() {
+        fn frames(effects: &[Effect]) -> usize {
+            effects
+                .iter()
+                .map(|effect| match effect {
+                    Effect::Send(Out::Data(bytes) | Out::Automatic(bytes)) => bytes
+                        .len()
+                        .div_ceil(super::super::frame::DATA_FRAME_MAX)
+                        .max(1),
+                    Effect::Send(_) => 1,
+                    Effect::Emit(_) => 0,
+                })
+                .sum()
+        }
+        let mut fence = fence(false, true);
+        let mut highest = 0;
+        fence.requested.size = (90, 30);
+        fence.requested.display = display("bb");
+        for request in [
+            Request::Write(vec![0; 40_000]),
+            Request::Write(Vec::new()),
+            Request::Resize(100, 30),
+            Request::SetDisplay(display("cc")),
+            Request::Focus,
+        ] {
+            let needed = Fence::frames_needed(&request);
+            let effects = fence.request(&mut highest, 1, request).expect("applied");
+            assert!(frames(&effects) <= needed, "{effects:?}");
+        }
     }
 
     #[test]
