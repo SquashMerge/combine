@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { HostsPort } from '../../src/ipc/port';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
+import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
 
 const connected = { kind: 'connected' } as const;
@@ -19,7 +20,7 @@ function sample() {
 }
 
 async function mount(port: HostsPort = new MemoryHostsPort(sample())) {
-  render(<App port={port} />);
+  render(<App port={port} clientStatePort={new MemoryClientStatePort()} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
   await act(async () => {});
 }
@@ -111,5 +112,38 @@ describe('CommandPalette', () => {
     });
     expect(retryHost).toHaveBeenCalledExactlyOnceWith('mini');
     expect(dialog()).toBeNull();
+  });
+
+  describe('returns focus to the element focused before it opened', () => {
+    const rail = () => screen.getByRole('button', { name: 'alpha' });
+
+    async function openFromRail() {
+      await mount();
+      rail().focus();
+      expect(document.activeElement).toBe(rail());
+      await open();
+      expect(document.activeElement).toBe(search());
+    }
+
+    it('after Escape', async () => {
+      await openFromRail();
+      fireEvent.keyDown(search(), { key: 'Escape' });
+      expect(dialog()).toBeNull();
+      expect(document.activeElement).toBe(rail());
+    });
+
+    it('after a second Cmd+K', async () => {
+      await openFromRail();
+      fireEvent.keyDown(window, { key: 'k', metaKey: true });
+      expect(dialog()).toBeNull();
+      expect(document.activeElement).toBe(rail());
+    });
+
+    it('after Enter', async () => {
+      await openFromRail();
+      fireEvent.keyDown(search(), { key: 'Enter' });
+      expect(dialog()).toBeNull();
+      expect(document.activeElement).toBe(rail());
+    });
   });
 });

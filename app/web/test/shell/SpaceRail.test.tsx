@@ -1,11 +1,14 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { spaceKeyId } from '../../src/model/space';
 import { App } from '../../src/shell/App';
+import { SpaceRail } from '../../src/shell/SpaceRail';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
+import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, loadFixtureSnapshot, snapshot, space } from '../support/snapshots';
 
 async function mount(port: MemoryHostsPort) {
-  const view = render(<App port={port} />);
+  const view = render(<App port={port} clientStatePort={new MemoryClientStatePort()} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
   return view;
 }
@@ -13,6 +16,25 @@ async function mount(port: MemoryHostsPort) {
 const connected = { kind: 'connected' } as const;
 
 describe('SpaceRail', () => {
+  it('marks read-only spaces', async () => {
+    const hosts = snapshot([
+      host('a', HOST_A, connected, [space(HOST_A, '/src/alpha'), space(HOST_A, '/src/beta')]),
+    ]);
+    const view = render(
+      <SpaceRail
+        snapshot={hosts}
+        selected={null}
+        port={new MemoryHostsPort(hosts)}
+        readOnlySpaces={new Set([spaceKeyId({ hostId: HOST_A, path: '/src/beta' })])}
+        onSelect={() => undefined}
+      />,
+    );
+    const rail = within(view.container);
+    expect(rail.getByRole('button', { name: /^beta/ }).getAttribute('data-read-only')).toBe('true');
+    expect(rail.getByRole('button', { name: /^beta/ }).textContent).toContain('read-only');
+    expect(rail.getByRole('button', { name: 'alpha' }).hasAttribute('data-read-only')).toBe(false);
+  });
+
   it('shows an invalid hosts.json with its fix hint', async () => {
     const error = 'hosts.json has version 2; this Combine reads version 1';
     await mount(new MemoryHostsPort(snapshot([host('a', HOST_A, connected)], '1', error)));
