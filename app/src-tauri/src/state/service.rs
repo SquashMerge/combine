@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::model::{ClientStateFile, LastSpace, SpaceState};
+use super::model::{ClientSpaceState, ClientStateFile, LastSpace};
 use super::path::{client_state_path, InvalidHostId};
 use super::store::{ClientStateStore, LoadOutcome, StateError};
 
@@ -81,7 +81,7 @@ impl ClientStates {
         &self,
         host_id: &str,
         key: &str,
-        state: SpaceState,
+        state: ClientSpaceState,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(host_id)?;
         entry
@@ -96,5 +96,53 @@ impl ClientStates {
             .store
             .set_last_space(last)
             .map_err(ServiceError::State)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::super::testing::{last_space, space_state, TestDir, ID_A};
+    use super::*;
+
+    #[test]
+    fn restart_restores_state() {
+        let dir = TestDir::new();
+        {
+            let states = ClientStates::new(dir.path().to_path_buf());
+            states
+                .set_space_state(ID_A, "/work/a", space_state("s1"))
+                .expect("space");
+            states
+                .set_last_space(ID_A, last_space("s1", 42))
+                .expect("last");
+        }
+        let states = ClientStates::new(dir.path().to_path_buf());
+        let view = states.client_state(ID_A).expect("view");
+        assert_eq!(view.error, None);
+        assert_eq!(view.file.last_space, Some(last_space("s1", 42)));
+        assert_eq!(view.file.spaces.get("/work/a"), Some(&space_state("s1")));
+    }
+
+    #[test]
+    fn invalid_file_shows_error_and_is_never_overwritten() {
+        let dir = TestDir::new();
+        let path = client_state_path(dir.path(), ID_A).expect("path");
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, b"{ not json").expect("seed");
+        let states = ClientStates::new(dir.path().to_path_buf());
+        let view = states.client_state(ID_A).expect("view");
+        assert!(view.error.is_some());
+        assert_eq!(view.file, ClientStateFile::default());
+        assert!(matches!(
+            states.set_last_space(ID_A, last_space("s1", 1)),
+            Err(ServiceError::State(StateError::Invalid))
+        ));
+        assert!(matches!(
+            states.set_space_state(ID_A, "/p", space_state("s1")),
+            Err(ServiceError::State(StateError::Invalid))
+        ));
+        assert_eq!(fs::read(&path).expect("read"), b"{ not json");
     }
 }

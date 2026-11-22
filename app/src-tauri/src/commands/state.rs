@@ -7,7 +7,7 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::hosts::model::DecimalU64;
-use crate::state::model::{ClientStateFile, LastSpace, SpaceState};
+use crate::state::model::{ClientSpaceState, ClientStateFile, LastSpace};
 use crate::state::service::{ClientStateView, ClientStates};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -15,7 +15,7 @@ use crate::state::service::{ClientStateView, ClientStates};
 pub struct ClientStateDto {
     pub version: u32,
     pub last_space: Option<LastSpaceDto>,
-    pub spaces: BTreeMap<String, SpaceStateDto>,
+    pub spaces: BTreeMap<String, ClientSpaceStateDto>,
     pub error: Option<String>,
 }
 
@@ -28,7 +28,7 @@ pub struct LastSpaceDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SpaceStateDto {
+pub struct ClientSpaceStateDto {
     pub space_id: String,
     pub focused_tile: Option<String>,
     pub active_terminal: Option<String>,
@@ -36,9 +36,9 @@ pub struct SpaceStateDto {
     pub group_state: Value,
 }
 
-impl From<SpaceState> for SpaceStateDto {
-    fn from(s: SpaceState) -> Self {
-        SpaceStateDto {
+impl From<ClientSpaceState> for ClientSpaceStateDto {
+    fn from(s: ClientSpaceState) -> Self {
+        ClientSpaceStateDto {
             space_id: s.space_id,
             focused_tile: s.focused_tile,
             active_terminal: s.active_terminal,
@@ -48,9 +48,9 @@ impl From<SpaceState> for SpaceStateDto {
     }
 }
 
-impl From<SpaceStateDto> for SpaceState {
-    fn from(s: SpaceStateDto) -> Self {
-        SpaceState {
+impl From<ClientSpaceStateDto> for ClientSpaceState {
+    fn from(s: ClientSpaceStateDto) -> Self {
+        ClientSpaceState {
             space_id: s.space_id,
             focused_tile: s.focused_tile,
             active_terminal: s.active_terminal,
@@ -97,7 +97,7 @@ pub fn set_client_space_state(
     states: State<'_, ClientStates>,
     host_id: String,
     path: String,
-    state: SpaceStateDto,
+    state: ClientSpaceStateDto,
 ) -> Result<(), String> {
     states
         .set_space_state(&host_id, &path, state.into())
@@ -143,7 +143,7 @@ mod tests {
             }),
             spaces: BTreeMap::from([(
                 "/work/a".to_string(),
-                SpaceStateDto {
+                ClientSpaceStateDto {
                     space_id: "space-1".to_string(),
                     focused_tile: Some("t1".to_string()),
                     active_terminal: Some("7".to_string()),

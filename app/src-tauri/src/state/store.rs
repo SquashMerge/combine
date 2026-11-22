@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::model::{ClientStateFile, LastSpace, SpaceState, VERSION};
+use super::model::{ClientSpaceState, ClientStateFile, LastSpace, VERSION};
 
 const MAX_FILE_BYTES: u64 = 1 << 20;
 const MAX_TEMP_ATTEMPTS: u64 = 16;
@@ -135,7 +135,7 @@ impl ClientStateStore {
         self.lock().file.clone()
     }
 
-    pub fn set_space_state(&self, key: &str, state: SpaceState) -> Result<(), StateError> {
+    pub fn set_space_state(&self, key: &str, state: ClientSpaceState) -> Result<(), StateError> {
         self.update(|file| {
             file.spaces.insert(key.to_string(), state);
         })
@@ -361,19 +361,78 @@ mod tests {
         assert!(client_state_path(dir.path(), ID_A).is_ok());
     }
 
-    #[test]
-    fn unknown_field_is_invalid() {
-        let dir = TestDir::new();
+    fn assert_invalid_file(dir: &TestDir, contents: &str) {
         let path = client_state_path(dir.path(), ID_A).expect("path");
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        fs::write(
-            &path,
-            br#"{"version":1,"last_space":null,"spaces":{},"extra":true}"#,
-        )
-        .expect("seed");
+        fs::write(&path, contents).expect("seed");
         let (store, outcome) = ClientStateStore::load(path);
-        assert!(matches!(outcome, LoadOutcome::Invalid(_)));
+        assert!(matches!(outcome, LoadOutcome::Invalid(_)), "{contents}");
         assert_eq!(store.snapshot(), ClientStateFile::default());
+    }
+
+    #[test]
+    fn unknown_field_is_invalid() {
+        let space = r#"{"space_id":"s","focused_tile":null,"active_terminal":null,"active_tabs":{},"group_state":{}"#;
+        let cases = [
+            r#"{"version":1,"last_space":null,"spaces":{},"extra":true}"#.to_string(),
+            format!(r#"{{"version":1,"last_space":null,"spaces":{{"/p":{space},"extra":1}}}}}}"#),
+            r#"{"version":1,"last_space":{"space_id":"s","selected_at_ms":1,"extra":1},"spaces":{}}"#
+                .to_string(),
+        ];
+        for contents in &cases {
+            let dir = TestDir::new();
+            assert_invalid_file(&dir, contents);
+        }
+        let dir = TestDir::new();
+        let valid = format!(r#"{{"version":1,"last_space":null,"spaces":{{"/p":{space}}}}}}}"#);
+        let path = client_state_path(dir.path(), ID_A).expect("path");
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, valid).expect("seed");
+        assert_eq!(ClientStateStore::load(path).1, LoadOutcome::Loaded);
+    }
+
+    #[test]
+    fn other_version_is_invalid() {
+        let dir = TestDir::new();
+        assert_invalid_file(&dir, r#"{"version":2,"last_space":null,"spaces":{}}"#);
+    }
+
+    #[test]
+    fn concurrent_store_instances_never_lose_a_write() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for round in 0..60 {
+            let dir = TestDir::new();
+            let (seed, _) = store_at(&dir, ID_A);
+            seed.set_last_space(last_space("seed", 0)).expect("seed");
+            let (first, _) = store_at(&dir, ID_A);
+            let (second, _) = store_at(&dir, ID_A);
+            let barrier = Barrier::new(2);
+            let (a, b) = thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    barrier.wait();
+                    first.set_last_space(last_space("first", 1))
+                });
+                let b = scope.spawn(|| {
+                    barrier.wait();
+                    second.set_last_space(last_space("second", 2))
+                });
+                (a.join().expect("thread a"), b.join().expect("thread b"))
+            });
+            let on_disk = store_at(&dir, ID_A).0.snapshot().last_space;
+            match (a, b) {
+                (Ok(()), Err(StateError::ChangedOnDisk)) => {
+                    assert_eq!(on_disk, Some(last_space("first", 1)), "round {round}")
+                }
+                (Err(StateError::ChangedOnDisk), Ok(())) => {
+                    assert_eq!(on_disk, Some(last_space("second", 2)), "round {round}")
+                }
+                other => panic!("round {round}: unexpected outcomes {other:?}"),
+            }
+            let parent = first.path().parent().expect("parent");
+            assert!(leftovers(parent).is_empty(), "round {round}");
+        }
     }
 
     #[test]

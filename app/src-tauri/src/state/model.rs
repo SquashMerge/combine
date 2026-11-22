@@ -12,7 +12,7 @@ pub const VERSION: u32 = 1;
 pub struct ClientStateFile {
     pub version: u32,
     pub last_space: Option<LastSpace>,
-    pub spaces: BTreeMap<String, SpaceState>,
+    pub spaces: BTreeMap<String, ClientSpaceState>,
 }
 
 impl Default for ClientStateFile {
@@ -35,7 +35,7 @@ pub struct LastSpace {
 /// What the client remembers about one space. `group_state` is opaque: stored and returned, never read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpaceState {
+pub struct ClientSpaceState {
     pub space_id: String,
     pub focused_tile: Option<String>,
     pub active_terminal: Option<String>,

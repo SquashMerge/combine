@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::json;
 
-use super::model::{LastSpace, SpaceState};
+use super::model::{ClientSpaceState, LastSpace};
 
 pub const ID_A: &str = "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c";
 pub const ID_B: &str = "0f8c2a6e-4b1d-4c5e-9a7b-3d2e1f0a9b8c";
@@ -36,8 +36,8 @@ impl Drop for TestDir {
     }
 }
 
-pub fn space_state(space_id: &str) -> SpaceState {
-    SpaceState {
+pub fn space_state(space_id: &str) -> ClientSpaceState {
+    ClientSpaceState {
         space_id: space_id.to_string(),
         focused_tile: Some("t1".to_string()),
         active_terminal: Some("7".to_string()),
