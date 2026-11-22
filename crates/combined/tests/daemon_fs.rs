@@ -24,7 +24,7 @@ use combined::testing::MemoryFileStore;
 use daemon_support::ShortTempDir;
 use futures::executor::block_on;
 use futures::stream::BoxStream;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use sha2::{Digest, Sha256};
 
 fn mode(path: &Path) -> u32 {
@@ -755,7 +755,7 @@ fn store_contract_change_on_outside_write() {
         fs::write(fs_layout(&fs_space), format!("outside {round}")).unwrap();
     });
     assert!(change.is_some(), "the outside write was never reported");
-    assert!(block_on(fs_store.changes().next()).is_none());
+    assert_eq!(fs_store.changes().next().now_or_never(), Some(None));
 
     let memory = MemoryFileStore::new();
     let memory_space = SpaceId("/repo".to_string());
@@ -903,4 +903,56 @@ fn store_contract_symlinked_workspace_with_fallback_is_unavailable_and_creates_n
         Err(StoreError::Unavailable(_))
     ));
     assert!(!root.exists());
+}
+
+#[test]
+fn store_contract_fallback_stays_authoritative_after_the_project_is_writable() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let folder = Path::new(&space.0);
+    fs::create_dir_all(folder.join(".workspace")).unwrap();
+    fs::write(fs_layout(&space), b"project").unwrap();
+    let workspace = folder.join(".workspace");
+    if !lock_down(&workspace) {
+        eprintln!("skipped: this user can write a 0o555 folder");
+        return;
+    }
+    let fs_store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    let first = block_on(fs_store.write(&space, LAYOUT, b"A".to_vec()));
+    unlock(&workspace);
+    let first = first.unwrap();
+    assert!(first.read_only);
+
+    let memory = MemoryFileStore::new();
+    let memory_space = SpaceId("/repo".to_string());
+    memory.write_outside(&memory_space, LAYOUT, b"project".to_vec());
+    memory.set_read_only(&memory_space, true);
+    assert!(
+        block_on(memory.write(&memory_space, LAYOUT, b"A".to_vec()))
+            .unwrap()
+            .read_only
+    );
+    memory.set_read_only(&memory_space, false);
+
+    for (name, store, space) in [
+        ("fs", &fs_store as &dyn FileStore, &space),
+        ("memory", &memory, &memory_space),
+    ] {
+        let outcome = block_on(store.write(space, LAYOUT, b"B".to_vec())).unwrap();
+        assert!(outcome.read_only, "{name}");
+        assert_eq!(outcome.hash, sha256(b"B"), "{name}");
+        let file = block_on(store.read(space, LAYOUT)).unwrap().unwrap();
+        assert_eq!(file.bytes, b"B", "{name}");
+        assert_eq!(file.hash, outcome.hash, "{name}");
+        assert!(file.read_only, "{name}");
+    }
+    assert_eq!(fs::read(fs_layout(&space)).unwrap(), b"project");
+    assert_eq!(
+        memory.bytes(&memory_space, LAYOUT),
+        Some(b"project".to_vec())
+    );
+    assert_eq!(
+        memory.fallback_bytes(&memory_space, LAYOUT),
+        Some(b"B".to_vec())
+    );
 }

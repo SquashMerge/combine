@@ -11,6 +11,7 @@ use combined::adapters::fs::watcher::{classify, SpaceWatcher, WatchRoots};
 use combined::model::SpaceId;
 use combined::ports::FileChange;
 use daemon_support::ShortTempDir;
+use notify::event::Flag;
 use notify::event::{
     AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
     RenameMode,
@@ -182,20 +183,58 @@ fn workspace_creation_rearms_watch() {
     let (_watcher, mut rx) = start(&space);
     let workspace = Path::new(&space.0).join(".workspace");
     fs::create_dir(&workspace).unwrap();
+    assert!(
+        change_after(&mut rx, &space, || {}),
+        "creating .workspace reported no layout change"
+    );
     let mut round = 0;
     let seen = change_after(&mut rx, &space, || {
         round += 1;
         fs::write(workspace.join("layout.json"), format!("{round}")).unwrap();
     });
-    assert!(seen, "no change after .workspace was created");
+    assert!(seen, "no change from the re-armed watch");
 
     fs::remove_dir_all(&workspace).unwrap();
+    while rx.try_recv().is_ok() {}
     fs::create_dir(&workspace).unwrap();
+    assert!(
+        change_after(&mut rx, &space, || {}),
+        "re-creating .workspace reported no layout change"
+    );
+}
+
+#[test]
+fn failed_watch_is_not_registered() {
+    let scratch = ShortTempDir::new();
+    let folder = scratch.path().join("later");
+    let space = SpaceId(folder.to_str().unwrap().to_string());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let watcher = SpaceWatcher::new(tx).unwrap();
+    assert!(watcher.watch(&space).is_err());
+    fs::create_dir_all(folder.join(".workspace")).unwrap();
+    watcher.watch(&space).unwrap();
+    let mut round = 0;
     let seen = change_after(&mut rx, &space, || {
         round += 1;
-        fs::write(workspace.join("layout.json"), format!("{round}")).unwrap();
+        fs::write(folder.join(".workspace/layout.json"), format!("{round}")).unwrap();
     });
-    assert!(seen, "no change after .workspace was created again");
+    assert!(seen, "the space was not watched after the second attempt");
+}
+
+#[test]
+fn classify_maps_a_rescan_to_every_space() {
+    let (a, b) = (
+        SpaceId("/work/a".to_string()),
+        SpaceId("/work/b".to_string()),
+    );
+    let mut roots = roots(&a);
+    assert!(roots.add(&b));
+    let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+    assert_eq!(
+        classify(&rescan, &roots),
+        [layout_change(&a), layout_change(&b)]
+    );
+    assert_eq!(classify(&Event::new(EventKind::Other), &roots), []);
 }
 
 #[test]

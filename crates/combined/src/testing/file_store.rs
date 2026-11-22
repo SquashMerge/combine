@@ -170,9 +170,7 @@ impl FileStore for MemoryFileStore {
             return Err(StoreError::InvalidPath);
         }
         let mut state = self.state();
-        let Some(entry) = state.spaces.get_mut(space) else {
-            return Ok(None);
-        };
+        let entry = state.spaces.entry(space.clone()).or_default();
         *entry.read_counts.entry(path.to_string()).or_default() += 1;
         let revision = StoreRevision(entry.revision);
         let (bytes, read_only) = match entry.fallback.get(path) {
@@ -208,7 +206,7 @@ impl FileStore for MemoryFileStore {
             return Err(StoreError::ReadOnly(format!("{} is read-only", space.0)));
         }
         let hash = content_hash(&bytes);
-        let read_only = entry.read_only;
+        let read_only = entry.read_only || entry.fallback.contains_key(path);
         entry.revision += 1;
         let revision = StoreRevision(entry.revision);
         *entry.write_counts.entry(path.to_string()).or_default() += 1;

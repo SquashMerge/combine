@@ -65,13 +65,26 @@ impl WatchRoots {
         });
         true
     }
+
+    fn remove(&mut self, space: &SpaceId) {
+        self.spaces.retain(|watched| &watched.space != space);
+    }
 }
 
 /// The `layout.json` changes in `event`: the exact name, directly under a watched space's
 /// `.workspace/`. A name starting with `.` is a temp file and is never reported. Every event
 /// kind counts (a rename onto the file and a removal included) except the ones that only
-/// observe a read, which the daemon's own reads would otherwise feed back.
+/// observe a read, which the daemon's own reads would otherwise feed back. An event that asks
+/// for a rescan (events were lost) gives a change for every watched space, since a re-read
+/// that finds the same bytes is ignored.
 pub fn classify(event: &Event, roots: &WatchRoots) -> Vec<FileChange> {
+    if event.need_rescan() {
+        return roots
+            .spaces
+            .iter()
+            .map(|watched| layout_change(&watched.space))
+            .collect();
+    }
     if matches!(
         event.kind,
         EventKind::Access(
@@ -113,11 +126,10 @@ fn layout_change(space: &SpaceId) -> FileChange {
     }
 }
 
+/// What the event handler and the re-arm thread share. It never owns the notify watcher: the
+/// handler runs on the watcher's own thread, and dropping a watcher from there would hang.
 struct Shared {
     roots: Mutex<WatchRoots>,
-    /// Held while a watch is added. The event handler never takes it: notify runs the handler
-    /// on the thread that serves `watch`, so waiting on a watch from the handler would hang.
-    watcher: Mutex<Option<RecommendedWatcher>>,
     changes: UnboundedSender<FileChange>,
 }
 
@@ -125,82 +137,90 @@ impl Shared {
     fn roots(&self) -> MutexGuard<'_, WatchRoots> {
         self.roots.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
 
-    /// Watches `space`'s `.workspace/` when it exists and isn't watched yet. True when this
-    /// call began watching it.
-    fn arm(&self, space: &SpaceId) -> bool {
-        let mut guard = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(watcher) = guard.as_mut() else {
-            return false;
-        };
-        let workspace = {
-            let roots = self.roots();
-            match roots.spaces.iter().find(|watched| &watched.space == space) {
-                Some(watched) if !watched.armed => Path::new(&watched.space.0).join(WORKSPACE),
-                _ => return false,
-            }
-        };
-        if watcher
-            .watch(&workspace, RecursiveMode::NonRecursive)
-            .is_err()
-        {
-            return false;
+/// Held while a watch is added. The event handler never takes it: notify runs the handler on
+/// the thread that serves `watch`, so waiting on a watch from the handler would hang.
+type WatcherCell = Mutex<Option<RecommendedWatcher>>;
+
+/// Watches `space`'s `.workspace/` when it exists and isn't watched yet. True when this call
+/// began watching it.
+fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> bool {
+    let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(watcher) = guard.as_mut() else {
+        return false;
+    };
+    let workspace = {
+        let roots = shared.roots();
+        match roots.spaces.iter().find(|watched| &watched.space == space) {
+            Some(watched) if !watched.armed => Path::new(&watched.space.0).join(WORKSPACE),
+            _ => return false,
         }
-        if let Some(watched) = self
-            .roots()
-            .spaces
-            .iter_mut()
-            .find(|watched| &watched.space == space)
-        {
-            watched.armed = true;
-        }
-        true
+    };
+    if watcher
+        .watch(&workspace, RecursiveMode::NonRecursive)
+        .is_err()
+    {
+        return false;
     }
+    if let Some(watched) = shared
+        .roots()
+        .spaces
+        .iter_mut()
+        .find(|watched| &watched.space == space)
+    {
+        watched.armed = true;
+    }
+    true
 }
 
 /// One notify watcher for every watched space. Dropping it stops the watching.
 pub struct SpaceWatcher {
     shared: Arc<Shared>,
+    watcher: Arc<WatcherCell>,
 }
 
 impl SpaceWatcher {
     pub fn new(changes: UnboundedSender<FileChange>) -> notify::Result<SpaceWatcher> {
         let shared = Arc::new(Shared {
             roots: Mutex::new(WatchRoots::new()),
-            watcher: Mutex::new(None),
             changes,
         });
         let (rearm, requests) = mpsc::channel();
-        let weak = Arc::downgrade(&shared);
-        let watcher = notify::recommended_watcher(move |result| handle(&weak, &rearm, result))?;
-        *shared
-            .watcher
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(watcher);
-        let weak = Arc::downgrade(&shared);
+        let handler_shared = Arc::clone(&shared);
+        let watcher =
+            notify::recommended_watcher(move |result| handle(&handler_shared, &rearm, result))?;
+        let cell = Arc::new(Mutex::new(Some(watcher)));
+        let thread_shared = Arc::clone(&shared);
+        let thread_cell = Arc::downgrade(&cell);
         thread::Builder::new()
             .name("layout-rearm".to_string())
-            .spawn(move || rearm_loop(&weak, &requests))
+            .spawn(move || rearm_loop(&thread_shared, &thread_cell, &requests))
             .map_err(notify::Error::io)?;
-        Ok(SpaceWatcher { shared })
+        Ok(SpaceWatcher {
+            shared,
+            watcher: cell,
+        })
     }
 
-    /// Starts watching `space`'s folder and, when it exists, its `.workspace/`.
+    /// Starts watching `space`'s folder and, when it exists, its `.workspace/`. A space whose
+    /// folder can't be watched is not registered, so a later call tries again.
     pub fn watch(&self, space: &SpaceId) -> notify::Result<()> {
         if !self.shared.roots().add(space) {
             return Ok(());
         }
-        {
-            let mut guard = self
-                .shared
-                .watcher
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(watcher) = guard.as_mut() {
-                watcher.watch(Path::new(&space.0), RecursiveMode::NonRecursive)?;
+        let watched = {
+            let mut guard = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
+            match guard.as_mut() {
+                Some(watcher) => watcher.watch(Path::new(&space.0), RecursiveMode::NonRecursive),
+                None => Ok(()),
             }
+        };
+        if let Err(error) = watched {
+            self.shared.roots().remove(space);
+            return Err(error);
         }
-        self.shared.arm(space);
+        arm(&self.shared, &self.watcher, space);
         Ok(())
     }
 }
@@ -208,21 +228,18 @@ impl SpaceWatcher {
 /// Watches the `.workspace/` folders the handler saw appear, and reports `layout.json` for
 /// each, since the file may have been written before the watch began. Ends when the watcher
 /// that owns the handler's sender is dropped.
-fn rearm_loop(shared: &Weak<Shared>, requests: &mpsc::Receiver<SpaceId>) {
+fn rearm_loop(shared: &Shared, cell: &Weak<WatcherCell>, requests: &mpsc::Receiver<SpaceId>) {
     for space in requests {
-        let Some(shared) = shared.upgrade() else {
+        let Some(cell) = cell.upgrade() else {
             return;
         };
-        if shared.arm(&space) {
+        if arm(shared, &cell, &space) {
             let _ = shared.changes.send(layout_change(&space));
         }
     }
 }
 
-fn handle(shared: &Weak<Shared>, rearm: &mpsc::Sender<SpaceId>, result: notify::Result<Event>) {
-    let Some(shared) = shared.upgrade() else {
-        return;
-    };
+fn handle(shared: &Shared, rearm: &mpsc::Sender<SpaceId>, result: notify::Result<Event>) {
     let mut wanted = Vec::new();
     let changes = {
         let mut roots = shared.roots();

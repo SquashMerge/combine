@@ -240,23 +240,30 @@ impl FileStore for FsFileStore {
             .revisions
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let denied = match checked_file(space, path, true) {
-            Ok(Some(file)) => match write_atomic(&file, &bytes, 0o644) {
-                Ok(()) => None,
-                Err(error) if is_denied(&error) => Some(error),
-                Err(error) => return Err(unavailable(error)),
-            },
-            Ok(None) => {
-                return Err(StoreError::Unavailable(
-                    "the folder could not be created".to_string(),
-                ))
-            }
-            Err(Checked::Denied(error)) => Some(error),
-            Err(Checked::Refused(error)) => return Err(error),
-        };
-        if let Some(error) = &denied {
-            let Some(copy) = self.fallback_file(space, path) else {
-                return Err(StoreError::ReadOnly(error.to_string()));
+        let copy = self.fallback_file(space, path);
+        let mut aside = copy
+            .as_ref()
+            .filter(|copy| copy.is_file())
+            .map(|_| "the fallback copy is authoritative".to_string());
+        if aside.is_none() {
+            aside = match checked_file(space, path, true) {
+                Ok(Some(file)) => match write_atomic(&file, &bytes, 0o644) {
+                    Ok(()) => None,
+                    Err(error) if is_denied(&error) => Some(error.to_string()),
+                    Err(error) => return Err(unavailable(error)),
+                },
+                Ok(None) => {
+                    return Err(StoreError::Unavailable(
+                        "the folder could not be created".to_string(),
+                    ))
+                }
+                Err(Checked::Denied(error)) => Some(error.to_string()),
+                Err(Checked::Refused(error)) => return Err(error),
+            };
+        }
+        if let Some(detail) = &aside {
+            let Some(copy) = copy else {
+                return Err(StoreError::ReadOnly(detail.clone()));
             };
             if let Some(parent) = copy.parent() {
                 std::fs::create_dir_all(parent).map_err(unavailable)?;
@@ -268,7 +275,7 @@ impl FileStore for FsFileStore {
         Ok(WriteOutcome {
             revision: StoreRevision(*revision),
             hash: content_hash(&bytes),
-            read_only: denied.is_some(),
+            read_only: aside.is_some(),
         })
     }
 

@@ -930,7 +930,7 @@ fn memory_write_enqueues_change_before_returning() {
             .await
             .unwrap();
         assert_eq!(changes.next().now_or_never(), None);
-        assert!(store.changes().next().await.is_none());
+        assert_eq!(store.changes().next().now_or_never(), Some(None));
     });
 }
 
@@ -988,6 +988,9 @@ fn memory_outside_edits_and_faults() {
         Err(StoreError::ReadOnly(_))
     ));
     assert_eq!(bare.bytes(&space, "layout.json"), None);
+    let unseen = SpaceId("/unseen".to_string());
+    assert_eq!(block_on(bare.read(&unseen, "layout.json")), Ok(None));
+    assert_eq!(bare.read_count(&unseen, "layout.json"), 1);
 }
 
 /// Counts how often it is woken.
