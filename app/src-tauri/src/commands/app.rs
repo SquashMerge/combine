@@ -2,8 +2,9 @@
 
 use tauri::{Manager, RunEvent};
 
-use super::hosts;
+use super::{hosts, state};
 use crate::hosts::service::{HostsService, ServiceDeps};
+use crate::state::service::ClientStates;
 
 /// Runs the Combine window until it is closed.
 pub fn run() {
@@ -16,11 +17,15 @@ pub fn run() {
                 hosts::sink(app.handle().clone()),
             );
             app.manage(service);
+            app.manage(ClientStates::new(data_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             hosts::hosts_snapshot,
-            hosts::retry_host
+            hosts::retry_host,
+            state::client_state,
+            state::set_client_space_state,
+            state::set_last_space
         ])
         .build(tauri::generate_context!())
         .expect("Combine failed to start")
