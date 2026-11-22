@@ -9,14 +9,19 @@ use combine_protocol::*;
 struct Tracking;
 
 static LARGEST: AtomicUsize = AtomicUsize::new(0);
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK_LIVE: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for Tracking {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LARGEST.fetch_max(layout.size(), Ordering::Relaxed);
+        let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+        PEAK_LIVE.fetch_max(live, Ordering::Relaxed);
         System.alloc(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
         System.dealloc(ptr, layout)
     }
 }
@@ -29,6 +34,18 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, usize) {
     LARGEST.store(0, Ordering::Relaxed);
     let result = f();
     (result, LARGEST.load(Ordering::Relaxed))
+}
+
+/// Runs `f` and returns its result with the most bytes it held live at once,
+/// counted from what was live when it started.
+fn measure_live<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK_LIVE.store(base, Ordering::Relaxed);
+    let result = f();
+    (
+        result,
+        PEAK_LIVE.load(Ordering::Relaxed).saturating_sub(base),
+    )
 }
 
 fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -138,6 +155,54 @@ fn decoding_stays_within_its_allocation_bounds() {
         }
         assert!(peak <= 2 * frame_cap, "full terminals: peak {peak}");
     }
+
+    let full_layout = full_control_frame(
+        r#"{"type":"layout","request":null,"layout":{"space":"s","layout_revision":1,"read_only":false,"error":null,"dropped":null,"root":{"type":"tile","id":"a","active":null,"panels":["#,
+        |_| r#""p","#.to_owned(),
+        r#""p"]}}"#,
+    );
+    for (result, peak) in decode_both::<DaemonMessage>(&full_layout) {
+        match result {
+            Ok(DaemonMessage::Layout(layout)) => match layout.layout.root {
+                LayoutNode::Tile { panels, .. } => assert!(panels.len() > 100_000),
+                other => panic!("expected a tile, got {other:?}"),
+            },
+            other => panic!("expected layout, got {other:?}"),
+        }
+        // The largest single allocation: the panel list's `Vec` of 24-byte `String`s.
+        assert!(peak <= 8 * frame_cap, "full layout: peak {peak}");
+    }
+
+    // Live bytes, not the largest allocation: an unknown key is skipped, never stored, and a
+    // list of tiny IDs costs a `String` each.
+    let nested_unknown = full_control_frame(
+        r#"{"type":"layout","request":null,"layout":{"space":"s","layout_revision":1,"read_only":false,"error":null,"dropped":null,"root":{"type":"split","dir":"h","ratio":0.5,"a":{"type":"tile","id":"a","panels":[],"active":null,"#,
+        |i| format!(r#""u{i}":0,"#),
+        r#""last":0},"b":{"type":"tile","id":"b","panels":[],"active":null}}}"#,
+    );
+    let op_unknown = full_control_frame(
+        r#"{"type":"mutate_layout","request":1,"space":"s","base_layout_revision":0,"ops":[{"op":"close_tile","tile":"a","#,
+        |i| format!(r#""u{i}":0,"#),
+        r#""last":0}]"#,
+    );
+    let leaves = full_control_frame(
+        r#"{"type":"mutate_layout","request":1,"space":"s","base_layout_revision":0,"ops":[{"op":"set_ratio","ratio":0.5,"leaves":["#,
+        |_| r#""p","#.to_owned(),
+        r#""p"]}]"#,
+    );
+    let slack = 64 * 1024;
+    let (decoded, live) = measure_live(|| DaemonMessage::decode(&nested_unknown));
+    assert!(decoded.is_ok());
+    assert!(live <= slack, "nested unknown keys stored {live} bytes");
+    let (decoded, live) = measure_live(|| ClientMessage::decode(&op_unknown));
+    assert!(decoded.is_ok());
+    assert!(live <= slack, "op unknown keys stored {live} bytes");
+    let (decoded, live) = measure_live(|| DaemonMessage::decode(&full_layout));
+    assert!(decoded.is_ok());
+    assert!(live <= 32 * frame_cap, "panel list: {live} live bytes");
+    let (decoded, live) = measure_live(|| ClientMessage::decode(&leaves));
+    assert!(decoded.is_ok());
+    assert!(live <= 32 * frame_cap, "leaves list: {live} live bytes");
 
     let worst_error = {
         let target = MAX_FRAME_LEN as usize - 1;

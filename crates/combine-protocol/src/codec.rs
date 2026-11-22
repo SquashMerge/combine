@@ -5,12 +5,12 @@ use std::fmt::{self, Write as _};
 use serde::Deserialize;
 
 use crate::client::{
-    Ack, Attach, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input, RequestOwnership,
-    Resize, Resume, SetDisplay, WatchTerminals,
+    Ack, Attach, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input, MutateLayout,
+    RequestOwnership, Resize, Resume, SetDisplay, UnwatchLayout, WatchLayout, WatchTerminals,
 };
 use crate::daemon::{
-    Attached, Closed, DaemonMessage, Data, ErrorMessage, Facts, Gap, Lost, Ownership, Resized,
-    Resumed, Resynced, Started, Terminals, Welcome,
+    Attached, Closed, DaemonMessage, Data, ErrorMessage, Facts, Gap, Layout, Lost, Ownership,
+    Resized, Resumed, Resynced, Started, Terminals, Welcome,
 };
 use crate::error::{DecodeError, EncodeError};
 use crate::frame::{
@@ -195,6 +195,9 @@ impl sealed::Sealed for ClientMessage {
                     "set_display" => Self::SetDisplay(parse::<SetDisplay>(text)?),
                     "request_ownership" => Self::RequestOwnership(parse::<RequestOwnership>(text)?),
                     "watch_terminals" => Self::WatchTerminals(parse::<WatchTerminals>(text)?),
+                    "watch_layout" => Self::WatchLayout(parse::<WatchLayout>(text)?),
+                    "unwatch_layout" => Self::UnwatchLayout(parse::<UnwatchLayout>(text)?),
+                    "mutate_layout" => Self::MutateLayout(parse::<MutateLayout>(text)?),
                     other => return Err(unknown_message_type(other)),
                 })
             }
@@ -244,6 +247,7 @@ impl sealed::Sealed for DaemonMessage {
                     "ownership" => Self::Ownership(parse::<Ownership>(text)?),
                     "error" => Self::Error(parse::<ErrorMessage>(text)?),
                     "terminals" => Self::Terminals(parse::<Terminals>(text)?),
+                    "layout" => Self::Layout(parse::<Layout>(text)?),
                     "started" => Self::Started(parse::<Started>(text)?),
                     "resized" => Self::Resized(parse::<Resized>(text)?),
                     "facts" => Self::Facts(parse::<Facts>(text)?),

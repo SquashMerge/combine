@@ -9,6 +9,7 @@ use crate::frame::{MAX_DATA_CHUNK, MAX_ERROR_DETAIL};
 use crate::ids::{
     AttachmentId, BackendGeneration, Cursor, HostId, OwnershipGeneration, RequestId, Seq,
 };
+use crate::layout::LayoutSnapshot;
 use crate::terminals::{SpaceInfo, TerminalInfo};
 
 /// The daemon's answer to `hello`.
@@ -81,6 +82,11 @@ pub enum ErrorCode {
     WatchOnly,
     /// A well-formed message the daemon refuses, for example 0 columns.
     InvalidRequest,
+    /// A layout request named a space the host doesn't list.
+    UnknownSpace,
+    /// A `mutate_layout` made against a layout revision that is no longer
+    /// current.
+    StaleLayout,
     /// Anything else.
     Internal,
 }
@@ -113,6 +119,15 @@ pub struct Terminals {
     pub request: Option<RequestId>,
     pub terminals: Vec<TerminalInfo>,
     pub spaces: Vec<SpaceInfo>,
+}
+
+/// A space's layout. With `request: Some(..)` it answers a `watch_layout` or
+/// an accepted `mutate_layout`; with `request: None` it is a push to the
+/// space's watchers, at most once per flush. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    pub request: Option<RequestId>,
+    pub layout: LayoutSnapshot,
 }
 
 /// Whether the backend reproduced the screen exactly.
@@ -223,6 +238,7 @@ pub enum DaemonMessage {
     Ownership(Ownership),
     Error(ErrorMessage),
     Terminals(Terminals),
+    Layout(Layout),
     Started(Started),
     #[serde(skip)]
     Data(Data),
@@ -244,6 +260,7 @@ impl DaemonMessage {
             Self::Ownership(_) => "ownership",
             Self::Error(_) => "error",
             Self::Terminals(_) => "terminals",
+            Self::Layout(_) => "layout",
             Self::Started(_) => "started",
             Self::Data(_) => "data",
             Self::Resized(_) => "resized",
@@ -280,7 +297,7 @@ impl DaemonMessage {
     /// The stream is an attachment's seven events, in cursor order, plus the
     /// in-order `gap { request: None }` after the last of them. Control
     /// traffic (`welcome`, `attached`, `resumed`, a `gap` answering a resume,
-    /// `ownership`, `error` and `terminals`) is queued ahead of output.
+    /// `ownership`, `error`, `terminals` and `layout`) is queued ahead of output.
     pub fn stream_attachment(&self) -> Option<AttachmentId> {
         match self {
             Self::Gap(gap) if gap.request.is_none() => Some(gap.attachment),
