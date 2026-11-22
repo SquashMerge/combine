@@ -6,6 +6,8 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 const CHUNK: usize = 64 * 1024;
@@ -29,8 +31,18 @@ pub fn run(socket: &Path) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    thread::spawn(move || copy_stdin(upstream));
+    let stdin_failed = Arc::new(AtomicBool::new(false));
+    let failed = Arc::clone(&stdin_failed);
+    thread::spawn(move || {
+        let mut upstream = upstream;
+        if let Err(error) = relay_input(&mut io::stdin().lock(), &mut upstream) {
+            eprintln!("combined: {error}");
+            failed.store(true, Ordering::SeqCst);
+            let _ = upstream.shutdown(Shutdown::Both);
+        }
+    });
     match copy_to_stdout(stream) {
+        Ok(()) if stdin_failed.load(Ordering::SeqCst) => ExitCode::from(1),
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("combined: {error}");
@@ -39,22 +51,19 @@ pub fn run(socket: &Path) -> ExitCode {
     }
 }
 
-fn copy_stdin(mut socket: UnixStream) {
-    let mut stdin = io::stdin().lock();
+/// Copies `input` to the socket until it ends, then closes the socket's write side. A read or
+/// write error is returned and leaves the socket open.
+pub fn relay_input<R: Read>(input: &mut R, socket: &mut UnixStream) -> io::Result<()> {
     let mut buf = vec![0; CHUNK];
     loop {
-        match stdin.read(&mut buf) {
+        match input.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => {
-                if socket.write_all(&buf[..n]).is_err() {
-                    return;
-                }
-            }
+            Ok(n) => socket.write_all(&buf[..n])?,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(error) => return Err(error),
         }
     }
-    let _ = socket.shutdown(Shutdown::Write);
+    socket.shutdown(Shutdown::Write)
 }
 
 fn copy_to_stdout(mut socket: UnixStream) -> io::Result<()> {

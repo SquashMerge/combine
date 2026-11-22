@@ -19,6 +19,7 @@ use combine_protocol::{
 };
 use combined::adapters::fs::data_dir::DataDir;
 use combined::model::Millis;
+use combined::rpc::connect::relay_input;
 use combined::rpc::flush::{FlushAt, FlushSchedule};
 use combined::rpc::socket::{bind, BindError};
 use combined::rpc::{ServeOptions, ServerHandle, ServerStats};
@@ -83,6 +84,20 @@ fn one_socket_path_with_two_data_dirs_refuses_the_second_bind() {
     drop(client);
     assert!(fs::metadata(&path).unwrap().file_type().is_socket());
     assert_eq!(mode(&path), 0o600);
+}
+
+#[test]
+fn bind_refuses_a_second_bind_while_the_lock_is_held_and_nothing_listens() {
+    let scratch = ShortTempDir::new();
+    let path = scratch.sock("locked.sock");
+    let first = bind(&path).unwrap();
+    drop(first.listener);
+    assert!(UnixStream::connect(&path).is_err());
+
+    let second = bind(&path);
+    assert!(matches!(second, Err(BindError::InUse { .. })), "{second:?}");
+    assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+    // `first` still holds its lock here: only the listener was moved out of it.
 }
 
 #[test]
@@ -704,6 +719,57 @@ fn unread_watch_answers_over_the_bound_disconnect() {
     std::io::Write::write_all(&mut stream, &burst).unwrap();
 
     env.wait_connections(0);
+}
+
+#[test]
+fn a_client_that_never_reads_is_closed_by_the_write_timeout() {
+    let env = Env::with(ServeOptions {
+        write_timeout: Duration::from_millis(200),
+        ..ServeOptions::default()
+    });
+    let mut spec = spawn_spec(env.work.to_str().unwrap(), 80, 24);
+    spec.argv.push("x".repeat(200 * 1024));
+    block_on(combined::ports::TerminalBackend::spawn(&*env.backend, spec)).unwrap();
+
+    let mut stream = connect_and_never_read(&env.socket);
+    env.wait_connections(1);
+    // Twelve answers, spread over many flushes: under the bound of 16 unflushed answers, so
+    // only the write timeout can end the connection.
+    for request in 1..=12 {
+        if std::io::Write::write_all(&mut stream, &watch_frame(request)).is_err() {
+            break; // the daemon has already closed the connection
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    env.wait_connections(0);
+}
+
+#[test]
+fn relaying_input_half_closes_at_eof_and_reports_a_read_error() {
+    struct Failing;
+    impl std::io::Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("stdin failed"))
+        }
+    }
+
+    let (mut near, mut far) = UnixStream::pair().unwrap();
+    relay_input(&mut &b"frame"[..], &mut near).unwrap();
+    let mut received = Vec::new();
+    std::io::Read::read_to_end(&mut far, &mut received).unwrap();
+    assert_eq!(received, b"frame");
+
+    let (mut near, far) = UnixStream::pair().unwrap();
+    let error = relay_input(&mut Failing, &mut near).unwrap_err();
+    assert_eq!(error.to_string(), "stdin failed");
+    far.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut byte = [0; 1];
+    let still_open = std::io::Read::read(&mut &far, &mut byte).unwrap_err();
+    assert!(matches!(
+        still_open.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
 }
 
 #[test]

@@ -140,19 +140,22 @@ fn malformed(error: &DecodeError) -> DaemonMessage {
     error_message(ErrorCode::Malformed, format!("malformed frame: {error}"))
 }
 
-/// Writes one message. A terminal list too large for a frame becomes an `internal` error.
+/// Writes one message. A message too large for a frame is replaced by an `internal` error that
+/// names its kind and carries the request it answers, if any.
 fn write_one<W: Write>(out: &mut W, message: &DaemonMessage) -> Result<(), WriteError> {
     match write_message(out, message) {
         Err(WriteError::Encode(EncodeError::FrameTooLarge { .. })) => {
-            let request = match message {
-                DaemonMessage::Terminals(terminals) => terminals.request,
-                _ => None,
+            let (what, request) = match message {
+                DaemonMessage::Terminals(terminals) => {
+                    ("the terminal list".to_string(), terminals.request)
+                }
+                other => (format!("a {} message", other.type_name()), None),
             };
             write_message(
                 out,
                 &DaemonMessage::Error(ErrorMessage {
                     code: ErrorCode::Internal,
-                    message: "the terminal list is larger than one frame".to_string(),
+                    message: format!("{what} is larger than one frame"),
                     request,
                     attachment: None,
                 }),
