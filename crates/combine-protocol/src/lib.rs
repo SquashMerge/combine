@@ -25,15 +25,16 @@ mod frame;
 mod handshake;
 mod ids;
 mod stream;
+mod terminals;
 
 pub use client::{
     Ack, Attach, AttachRequestOptions, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input,
-    RequestOwnership, Resize, Resume, SetDisplay,
+    RequestOwnership, Resize, Resume, SetDisplay, WatchTerminals,
 };
 pub use codec::WireMessage;
 pub use daemon::{
     Attached, CloseReason, Closed, DaemonMessage, Data, ErrorCode, ErrorMessage, Facts, Fidelity,
-    Gap, Lost, Ownership, Resized, Resumed, Resynced, Started, Welcome,
+    Gap, Lost, Ownership, Resized, Resumed, Resynced, Started, Terminals, Welcome,
 };
 pub use display::Display;
 pub use error::{DecodeError, EncodeError, ReadError, WriteError};
@@ -49,3 +50,4 @@ pub use ids::{
     TermId,
 };
 pub use stream::{read_message, write_message};
+pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};

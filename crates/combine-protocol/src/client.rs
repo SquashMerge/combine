@@ -88,6 +88,14 @@ pub struct RequestOwnership {
     pub attachment: AttachmentId,
 }
 
+/// Subscribes the connection to the host's terminals and spaces. The daemon
+/// answers `terminals` carrying this `request`, then pushes a fresh snapshot
+/// after each change. Asking again re-answers; there is no unwatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchTerminals {
+    pub request: RequestId,
+}
+
 /// Typed input: frame kind 3, never JSON. A caller with more than
 /// [`MAX_INPUT_CHUNK`](crate::MAX_INPUT_CHUNK) bytes splits it, in order, with
 /// `chunks`.
@@ -126,6 +134,7 @@ pub enum ClientMessage {
     Focus(Focus),
     SetDisplay(SetDisplay),
     RequestOwnership(RequestOwnership),
+    WatchTerminals(WatchTerminals),
     #[serde(skip)]
     Input(Input),
     #[serde(skip)]
@@ -146,6 +155,7 @@ impl ClientMessage {
             Self::Focus(_) => "focus",
             Self::SetDisplay(_) => "set_display",
             Self::RequestOwnership(_) => "request_ownership",
+            Self::WatchTerminals(_) => "watch_terminals",
             Self::Input(_) => "input",
             Self::AutomaticReply(_) => "automatic_reply",
         }

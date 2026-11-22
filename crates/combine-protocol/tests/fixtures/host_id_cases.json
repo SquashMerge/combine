@@ -1,0 +1,21 @@
+{
+  "accept": [
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c",
+    "00000000-0000-0000-0000-000000000000",
+    "ffffffff-ffff-ffff-ffff-ffffffffffff"
+  ],
+  "reject": [
+    "",
+    "6A1D3C9E-2F4B-4E8A-B7C5-1D0E9F8A7B6C",
+    "6a1d3c9e2f4b4e8ab7c51d0e9f8a7b6c",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6cc",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6g",
+    "6a1d3c9e_2f4b-4e8a-b7c5-1d0e9f8a7b6c",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6é",
+    " 6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c\n",
+    "{6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c}",
+    "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6+"
+  ]
+}
