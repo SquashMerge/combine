@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::backend::BackendChoice;
 use crate::adapters::fs::config::{BackendName, ConfigFileError, DaemonConfigFile};
+use crate::rpc::socket::MAX_SOCKET_PATH;
 
-/// The longest socket path macOS accepts.
-const MAX_SOCKET_PATH: usize = 103;
 const DATA_DIR_UNDER_HOME: &str = "Library/Application Support/com.squashmerge.combined";
 const SOCKET_NAME: &str = "combined.sock";
 

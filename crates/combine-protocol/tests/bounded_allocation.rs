@@ -125,6 +125,20 @@ fn decoding_stays_within_its_allocation_bounds() {
         assert!(peak <= frame_cap, "many keys: peak {peak}");
     }
 
+    let terminal = r#"{"id":"t","cwd":"","argv":[],"state":"running","exit_code":null,"labels":{},"cols":1,"rows":1}"#;
+    let full_terminals = full_control_frame(
+        r#"{"type":"terminals","request":null,"spaces":[],"terminals":["#,
+        |_| format!("{terminal},"),
+        &format!("{terminal}]"),
+    );
+    for (result, peak) in decode_both::<DaemonMessage>(&full_terminals) {
+        match result {
+            Ok(DaemonMessage::Terminals(list)) => assert!(list.terminals.len() > 10_000),
+            other => panic!("expected terminals, got {other:?}"),
+        }
+        assert!(peak <= 2 * frame_cap, "full terminals: peak {peak}");
+    }
+
     let worst_error = {
         let target = MAX_FRAME_LEN as usize - 1;
         let prefix = r#"{"type":"hello","protocol_version":""#;

@@ -13,10 +13,12 @@ use crate::adapters::fs::file_store::FsFileStore;
 use crate::adapters::fs::git_probe::FsGitProbe;
 use crate::adapters::fs::host_id;
 use crate::core::{Core, CoreConfig, Driver, TerminalList};
+use crate::ports::TerminalBackend;
 use crate::rpc::socket::{self, BindError};
 use crate::rpc::{self, ServeError, ServeOptions, ServerParts, ServerStats};
 use cli::Command;
 use clock::MonotonicClock;
+use combine_protocol::HostId;
 use config::{DaemonConfigError, DaemonEnv};
 use ids::IdReservation;
 
@@ -111,7 +113,9 @@ pub fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("combined: {error}");
+            for line in error.to_string().lines() {
+                eprintln!("combined: {line}");
+            }
             ExitCode::from(error.exit_code())
         }
     }
@@ -142,6 +146,32 @@ fn run_connect(
     };
     let socket = config::connect_socket(socket, file.as_ref(), &env)?;
     Ok(rpc::connect::run(&socket))
+}
+
+/// Builds what the server runs on from a backend. `run_serve` and the in-process test servers
+/// both come through here, so a test exercises the wiring the daemon ships.
+pub fn server_parts(
+    backend: Arc<dyn TerminalBackend>,
+    id_base: u64,
+    host_id: HostId,
+    ids: IdReservation,
+) -> Result<ServerParts, StartError> {
+    let core = Core::new(
+        CoreConfig {
+            id_base,
+            ..CoreConfig::default()
+        },
+        backend.capabilities(),
+    )
+    .map_err(|error| StartError::Runtime(format!("invalid core configuration: {error}")))?;
+    Ok(ServerParts {
+        driver: Driver::new(core, backend),
+        terminals: TerminalList::new(Box::new(FsGitProbe)),
+        host_id,
+        ids,
+        clock: MonotonicClock::new(),
+        file_store: Arc::new(FsFileStore::new()),
+    })
 }
 
 /// Runs the daemon until it fails: it has no other way to stop.
@@ -176,22 +206,7 @@ fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
 
     let served = runtime.block_on(async {
         let backend = backend::build(&resolved.backend).await?;
-        let core = Core::new(
-            CoreConfig {
-                id_base,
-                ..CoreConfig::default()
-            },
-            backend.capabilities(),
-        )
-        .map_err(|error| StartError::Runtime(format!("invalid core configuration: {error}")))?;
-        let parts = ServerParts {
-            driver: Driver::new(core, backend),
-            terminals: TerminalList::new(Box::new(FsGitProbe)),
-            host_id,
-            ids,
-            clock: MonotonicClock::new(),
-            file_store: Arc::new(FsFileStore::new()),
-        };
+        let parts = server_parts(backend, id_base, host_id, ids)?;
         // Last, so a start that fails earlier leaves no socket behind.
         let bound = socket::bind(&resolved.socket)?;
         rpc::serve(

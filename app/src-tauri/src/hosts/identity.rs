@@ -71,6 +71,23 @@ mod tests {
         assert!(!is_valid_host_id("6a1d3c9e_2f4b-4e8a-b7c5-1d0e9f8a7b6c"));
     }
 
+    /// The daemon's `is_valid_host_id` reads the same file and must give the same answers.
+    #[test]
+    fn host_id_rule_matches_the_shared_table() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../crates/combine-protocol/tests/fixtures/host_id_cases.json"
+        ))
+        .expect("the table is JSON");
+        for (key, expected) in [("accept", true), ("reject", false)] {
+            let ids = cases[key].as_array().expect("the table has the list");
+            assert!(!ids.is_empty());
+            for id in ids {
+                let id = id.as_str().expect("the table holds strings");
+                assert_eq!(is_valid_host_id(id), expected, "{id:?}");
+            }
+        }
+    }
+
     #[test]
     fn check_outcomes() {
         let a = id("6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c");

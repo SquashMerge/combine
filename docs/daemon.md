@@ -36,6 +36,10 @@ Optional. With no file at `~/.config/combine/daemon.json`, every default applies
 
 `combined serve --config <path>` reads another file; a missing file named that way stops the start. A socket path is at most 103 bytes.
 
+## Before you install
+
+Until #23 wires the herdr-core adapter, a release `combined` can't serve: `backend = "herdr-core"` exits 3, and the release build refuses `"backend": "fake"`. launchd with `KeepAlive` would restart that exit every 10 s, so don't install the release build yet. The checks below need an interim build, `cargo build -p combined --features test-support`, run by its absolute path (`target/debug/combined`) with `"backend": "fake"` in `daemon.json`.
+
 ## Install
 
 From the repository root:
@@ -61,15 +65,13 @@ rm ~/Library/LaunchAgents/com.squashmerge.combined.plist
 
 ## Fail-fast and restarts
 
-Until #23 wires the herdr-core adapter, `backend = "herdr-core"` exits 3.
-
 The daemon doesn't wait for herdr-core. If its socket is missing at start, or the backend's watch ends while running, `combined` exits 3 and, because of `KeepAlive`, launchd starts it again every 10 s. Clients reconnect and get `gap` for attachments the new process doesn't know.
 
 There is no SIGTERM handler: a stop is handled like a crash. The OS releases both locks, and the next start replaces the stale socket.
 
 ## Check the bridge over ssh
 
-With Remote Login on, this sends a `hello` for protocol version 2 through `combined connect` and prints the reply:
+Until #23 lands this needs the interim `test-support` build and a daemon on `"backend": "fake"`, started by that build's `combined serve`. Keep its `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`, and use the build's absolute path below. With Remote Login on, this sends a `hello` for protocol version 2 through `combined connect` and prints the reply:
 
 ```sh
 printf '\000\000\000\046\001{"type":"hello","protocol_version":2}' \
@@ -79,6 +81,8 @@ printf '\000\000\000\046\001{"type":"hello","protocol_version":2}' \
 Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":2}`. The reply is a control frame holding `{"type":"welcome","protocol_version":2,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Check that no network port is open
+
+Until #23 lands, run this against the interim `test-support` build serving the `fake` backend.
 
 ```sh
 lsof -a -p "$(pgrep -x combined)" -i    # prints nothing
@@ -90,7 +94,7 @@ lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
 | Code | Meaning |
 | --- | --- |
 | 0 | `combined connect` ended cleanly: the socket reached EOF or stdout closed (EPIPE). Stdin EOF alone only half-closes the socket |
-| 1 | a runtime failure (for example a failed write to `ids.json`), or `combined connect` couldn't reach a daemon |
+| 1 | a runtime failure (for example a failed write to `ids.json`), or `combined connect` couldn't reach a daemon, couldn't read stdin, or hit another I/O error |
 | 2 | bad usage, a bad `daemon.json`, a bad data directory or file in it, or another daemon already serving the socket or data directory |
 | 3 | herdr-core is unavailable: its socket is missing at start, or its watch ended while running |
 
@@ -99,4 +103,4 @@ lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
 - **`host.json`:** the daemon writes it once, on first start, and never rewrites it. If it is unreadable, not valid JSON, another version, or holds something that isn't a lowercase UUID, the daemon exits 2 and names the file. Fix or remove it by hand; removing it gives the host a new ID, and clients that stored the old one refuse the host.
 - **`ids.json`:** it reserves attachment IDs so they never repeat across restarts. An invalid one stops the start (exit 2) and is never reset. Deleting it by hand resets the ID counter, so an old client cursor is answered with `gap` unless an ID happens to collide.
 - **herdr-core socket:** an exit 3 names the path, where it came from (`daemon.json`, `HC_SOCKET`, `HC_SESSION` with `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`, or the default) and a hint. launchd starts with a minimal environment, so set `herdr_core_socket` in `daemon.json` if herdr-core's session isn't the default. Check with `ls -l <path>`, and with `hc server status --json` against that session. Never point a test at your default herdr-core.
-- **Another daemon:** exit 2 with "another combined is serving ..." means a daemon holds the socket's lock or the data directory's. Stop it first.
+- **Another daemon:** exit 2 with "another combined is serving ..." (the socket's lock) or "another combined is using data dir ..." (the data directory's lock) means another daemon holds that lock. Stop it first.

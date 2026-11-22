@@ -157,6 +157,41 @@ fn test_helpers_refuse_the_default_herdr_core_socket() {
 }
 
 #[test]
+fn test_helpers_know_all_three_spellings_of_the_default_socket() {
+    let env = DaemonEnv {
+        home: Some("/h".into()),
+        xdg_runtime_dir: Some("/r".into()),
+        xdg_state_home: Some("/s".into()),
+        ..DaemonEnv::default()
+    };
+    let known = daemon_support::default_herdr_core_sockets(&env);
+    for spelling in [
+        "/r/herdr-core/default.sock",
+        "/s/herdr-core/default/default.sock",
+        "/h/.local/state/herdr-core/default/default.sock",
+    ] {
+        assert!(
+            known.contains(&Path::new(spelling).to_path_buf()),
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "herdr-core's default socket")]
+fn test_helpers_refuse_the_state_dir_default_even_when_xdg_runtime_dir_is_set() {
+    let scratch = ShortTempDir::new();
+    let home = scratch.path().join("h");
+    let default = home.join(".local/state/herdr-core/default/default.sock");
+    let env = DaemonEnv {
+        home: Some(home),
+        xdg_runtime_dir: Some(scratch.path().join("run")),
+        ..DaemonEnv::default()
+    };
+    refuse_default_herdr_core_in(&default, &scratch, &env);
+}
+
+#[test]
 #[should_panic(expected = "outside the scratch dir")]
 fn test_helpers_refuse_paths_outside_the_scratch_dir() {
     let scratch = ShortTempDir::new();

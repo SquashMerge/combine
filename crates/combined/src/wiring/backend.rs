@@ -9,9 +9,7 @@ use futures::future::BoxFuture;
 use super::config::HerdrCoreSource;
 use super::StartError;
 use crate::ports::TerminalBackend;
-
-/// The longest socket path macOS accepts.
-const MAX_SOCKET_PATH: usize = 103;
+use crate::rpc::socket::MAX_SOCKET_PATH;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendChoice {
