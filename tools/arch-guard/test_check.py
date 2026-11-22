@@ -13,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -644,6 +645,514 @@ class GuardTest(unittest.TestCase):
         export type { U } from "@tauri-apps/api/e";
         """
         self.assertEqual(sorted(v.line for v in self._violations({"app/web/src/main.ts": src})), [1, 2, 3, 4, 5])
+
+    # --- JSX tags
+
+    def test_jsx_closing_tag_on_one_line(self):
+        self.assertFlags({"app/web/src/shell/A.tsx": "export const a = <p>hi</p>;\n"})
+
+    def test_jsx_closing_tag_on_its_own_line(self):
+        src = """\
+        export const a = (
+          <section>
+            <p>hi</p>
+          </section>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_jsx_nested_elements_and_fragments(self):
+        src = """\
+        export const a = (
+          <>
+            <ul>
+              <li>one</li>
+              <li>{1 + 2}</li>
+            </ul>
+          </>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_jsx_self_closing_tags(self):
+        src = """\
+        declare const x: object;
+        export const a = (
+          <div>
+            <Foo />
+            <Foo a="b" />
+            <Foo a={1} />
+            <Foo {...x} />
+            <br />
+          </div>
+        );
+        """
+        self.assertFlags({"app/web/src/shell/A.tsx": src})
+
+    def test_jsx_rule_does_not_apply_to_ts_files(self):
+        src = (
+            "declare const a: any;\n"
+            "export const r = a </[//]/; import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.ts": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.ts")
+        )
+
+    def test_template_in_regex_after_less_than_does_not_hide_imports_in_ts(self):
+        src = (
+            "declare const a: any, x: any;\n"
+            "export const r = a </`/;\n"
+            "import { invoke } from '@tauri-apps/api/core';\n"
+            "export const t = /`/;\n"
+            "if (x) { } />`/;\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.ts": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.ts")
+        )
+
+    def test_tsx_closing_tag_needs_a_tag_name(self):
+        src = (
+            "declare const a: any;\n"
+            "export const r = a </[//]/; import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.tsx")
+        )
+
+    def test_tsx_regex_starting_with_gt_after_block_is_a_regex(self):
+        src = "declare const x: any;\nif (x) { } />`/;\nimport { invoke } from '@tauri-apps/api/core';\n/`/;\n"
+        self.assertFlags(
+            {"app/web/src/shell/probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/probe.tsx")
+        )
+
+    # --- JSX children are text, never code (opencode review 11)
+
+    def _probe_tsx(self, middle, *expected, head="export const a = <div><span>x</span>\"</div>;"):
+        src = f"{head} {middle} export const q = /\"/;\n"
+        self.assertFlags({"app/web/src/shell/Probe.tsx": src}, *[(r, "app/web/src/shell/Probe.tsx") for r in expected])
+
+    def test_quote_in_jsx_text_does_not_hide_a_tauri_import(self):
+        self._probe_tsx("import { invoke } from '@tauri-apps/api/core';", "tauri-only-in-ipc")
+
+    def test_quote_in_jsx_text_does_not_hide_a_test_path_import(self):
+        self._probe_tsx("import '../../test/support/snapshots';", "no-production-dependency-on-non-production")
+
+    def test_quote_in_jsx_text_does_not_hide_a_computed_import(self):
+        self._probe_tsx("export const load = import('../ipc/' + 'tauri');", "frontend-imports-are-literal")
+
+    def test_quote_in_text_after_an_opening_tag(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <div>say \"hi</div>;",
+        )
+
+    def test_backtick_in_jsx_text(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <p>use `x</p>;",
+        )
+
+    def test_slash_in_jsx_text(self):
+        self._probe_tsx(
+            "import { invoke } from '@tauri-apps/api/core';",
+            "tauri-only-in-ipc",
+            head="export const a = <p>and/or // not a comment</p>;",
+        )
+
+    def test_apostrophe_in_jsx_text_then_import_on_the_next_line(self):
+        src = "export const a = <p>don't</p>;\nimport { invoke } from '@tauri-apps/api/core';\n"
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_nested_jsx_inside_an_expression_child(self):
+        src = (
+            "declare const cond: boolean;\n"
+            "export const a = <p>{cond && <b>it's</b>}</p>;\n"
+            "import { invoke } from '@tauri-apps/api/core';\n"
+        )
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_import_inside_a_jsx_expression_is_seen(self):
+        src = "export const a = <p>{import('@tauri-apps/api/core')}</p>;\n"
+        self.assertFlags(
+            {"app/web/src/shell/Probe.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/Probe.tsx")
+        )
+
+    def test_unbalanced_jsx_fails_closed(self):
+        for src in (
+            "export const a = <div><span>x</div>;\n",
+            "export const a = <div>text\n",
+            "export const a = <div x=\"y>text</div>;\n",
+            "export const a = <div></span>;\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags(
+                    {"app/web/src/shell/Probe.tsx": src}, ("guard-parse", "app/web/src/shell/Probe.tsx")
+                )
+
+    # --- JSX expression boundaries and the .tsx backstop (opencode review 13)
+
+    PROBE = "app/web/src/shell/Probe.tsx"
+    ADJACENT = (
+        ("import('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("import('../../test/support/snapshots')", "no-production-dependency-on-non-production"),
+        ("import('../ipc/' + 'tauri')", "frontend-imports-are-literal"),
+    )
+
+    def _tsx(self, src, rule):
+        self.assertFlags({self.PROBE: src}, (rule, self.PROBE))
+
+    def test_adjacent_jsx_expressions_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p>{{{first}}}{{1}}</p>; export const q = /x/;\n", rule)
+
+    def test_adjacent_jsx_attributes_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p a={{{first}}} b={{1}} />; export const q = /x/;\n", rule)
+
+    def test_nested_adjacent_expressions_do_not_hide_a_load(self):
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first):
+                src = f"declare const cond: boolean, x: number;\nexport const a = <p>{{cond && <b>{{{first}}}{{x}}</b>}}{{x}}</p>;\n"
+                self._tsx(src, rule)
+
+    def test_template_specifiers_do_not_hide_a_load(self):
+        for first, rule in (
+            ("import(`@tauri-apps/api/core`)", "tauri-only-in-ipc"),
+            ("import(`../ipc/${'tauri'}`)", "frontend-imports-are-literal"),
+        ):
+            with self.subTest(first=first):
+                self._tsx(f"export const a = <p>{{{first}}}{{1}}</p>;\n", rule)
+            with self.subTest(first=first, nested="template"):
+                self._tsx(f"export const a = <p>{{`${{{first}}}`}}{{1}}</p>;\n", rule)
+
+    def test_backstop_import_spelled_in_jsx_text_fails_closed(self):
+        src = "export const a = <p>import('@tauri-apps/api/core')</p>;\n"
+        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    def test_backstop_import_spelled_in_a_comment_fails_closed(self):
+        for src in (
+            "// import x from 'y'\nexport const a = 1;\n",
+            "export const a = \"import('x')\";\n",
+            "/* export { a } from './a' */\nexport const a = 1;\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    def test_backstop_holds_when_the_lexer_drops_jsx_braces(self):
+        real = check.lex_js
+
+        def broken(src, jsx=False):
+            toks = real(src, jsx=jsx)
+            return [t for t in toks if not t.is_("punct", "}")] if jsx else toks
+
+        for first, rule in self.ADJACENT:
+            with self.subTest(first=first), mock.patch.object(check, "lex_js", broken):
+                src = f"export const a = <p>{{{first}}}{{1}}</p>; export const q = /x/;\n"
+                self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    # --- the keyword matrix (opencode review 15)
+
+    @staticmethod
+    def _matrix():
+        placements = {
+            "child": "export const a = <p>{{{b}}}{{1}}</p>;\n",
+            "attr": "export const a = <p a={{{b}}} b={{1}} />;\n",
+            "plain": "export const a = [{b}, 1];\n",
+        }
+        specs = (
+            ("'@tauri-apps/api/core'", "tauri-only-in-ipc"),
+            ("'../../test/support/snapshots'", "no-production-dependency-on-non-production"),
+            ("'../ipc/' + 'tauri'", "frontend-imports-are-literal"),
+        )
+        seps = ("", " ", "/**/", "\n", "// c\n")
+        for place, shape in placements.items():
+            for form in ("bare", "template", "adjacent"):
+                for kw in ("import", "require"):
+                    for sep in seps:
+                        for spec, rule in specs:
+                            call = f"{kw}{sep}({spec})"
+                            body = {"bare": call, "template": f"`${{{call}}}`", "adjacent": f"`${{{call}}}${{{{}}}}`"}[form]
+                            yield f"{place}/{form}/{kw}/{sep!r}/{rule}", shape.format(b=body), rule
+
+    def _check_matrix(self):
+        cases = list(self._matrix())
+        for name, src, rule in cases:
+            with self.subTest(case=name):
+                found = self.guard({self.PROBE: src})
+                self.assertTrue(found, "clean")
+                self.assertTrue(found <= {(rule, self.PROBE), ("guard-parse", self.PROBE)}, found)
+        return len(cases)
+
+    def test_keyword_matrix_is_never_clean(self):
+        self.assertEqual(self._check_matrix(), 270)
+
+    def test_keyword_matrix_is_never_clean_with_a_broken_lexer(self):
+        real = check.lex_js
+
+        def broken(src, jsx=False):
+            toks = real(src, jsx=jsx)
+            return [t for t in toks if not (t.is_("punct", "}") or t.kind.startswith("template_"))] if jsx else toks
+
+        with mock.patch.object(check, "lex_js", broken):
+            self._check_matrix()
+
+    # --- spread operands and expression forms (opencode review 16)
+
+    SPECS = (
+        ("'@tauri-apps/api/core'", "tauri-only-in-ipc"),
+        ("'../../test/support/snapshots'", "no-production-dependency-on-non-production"),
+        ("'../ipc/'+'tauri'", "frontend-imports-are-literal"),
+    )
+    SEPS = ("", " ", "/**/", "\n", "//c\n", "/*(){}'`*/")
+    SPREADS = (
+        ("object", "export const a = ({{...{c}}});", "ts"),
+        ("array", "export const a = [...{c}];", "ts"),
+        ("call", "declare function f(...a: unknown[]): void;\nf(...{c});", "ts"),
+        ("jsx-attr", "export const a = <p {{...{c}}} />;", "tsx"),
+        ("jsx-child", "export const a = <p>{{({{...{c}}})}}</p>;", "tsx"),
+    )
+    FORMS = (
+        "CALL", "[CALL]", "({p:CALL})", "({...CALL})", "[...CALL]",
+        "`${CALL}${{}}`", "`${{}}${CALL}`", "`${function f(){}}${CALL}`",
+        "`${/x/}${CALL}`", "`${()=>{}}${CALL}`", "`${CALL}${()=>{}}`",
+        "`${CALL}${({})}`", "`${CALL}${{k:1}}`", "`${CALL}${{k:1}}${CALL}`",
+        "`${CALL}${{}}${/x/}`", "String.raw`${CALL}${{}}`",
+        "((() => CALL)())", "({m(){return CALL}}).m()",
+        "CALL ? /x/ : /y/", "[...await CALL]",
+        "`${`${CALL}${{}}`}${{}}`", "`${{v:`${CALL}${{}}`}}${{}}`",
+        "`${CALL}${`inner ${1}`}`", "`${1}${`${CALL}${{}}`}`",
+    )
+    WRAPS = (
+        ("export const a = BODY;", "ts"),
+        ("export async function f() {return BODY;}", "ts"),
+        ("export const a = [BODY, 1];", "ts"),
+        ("export const a = <p>{BODY}{1}</p>; export const q = /x/;", "tsx"),
+        ("export const a = <P a={BODY} b={1} />;", "tsx"),
+    )
+
+    def _expression_cases(self):
+        for kw in ("import", "require"):
+            for sep in self.SEPS:
+                for spec, rule in self.SPECS:
+                    call = f"{kw}{sep}({spec})"
+                    for name, shape, ext in self.SPREADS:
+                        yield f"spread/{name}/{kw}/{sep!r}/{rule}", shape.format(c=call), ext, rule
+                    for form in self.FORMS:
+                        for wrap, ext in self.WRAPS:
+                            src = wrap.replace("BODY", form.replace("CALL", call))
+                            yield f"form/{form}/{wrap}/{kw}/{sep!r}/{rule}", src, ext, rule
+
+    def _check_expression_cases(self, tsx_only=False):
+        cfg = check.load_config(CONFIG)
+        count = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in BASE.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            for name, src, ext, rule in self._expression_cases():
+                if tsx_only and ext != "tsx":
+                    continue
+                count += 1
+                rel = f"app/web/src/shell/Probe.{ext}"
+                found = {v.rule for v in check.check_js_file(rel, src, cfg, root)}
+                with self.subTest(case=name, ext=ext):
+                    self.assertTrue(found, f"clean: {src!r}")
+                    self.assertTrue(found <= {rule, "guard-parse"}, (found, src))
+        return count
+
+    def test_spread_and_expression_forms_are_never_clean(self):
+        self.assertEqual(self._check_expression_cases(), 2 * 6 * 3 * (5 + 24 * 5))
+
+    def test_spread_and_expression_forms_with_the_reader_blind_to_spread(self):
+        real = check.lex_js
+
+        def blind(src, jsx=False):
+            out = []
+            for t in real(src, jsx=jsx):
+                if t.is_("punct", "..."):
+                    out += [check.Tok("punct", ".", t.start + k) for k in range(3)]
+                else:
+                    out.append(t)
+            return out
+
+        with mock.patch.object(check, "lex_js", blind):
+            self._check_expression_cases(tsx_only=True)
+
+    # --- escaped spellings and generic calls (opencode review 17)
+
+    ESCAPED = {
+        "require": (
+            "require", r"\u0072equire", r"req\u0075ire", r"requir\u0065",
+            r"\u0072eq\u0075ir\u0065", r"r\u{65}quire", r"\u{72}\u{65}\u{71}uire",
+        ),
+        "import": (
+            "import", r"\u0069mport", r"im\u0070ort", r"impor\u0074",
+            r"\u0069mp\u006frt", r"\u{69}mport", r"\u{69}\u{6d}\u{70}ort",
+        ),
+    }
+    PLACEMENTS = (
+        ("child", "export const a = <p>{{{c}}}{{1}}</p>;", "tsx"),
+        ("attr", "export const a = <p a={{{c}}} b={{1}} />;", "tsx"),
+        ("jsx-spread", "export const a = <p>{{({{...{c}}})}}</p>;", "tsx"),
+        ("plain", "export const a = [{c}, 1];", "tsx"),
+        ("plain", "export const a = [{c}, 1];", "ts"),
+        ("spread", "export const a = ({{...{c}}});", "ts"),
+    )
+
+    def _escape_cases(self):
+        for kw, spellings in self.ESCAPED.items():
+            for spelling in spellings:
+                for suffix, tag in (("", "call"), ("<any>", "generic"), ("<Array<string>>", "nested-generic")):
+                    for spec, rule in self.SPECS:
+                        call = f"{spelling}{suffix}({spec})"
+                        for place, shape, ext in self.PLACEMENTS:
+                            yield f"{kw}/{spelling}/{tag}/{place}/{rule}", shape.format(c=call), ext, rule
+
+    def _check_escape_cases(self, tsx_only=False):
+        cfg = check.load_config(CONFIG)
+        count = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in BASE.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            for name, src, ext, rule in self._escape_cases():
+                if tsx_only and ext != "tsx":
+                    continue
+                count += 1
+                found = {v.rule for v in check.check_js_file(f"app/web/src/shell/Probe.{ext}", src, cfg, root)}
+                with self.subTest(case=name, ext=ext):
+                    self.assertTrue(found, f"clean: {src!r}")
+                    self.assertTrue(found <= {rule, "guard-parse"}, (found, src))
+        return count
+
+    def test_escaped_and_generic_calls_are_never_clean(self):
+        self.assertEqual(self._check_escape_cases(), 2 * 7 * 3 * 3 * 6)
+
+    def test_generic_call_reports_the_load_itself(self):
+        for src, rule in (
+            ("export const a = <p>{require<any>('@tauri-apps/api/core')}</p>;\n", "tauri-only-in-ipc"),
+            ("export const a = <p>{require('@tauri-apps/api/core')}</p>;\n", "tauri-only-in-ipc"),
+            ("export const a = <p>{r\\u0065quire<any>('../../test/support/snapshots')}</p>;\n",
+             "no-production-dependency-on-non-production"),
+        ):
+            with self.subTest(src=src):
+                self._tsx(src, rule)
+
+    def test_fully_typed_generic_require_is_flagged(self):
+        src = """\
+        declare function require<T>(id: string): T;
+        declare namespace JSX { interface IntrinsicElements { p: object } interface Element {} }
+        export const a = <p>{require<any>('@tauri-apps/api/core')}</p>;
+        """
+        found = self.guard({self.PROBE: src})
+        self.assertTrue(found and found <= {("tauri-only-in-ipc", self.PROBE), ("guard-parse", self.PROBE)}, found)
+
+    def test_unbalanced_type_arguments_fail_closed(self):
+        for ext in ("ts", "tsx"):
+            with self.subTest(ext=ext):
+                src = "declare const x: number;\nexport const a = require < x;\n"
+                self.assertFlags({f"app/web/src/shell/Probe.{ext}": src}, ("guard-parse", f"app/web/src/shell/Probe.{ext}"))
+
+    def test_ts_keeps_its_non_load_forms(self):
+        src = """\
+        declare const o: any;
+        export const a = o.import, b = o?.require, c = import.meta, d = { import: 1, require: 2 };
+        export function require2() {}
+        declare function require(id: string): void;
+        import fs = require('node:fs');
+        export const m = { import(x: string) { return x; } };
+        """
+        self.assertFlags({"app/web/src/shell/probe.ts": src})
+
+    def test_escaped_and_generic_calls_with_a_blind_reader(self):
+        real = check.lex_js
+
+        def blind(src, jsx=False):
+            out = []
+            for t in real(src, jsx=jsx):
+                if t.kind == "ident":
+                    raw = check._J_IDENT.match(src, t.start)
+                    t = check.Tok("ident", raw.group(0) if raw else t.text, t.start)
+                out.append(t)
+            return out
+
+        with mock.patch.object(check, "lex_js", blind), mock.patch.object(
+            check, "_type_args_end", lambda toks, k: len(toks)
+        ):
+            self._check_escape_cases(tsx_only=True)
+
+    def test_member_access_named_import_fails_closed_in_tsx(self):
+        src = "declare const o: any;\nexport const a = o.import('x');\n"
+        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
+    def test_backstop_keyword_without_a_following_paren(self):
+        for src in (
+            "export const a = <p>{import/**/('@tauri-apps/api/core')}{{}}</p>;\n",
+            "export const o = { import: 1 };\n",
+            "export const m = import.meta;\n",
+            "export const a = <p>message from \"x\"</p>;\n",
+        ):
+            with self.subTest(src=src):
+                found = self.guard({self.PROBE: src})
+                self.assertTrue(found)
+
+    def test_clean_tsx_lexes_clean(self):
+        src = """\
+        declare const p: object, a: number, b: number, c: number, s: string;
+        export const id = <T,>(x: T) => x;
+        export const id2 = <T extends object>(x: T) => x;
+        export const d = a < b / c;
+        export const t = a < b && b > c;
+        export function Foo(props: object) {
+          return (
+            <section aria-label="x" data-q='y'>
+              <p>don't "quote" `tick` and/or // fine</p>
+              <Foo {...p} />
+              <div><Foo {...p} /></div>
+              <>
+                {s.replace(/"|'/g, "")}
+                {a > 1 ? <b>yes</b> : <i>no</i>}
+                {/* a comment */}
+              </>
+              <Foo render={<br />} cb={() => <hr />} />
+            </section>
+          );
+        }
+        """
+        self.assertFlags({"app/web/src/shell/Probe.tsx": src})
+
+    def test_regex_literals_still_lex_in_tsx(self):
+        src = """\
+        declare const s: string;
+        export const a = <p>{s.replace(/\\.$/, "")}</p>;
+        export const re = /<p>/;
+        const b = [/x/, /y/].length;
+        import { invoke } from "@tauri-apps/api/core";
+        """
+        self.assertFlags(
+            {"app/web/src/shell/A.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/A.tsx")
+        )
+
+    def test_tauri_import_in_a_tsx_component_is_flagged(self):
+        src = """\
+        import { invoke } from "@tauri-apps/api/core";
+        export function A() {
+          return <p onClick={() => invoke("x")}>go</p>;
+        }
+        """
+        self.assertFlags(
+            {"app/web/src/shell/A.tsx": src}, ("tauri-only-in-ipc", "app/web/src/shell/A.tsx")
+        )
 
     def test_division_after_postfix_and_non_null(self):
         self.assertFlags(

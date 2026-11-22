@@ -1,0 +1,597 @@
+//! The hosts service: owns one supervisor per host, keeps the registry and publishes a
+//! snapshot after every change.
+
+use std::fmt;
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+
+use combine_protocol::HostId;
+
+use super::config::{HostConfig, HostsStore, Transport};
+use super::link::Connector;
+use super::local::{LocalSocketConnector, SocketGuardEnv};
+use super::model::{ConfigStatus, ConnectionState, HostView, HostsSnapshot, SpaceView};
+use super::registry::HostRegistry;
+use super::ssh::{SshConnector, SYSTEM_SSH};
+use super::supervisor::{
+    spawn_supervisor, Clock, HostEvents, IdlePhase, PhaseFactory, SessionPhase, StopSignal,
+    SupervisorDeps, SystemClock,
+};
+
+pub trait SnapshotSink: Send + Sync {
+    fn publish(&self, snapshot: &HostsSnapshot);
+}
+
+pub type ConnectorFor = Box<dyn Fn(&HostConfig) -> Arc<dyn Connector> + Send + Sync>;
+
+pub struct ServiceDeps {
+    pub connector_for: ConnectorFor,
+    pub clock: Arc<dyn Clock>,
+    pub phase: PhaseFactory,
+}
+
+impl ServiceDeps {
+    /// The real thing: system `ssh`, the guarded local socket, the system clock and the idle
+    /// session phase.
+    pub fn system() -> Self {
+        ServiceDeps {
+            connector_for: Box::new(|host| match &host.transport {
+                Transport::Ssh {
+                    destination,
+                    combined_path,
+                } => Arc::new(SshConnector::new(
+                    SYSTEM_SSH,
+                    destination.as_str(),
+                    combined_path.as_str(),
+                )),
+                Transport::Local { socket } => Arc::new(LocalSocketConnector::new(
+                    socket.clone(),
+                    SocketGuardEnv::from_process(),
+                )),
+            }),
+            clock: Arc::new(SystemClock),
+            phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryError {
+    UnknownHost(String),
+}
+
+impl fmt::Display for RetryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RetryError::UnknownHost(name) => write!(f, "no host named \"{name}\" in hosts.json"),
+        }
+    }
+}
+
+impl std::error::Error for RetryError {}
+
+struct Inner {
+    registry: Mutex<HostRegistry>,
+    sink: Arc<dyn SnapshotSink>,
+    store: Arc<HostsStore>,
+    hosts: Vec<HostConfig>,
+    deps: ServiceDeps,
+}
+
+impl Inner {
+    fn registry(&self) -> MutexGuard<'_, HostRegistry> {
+        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Mutates the registry and publishes the result while still holding the lock, so
+    /// snapshots reach the sink in revision order.
+    fn mutate(&self, change: impl FnOnce(&mut HostRegistry)) {
+        let mut registry = self.registry();
+        change(&mut registry);
+        self.sink.publish(&registry.snapshot());
+    }
+}
+
+impl HostEvents for Inner {
+    fn connection(&self, name: &str, state: ConnectionState) {
+        self.mutate(|r| r.set_connection(name, state));
+    }
+
+    fn host_id(&self, name: &str, host_id: &HostId) {
+        self.mutate(|r| r.set_host_id(name, host_id));
+    }
+
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
+        self.mutate(|r| r.replace_spaces(host_id, spaces));
+    }
+}
+
+struct Running {
+    name: String,
+    stop: StopSignal,
+    thread: JoinHandle<()>,
+}
+
+pub struct HostsService {
+    inner: Arc<Inner>,
+    running: Mutex<Vec<Running>>,
+}
+
+impl HostsService {
+    /// Loads `hosts.json` from `data_dir` and starts one supervisor per entry. An invalid file
+    /// shows its error, adds no hosts and starts nothing.
+    pub fn start(data_dir: &Path, deps: ServiceDeps, sink: Arc<dyn SnapshotSink>) -> HostsService {
+        let path = data_dir.join("hosts.json");
+        let (store, loaded) = HostsStore::load(path.clone());
+        let (error, hosts) = match loaded {
+            Ok(config) => (None, config.hosts),
+            Err(e) => (Some(e.to_string()), Vec::new()),
+        };
+        let views = hosts
+            .iter()
+            .map(|h| HostView {
+                name: h.name.clone(),
+                host_id: h.host_id.clone(),
+                connection: ConnectionState::Connecting,
+                spaces: Vec::new(),
+            })
+            .collect();
+        let status = ConfigStatus {
+            path: path.to_string_lossy().into_owned(),
+            error,
+        };
+        let inner = Arc::new(Inner {
+            registry: Mutex::new(HostRegistry::new(status, views)),
+            sink,
+            store: Arc::new(store),
+            hosts,
+            deps,
+        });
+        let service = HostsService {
+            inner,
+            running: Mutex::new(Vec::new()),
+        };
+        {
+            let mut running = service.running();
+            for host in &service.inner.hosts {
+                running.push(service.spawn(host, host.host_id.clone()));
+            }
+        }
+        service
+    }
+
+    fn running(&self) -> MutexGuard<'_, Vec<Running>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn spawn(&self, host: &HostConfig, stored: Option<HostId>) -> Running {
+        let inner = &self.inner;
+        let stop = StopSignal::new();
+        let ssh = match &host.transport {
+            Transport::Ssh {
+                destination,
+                combined_path,
+            } => Some((destination.clone(), combined_path.clone())),
+            Transport::Local { .. } => None,
+        };
+        let deps = SupervisorDeps {
+            connector: (inner.deps.connector_for)(host),
+            store: inner.store.clone(),
+            clock: Arc::clone(&inner.deps.clock),
+            events: inner.clone(),
+            phase: Arc::clone(&inner.deps.phase),
+        };
+        Running {
+            name: host.name.clone(),
+            thread: spawn_supervisor(host.name.clone(), stored, ssh, deps, stop.clone()),
+            stop,
+        }
+    }
+
+    pub fn snapshot(&self) -> HostsSnapshot {
+        self.inner.registry().snapshot()
+    }
+
+    /// Starts a fresh supervisor for a failed host, with a fresh backoff and the host ID
+    /// recorded so far. It does not reload `hosts.json`. Any other state is a no-op.
+    pub fn retry(&self, name: &str) -> Result<(), RetryError> {
+        let host = self
+            .inner
+            .hosts
+            .iter()
+            .find(|h| h.name == name)
+            .ok_or_else(|| RetryError::UnknownHost(name.to_string()))?;
+        let mut running = self.running();
+        let stored = {
+            let registry = self.inner.registry();
+            match registry.host(name) {
+                Some(view) if matches!(view.connection, ConnectionState::Failed { .. }) => {
+                    view.host_id.clone()
+                }
+                _ => return Ok(()),
+            }
+        };
+        if let Some(index) = running.iter().position(|r| r.name == name) {
+            let old = running.swap_remove(index);
+            old.stop.stop();
+            let _ = old.thread.join();
+        }
+        running.push(self.spawn(host, stored));
+        Ok(())
+    }
+
+    /// Stops every supervisor, closing its link, and waits for them to end.
+    pub fn stop(&self) {
+        let all: Vec<Running> = std::mem::take(&mut *self.running());
+        for r in &all {
+            r.stop.stop();
+        }
+        for r in all {
+            let _ = r.thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use combine_protocol::{ErrorCode, ErrorMessage, MAX_FRAME_LEN};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::Receiver;
+
+    use super::super::config::parse_hosts;
+    use super::super::identity::{duplicate_message, mismatch_message};
+    use super::super::link::{ConnectError, FailureText};
+    use super::super::testing::{
+        host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingSink, ScriptedConnector,
+        ShortTempDir, Step, HOST_A, HOST_B,
+    };
+    use super::*;
+
+    const MINI_ENTRY: &str = r#"{"name":"mini","ssh":"example@mini"}"#;
+
+    struct Fixture {
+        dir: ShortTempDir,
+        service: HostsService,
+        snapshots: Receiver<HostsSnapshot>,
+        connectors: Arc<HashMap<String, Arc<ScriptedConnector>>>,
+        built: Arc<AtomicUsize>,
+    }
+
+    impl Fixture {
+        fn hosts_json(&self) -> PathBuf {
+            self.dir.path().join("hosts.json")
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            fs::read(self.hosts_json()).expect("read hosts.json")
+        }
+    }
+
+    fn file(entries: &[&str]) -> String {
+        format!(r#"{{"version":1,"hosts":[{}]}}"#, entries.join(","))
+    }
+
+    fn start(contents: &str, scripts: Vec<(&str, Vec<Step>)>, clock: FakeClock) -> Fixture {
+        let dir = ShortTempDir::new();
+        fs::write(dir.path().join("hosts.json"), contents).expect("write hosts.json");
+        let connectors: Arc<HashMap<String, Arc<ScriptedConnector>>> = Arc::new(
+            scripts
+                .into_iter()
+                .map(|(name, steps)| (name.to_string(), Arc::new(ScriptedConnector::new(steps))))
+                .collect(),
+        );
+        let built = Arc::new(AtomicUsize::new(0));
+        let (lookup, counter) = (Arc::clone(&connectors), Arc::clone(&built));
+        let deps = ServiceDeps {
+            connector_for: Box::new(move |host| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                match lookup.get(&host.name) {
+                    Some(connector) => Arc::clone(connector) as Arc<dyn Connector>,
+                    None => Arc::new(ScriptedConnector::new(Vec::new())),
+                }
+            }),
+            clock: Arc::new(clock),
+            phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+        };
+        let (sink, snapshots) = RecordingSink::new();
+        let service = HostsService::start(dir.path(), deps, sink);
+        Fixture {
+            dir,
+            service,
+            snapshots,
+            connectors,
+            built,
+        }
+    }
+
+    fn connection_of(snapshot: &HostsSnapshot, name: &str) -> Option<ConnectionState> {
+        snapshot
+            .hosts
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.connection.clone())
+    }
+
+    fn wait_failed(f: &Fixture, name: &str) -> ConnectionState {
+        let snapshot = wait_for_snapshot(&f.snapshots, |s| {
+            matches!(connection_of(s, name), Some(ConnectionState::Failed { .. }))
+        });
+        connection_of(&snapshot, name).expect("the host is listed")
+    }
+
+    fn failed(message: &str, detail: Option<&str>) -> ConnectionState {
+        ConnectionState::Failed {
+            message: message.to_string(),
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    fn refusal(message: String) -> ErrorMessage {
+        ErrorMessage {
+            code: ErrorCode::Internal,
+            message,
+            request: None,
+            attachment: None,
+        }
+    }
+
+    fn frame(json: &str) -> Vec<u8> {
+        let mut bytes = ((json.len() + 1) as u32).to_be_bytes().to_vec();
+        bytes.push(1u8);
+        bytes.extend_from_slice(json.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn invalid_hosts_json_shows_error_and_starts_nothing() {
+        let bad = r#"{"version":2,"hosts":[]}"#;
+        let f = start(bad, Vec::new(), FakeClock::new());
+        let snapshot = f.service.snapshot();
+        assert_eq!(
+            snapshot.config.error.as_deref(),
+            Some("hosts.json has version 2; this Combine reads version 1")
+        );
+        assert!(snapshot.hosts.is_empty());
+        assert_eq!(f.built.load(Ordering::SeqCst), 0);
+        assert_eq!(f.bytes(), bad.as_bytes());
+        f.service.stop();
+    }
+
+    #[test]
+    fn missing_hosts_json_means_no_hosts_and_no_error() {
+        let dir = ShortTempDir::new();
+        let (sink, _snapshots) = RecordingSink::new();
+        let service = HostsService::start(dir.path(), ServiceDeps::system(), sink);
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.config.error, None);
+        assert!(snapshot.hosts.is_empty());
+        assert_eq!(
+            snapshot.config.path,
+            dir.path().join("hosts.json").to_string_lossy()
+        );
+        service.stop();
+    }
+
+    #[test]
+    fn hosts_start_connecting_in_file_order() {
+        let contents = file(&[
+            r#"{"name":"zeta","ssh":"example@zeta"}"#,
+            r#"{"name":"alpha","ssh":"example@alpha"}"#,
+        ]);
+        let f = start(&contents, Vec::new(), FakeClock::new());
+        let snapshot = f.service.snapshot();
+        let names: Vec<&str> = snapshot.hosts.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["zeta", "alpha"]);
+        wait_for_snapshot(&f.snapshots, |s| {
+            s.hosts
+                .iter()
+                .all(|h| matches!(h.connection, ConnectionState::Failed { .. }))
+        });
+        f.service.stop();
+    }
+
+    #[test]
+    fn first_contact_is_written_to_hosts_json() {
+        let double = Double::welcome(host_id(HOST_A));
+        let probe = double.probe();
+        let f = start(
+            &file(&[MINI_ENTRY]),
+            vec![("mini", vec![Step::Serve(double)])],
+            FakeClock::new(),
+        );
+        let snapshot = wait_for_snapshot(&f.snapshots, |s| {
+            connection_of(s, "mini") == Some(ConnectionState::Connected)
+        });
+        assert_eq!(snapshot.hosts[0].host_id, Some(host_id(HOST_A)));
+        let written = parse_hosts(&f.bytes()).expect("hosts.json stays valid");
+        assert_eq!(written.hosts[0].host_id, Some(host_id(HOST_A)));
+        f.service.stop();
+        assert!(probe.closed_by_client());
+    }
+
+    #[test]
+    fn stored_id_mismatch_leaves_hosts_json_unchanged() {
+        let entry = format!(r#"{{"name":"mini","ssh":"example@mini","host_id":"{HOST_A}"}}"#);
+        let double = Double::welcome(host_id(HOST_B));
+        let probe = double.probe();
+        let f = start(
+            &file(&[&entry]),
+            vec![("mini", vec![Step::Serve(double)])],
+            FakeClock::new(),
+        );
+        let before = f.bytes();
+        let expected = mismatch_message("mini", &host_id(HOST_A), &host_id(HOST_B));
+        assert_eq!(wait_failed(&f, "mini"), failed(&expected, None));
+        assert_eq!(f.bytes(), before);
+        assert_eq!(f.service.snapshot().hosts[0].host_id, Some(host_id(HOST_A)));
+        f.service.stop();
+        assert!(probe.closed_by_client());
+    }
+
+    #[test]
+    fn two_entries_reaching_one_machine_fail_the_second() {
+        let first = format!(r#"{{"name":"first","ssh":"example@one","host_id":"{HOST_A}"}}"#);
+        let second = r#"{"name":"second","ssh":"example@two"}"#;
+        let (to_first, to_second) = (
+            Double::welcome(host_id(HOST_A)),
+            Double::welcome(host_id(HOST_A)),
+        );
+        let (probe_first, probe_second) = (to_first.probe(), to_second.probe());
+        let f = start(
+            &file(&[&first, second]),
+            vec![
+                ("first", vec![Step::Serve(to_first)]),
+                ("second", vec![Step::Serve(to_second)]),
+            ],
+            FakeClock::new(),
+        );
+        let before = f.bytes();
+        let expected = duplicate_message("second", "first", &host_id(HOST_A));
+        let snapshot = wait_for_snapshot(&f.snapshots, |s| {
+            connection_of(s, "first") == Some(ConnectionState::Connected)
+                && matches!(
+                    connection_of(s, "second"),
+                    Some(ConnectionState::Failed { .. })
+                )
+        });
+        assert_eq!(
+            connection_of(&snapshot, "second"),
+            Some(failed(&expected, None))
+        );
+        assert_eq!(snapshot.hosts[1].host_id, None);
+        assert_eq!(f.bytes(), before);
+        f.service.stop();
+        assert!(probe_first.closed_by_client());
+        assert!(probe_second.closed_by_client());
+    }
+
+    #[test]
+    fn one_mebibyte_refusal_is_published_trimmed() {
+        let double = Double::refuse(refusal("x".repeat(MAX_FRAME_LEN as usize - 1024)));
+        let f = start(
+            &file(&[MINI_ENTRY]),
+            vec![("mini", vec![Step::Serve(double)])],
+            FakeClock::new(),
+        );
+        let expected_detail = format!("{}…", "x".repeat(256));
+        assert_eq!(
+            wait_failed(&f, "mini"),
+            failed(
+                "the daemon refused the connection (internal)",
+                Some(&expected_detail)
+            )
+        );
+        assert_eq!(expected_detail.chars().count(), 257);
+        f.service.stop();
+    }
+
+    #[test]
+    fn session_decode_error_is_published_trimmed() {
+        let json = format!(r#"{{"type":"{}"}}"#, r"a\u0007".repeat(300));
+        let double = Double::welcome_then_frame(host_id(HOST_A), frame(&json));
+        let f = start(
+            &file(&[MINI_ENTRY]),
+            vec![("mini", vec![Step::Serve(double)])],
+            FakeClock::stop_after(1),
+        );
+        let snapshot = wait_for_snapshot(&f.snapshots, |s| {
+            matches!(
+                connection_of(s, "mini"),
+                Some(ConnectionState::Dropped { .. })
+            )
+        });
+        let Some(ConnectionState::Dropped {
+            reason,
+            detail: Some(detail),
+            ..
+        }) = connection_of(&snapshot, "mini")
+        else {
+            panic!("expected a dropped host with detail");
+        };
+        assert_eq!(reason, "the daemon sent a malformed frame");
+        assert!(
+            detail.starts_with(r#"unknown message type "a\u{7}a\u{7}"#),
+            "{detail}"
+        );
+        assert_eq!(detail.chars().count(), 257);
+        assert!(detail.ends_with('…'));
+        f.service.stop();
+    }
+
+    #[test]
+    fn stderr_control_characters_are_stripped_from_detail() {
+        let f = start(
+            &file(&[MINI_ENTRY]),
+            vec![(
+                "mini",
+                vec![Step::Exit {
+                    stderr:
+                        "ssh: \u{1b}[31mconnect to host mini port 22: Operation timed out\u{7}\r\n",
+                    code: Some(255),
+                }],
+            )],
+            FakeClock::stop_after(1),
+        );
+        let snapshot = wait_for_snapshot(&f.snapshots, |s| {
+            matches!(
+                connection_of(s, "mini"),
+                Some(ConnectionState::Dropped { .. })
+            )
+        });
+        assert_eq!(
+            connection_of(&snapshot, "mini"),
+            Some(ConnectionState::Dropped {
+                reason: "ssh exited with status 255".to_string(),
+                detail: Some(
+                    "ssh: [31mconnect to host mini port 22: Operation timed out".to_string()
+                ),
+                retry_in_ms: 1000
+            })
+        );
+        f.service.stop();
+    }
+
+    #[test]
+    fn retry_names_an_unknown_host() {
+        let f = start(&file(&[MINI_ENTRY]), Vec::new(), FakeClock::new());
+        let error = f.service.retry("nope").expect_err("unknown host");
+        assert_eq!(error.to_string(), r#"no host named "nope" in hosts.json"#);
+        f.service.stop();
+    }
+
+    #[test]
+    fn retry_restarts_only_a_failed_host() {
+        let double = Double::welcome(host_id(HOST_A));
+        let probe: Probe = double.probe();
+        let permanent = Step::ConnectError(ConnectError::Permanent(FailureText {
+            text: "cannot run /usr/bin/ssh".to_string(),
+            detail: None,
+        }));
+        let f = start(
+            &file(&[MINI_ENTRY]),
+            vec![("mini", vec![permanent, Step::Serve(double)])],
+            FakeClock::new(),
+        );
+        wait_failed(&f, "mini");
+        let connector = f.connectors.get("mini").expect("scripted").clone();
+        assert_eq!(connector.connect_count(), 1);
+
+        f.service.retry("mini").expect("retry a failed host");
+        wait_for_snapshot(&f.snapshots, |s| {
+            connection_of(s, "mini") == Some(ConnectionState::Connected)
+        });
+        assert_eq!(connector.connect_count(), 2);
+
+        f.service
+            .retry("mini")
+            .expect("a connected host is a no-op");
+        assert_eq!(connector.connect_count(), 2);
+        assert_eq!(f.built.load(Ordering::SeqCst), 2);
+        f.service.stop();
+        assert!(probe.closed_by_client());
+    }
+}

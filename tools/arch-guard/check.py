@@ -41,8 +41,21 @@ Known limits, by design:
 - Rust: macros are not expanded; re-exports, glob imports of a parent (`use std::*;`)
   and aliases of a crate root (`use std as s;`) are not followed. File ownership by
   package is by containing directory, not by the module tree.
-- Frontend: JSX text is not modeled; a `.tsx` file whose JSX text holds an unpaired quote
-  may be reported as `guard-parse`.
+- Frontend: in `.tsx` files only, JSX is modeled: an element opens at a `<` in
+  expression-start position followed by a name or `>` (`<T,>` and `<T extends U>` are
+  generic parameter lists), its attributes lex as strings and `{...}` expressions, and its
+  children are raw text up to the next `<` or `{`, so quotes, backticks and slashes in
+  JSX text are text, never code. A mismatched or missing closing tag, or an element the
+  lexer can't place, is a `guard-parse`; it never continues silently. The residual: a
+  generic function type written `<T>(x: T) => T` in type position after `=` reads as an
+  element and fails closed, and type arguments on a JSX tag (`<Foo<string> />`) fail
+  closed too. `.ts`, `.mts` and `.cts` files lex with no JSX rule.
+  As a backstop, a `.tsx` file is also checked against its raw source: the word `import`
+  or `require` anywhere in it must be a load the import reader reported at that offset,
+  and a `from` followed by a quote or backtick must belong to a reported `import` or
+  `export` load. Comments, strings and JSX text that spell those words are therefore a
+  `guard-parse`, as are `import.meta`, `import x = require(...)`, member access such as
+  `obj.import`, and keys or methods named `import` or `require`.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -274,7 +287,7 @@ class Lines:
 
 @dataclass(frozen=True, slots=True)
 class Tok:
-    kind: str  # ident punct str char lifetime num | regex template template_expr template_tail
+    kind: str  # ident punct str char lifetime num | regex template template_expr template_mid template_tail
     text: str  # identifier (normalized), punctuation, or a literal's decoded value
     start: int
 
@@ -746,7 +759,29 @@ def _line_end(src: str, i: int) -> int:
     return min(ends) if ends else len(src)
 
 
-def lex_js(src: str) -> list[Tok]:
+@dataclass
+class _JsxTag:
+    name: str
+    closing: bool
+    origin: str  # the mode to return to once the element is complete: js, children or tag
+    start: int
+
+
+_JSX_NAME = re.compile(r"[A-Za-z_$][\w$.:-]*")
+_GENERIC_PARAMS = re.compile(r"\s*(?:,|extends(?![\w$]))")
+
+
+def _starts_jsx_element(src: str, i: int) -> bool:
+    """Whether the `<` at `i`, in expression-start position of a `.tsx` file, opens a JSX
+    element (`<name`, `<a.b`, `<>`) and not a TSX generic parameter list (`<T,>`,
+    `<T extends U>`)."""
+    if src.startswith("<>", i):
+        return True
+    m = _JSX_NAME.match(src, i + 1)
+    return m is not None and _GENERIC_PARAMS.match(src, m.end()) is None
+
+
+def lex_js(src: str, jsx: bool = False) -> list[Tok]:
     """Tokens of a JS/TS module. Whether `/` starts a regex depends on whether the
     previous token ends an expression, which takes some context: `)` after `if (...)`
     and `}` after a block don't, postfix `x++` and TypeScript's `x!` do."""
@@ -774,6 +809,27 @@ def lex_js(src: str) -> list[Tok]:
     def last_ends_expr() -> bool:
         return bool(toks) and len(toks) - 1 in ends_expr
 
+    mode = "js"  # js, or inside a JSX tag (`tag`) or a JSX element's children (`children`)
+    pending: list[_JsxTag] = []  # tags whose `>` has not been read
+    elems: list[_JsxTag] = []  # opened elements awaiting their closing tag
+
+    def open_tag(at: int, origin: str) -> int:
+        nonlocal mode
+        j = at + 1
+        closing = src.startswith("/", j)
+        if closing:
+            j += 1
+        m = _JSX_NAME.match(src, j)
+        name = m.group(0) if m else ""
+        pending.append(_JsxTag(name, closing, origin, at))
+        mode = "tag"
+        return m.end() if m else j
+
+    def finish_element(origin: str, at: int) -> None:
+        nonlocal mode
+        push("jsx", "", at, True)
+        mode = origin
+
     def push(kind: str, text: str, at: int, value_end: bool) -> None:
         if value_end:
             ends_expr.add(len(toks))
@@ -781,6 +837,69 @@ def lex_js(src: str) -> list[Tok]:
 
     while i < n:
         c = src[i]
+        if mode == "children":
+            j = i
+            while j < n and src[j] not in "<{":
+                j += 1
+            if j >= n:
+                raise LexError(elems[-1].start, "unterminated JSX element")
+            i = j
+            if src[i] == "{":
+                braces.append("jsx_child")
+                push("punct", "{", i, False)
+                mode = "js"
+                i += 1
+            elif src.startswith("</", i) or _starts_jsx_element(src, i):
+                i = open_tag(i, "children")
+            else:
+                raise LexError(i, "unexpected < in JSX text")
+            continue
+        if mode == "tag":
+            tag = pending[-1]
+            if c.isspace():
+                i += 1
+            elif src.startswith("//", i):
+                i = _line_end(src, i)
+            elif src.startswith("/*", i):
+                j = src.find("*/", i + 2)
+                if j < 0:
+                    raise LexError(i, "unterminated block comment")
+                i = j + 2
+            elif src.startswith("/>", i):
+                if tag.closing:
+                    raise LexError(i, "self-closing JSX closing tag")
+                pending.pop()
+                finish_element(tag.origin, tag.start)
+                i += 2
+            elif c == ">":
+                pending.pop()
+                if tag.closing:
+                    if not elems or elems[-1].name != tag.name:
+                        raise LexError(tag.start, "mismatched JSX closing tag")
+                    finish_element(elems.pop().origin, tag.start)
+                else:
+                    elems.append(tag)
+                    mode = "children"
+                i += 1
+            elif tag.closing and not (c.isalnum() or c in "_$-:."):
+                raise LexError(i, "unexpected character in JSX closing tag")
+            elif c == "{":
+                braces.append("jsx_attr")
+                push("punct", "{", i, False)
+                mode = "js"
+                i += 1
+            elif c in "'\"":
+                j = src.find(c, i + 1)
+                if j < 0:
+                    raise LexError(i, "unterminated JSX attribute string")
+                i = j + 1
+            elif c == "<" and _starts_jsx_element(src, i):
+                i = open_tag(i, "tag")
+            elif c.isalnum() or c in "_$-:.=":
+                i += 1
+            else:
+                raise LexError(i, "unexpected character in JSX tag")
+            continue
         if c.isspace():
             i += 1
         elif src.startswith("//", i):
@@ -811,6 +930,8 @@ def lex_js(src: str) -> list[Tok]:
                 push("template_expr", "", i, False)
                 braces.append("template")
             i = end
+        elif c == "<" and jsx and not last_ends_expr() and _starts_jsx_element(src, i):
+            i = open_tag(i, "js")
         elif c == "/" and not last_ends_expr():
             j, in_class = i + 1, False
             while j < n:
@@ -856,8 +977,14 @@ def lex_js(src: str) -> list[Tok]:
                 if closed:
                     push("template_tail", "", i, True)
                 else:
+                    push("template_mid", "", i, False)  # `} ... ${` between interpolations
                     braces.append("template")
                 i = end
+                continue
+            if kind in ("jsx_child", "jsx_attr"):
+                push("punct", c, i, False)  # keep `{ ... }` balanced for the import reader
+                mode = "children" if kind == "jsx_child" else "tag"
+                i += 1
                 continue
             push("punct", c, i, kind == "object")
             i += 1
@@ -883,6 +1010,9 @@ def lex_js(src: str) -> list[Tok]:
         elif c == "!" and not src.startswith("!=", i) and last_ends_expr():
             push("punct", c, i, True)  # TypeScript non-null assertion: `x!`
             i += 1
+        elif src.startswith("...", i):
+            push("punct", "...", i, False)  # spread or rest, never member access
+            i += 3
         elif src.startswith("=>", i):
             push("punct", "=>", i, False)
             i += 2
@@ -892,14 +1022,38 @@ def lex_js(src: str) -> list[Tok]:
         else:
             push("punct", c, i, False)
             i += 1
+    if mode != "js":
+        raise LexError((pending or elems)[-1].start, "unterminated JSX element")
     return toks
+
+
+def _type_args_end(toks: list[Tok], k: int) -> int:
+    """toks[k] is the `<` of a TypeScript type-argument list; the index after its
+    matching `>`. An unbalanced list raises `LexError`, so it fails closed."""
+    depth = 0
+    for j in range(k, len(toks)):
+        t = toks[j]
+        if t.kind == "punct" and t.text == "<":
+            depth += 1
+        elif t.kind == "punct" and t.text == ">":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    raise LexError(toks[k].start, "unbalanced type arguments after import or require")
 
 
 def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
     """(offset, kind, specifier) for each module load. kind is "literal", "computed"
     (an `import()`/`require()` argument that isn't a literal) or "unsupported" (an
     `import`/`export ... from` declaration this grammar doesn't follow)."""
+    return _read_loads(toks)[0]
+
+
+def _read_loads(toks: list[Tok]) -> tuple[list[tuple[int, str, str | None]], set[int]]:
+    """The loads, and the offsets of `import(`/`require(` shapes skipped as method
+    definitions."""
     out: list[tuple[int, str, str | None]] = []
+    methods: set[int] = set()
     n = len(toks)
 
     def tok(k: int) -> Tok:
@@ -919,6 +1073,10 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
         call = None
         if t.text in ("import", "require") and nxt.is_("punct", "("):
             call = i + 1
+        elif t.text in ("import", "require") and nxt.is_("punct", "<"):
+            end = _type_args_end(toks, i + 1)  # `require<any>("x")`
+            if tok(end).is_("punct", "("):
+                call = end
         elif t.text == "require" and nxt.is_("punct", "?.") and tok(i + 2).is_("punct", "("):
             call = i + 2  # require?.("x")
         if call is not None:
@@ -926,6 +1084,7 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
             member_head = prev is None or (prev.kind == "punct" and prev.text in ("{", "}", ";", ",", "*")) or (
                 prev.kind == "ident" and prev.text in _METHOD_PREFIXES)
             if after_args.is_("punct", "{") or (after_args.is_("punct", ":") and member_head):
+                methods.add(t.start)
                 continue  # a method definition: import(value) { ... }
             arg, after = tok(call + 1), tok(call + 2)
             if arg.kind in ("str", "template") and after.kind == "punct" and after.text in (")", ","):
@@ -968,7 +1127,7 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
             out.append((t.start, "literal", tok(j + 1).text))
         elif t.text == "import" or star:
             out.append((t.start, "unsupported", None))
-    return out
+    return out, methods
 
 
 def js_package(spec: str) -> str:
@@ -976,14 +1135,97 @@ def js_package(spec: str) -> str:
     return "/".join(parts[:2]) if spec.startswith("@") else parts[0]
 
 
+_GAP = r"(?:\s|/\*[\s\S]*?\*/|//[^\n\r]*)*"  # whitespace and comments
+_RAW_IDENT = re.compile(rf"(?:[\w$]|{_J_UESC})+")
+_RAW_FROM = re.compile(r"(?<![\w$.])from(?![\w$])" + _GAP + r"['\"`]")
+
+
+_LOAD_WORDS = ("import", "require")
+
+
+def keyword_idents_are_loads(toks: list[Tok], loads: list[tuple[int, str, str | None]],
+                             methods: set[int], jsx: bool) -> None:
+    """Every identifier token whose decoded value is `import` or `require` must be part
+    of a reported load. In `.ts` files a few forms that are not loads stay allowed: member
+    access after one `.` or `?.`, `function require() {}`, `import.meta`, a key or label
+    (`import:`), `import x = require(...)` and a method definition the reader skipped.
+    In `.tsx` files there are none. Anything else raises `LexError`, which the caller
+    reports as `guard-parse`, so an `import` or `require` the reader doesn't understand
+    (escaped, generic or otherwise) can't pass silently."""
+    loaded = {offset for offset, _, _ in loads}
+    n = len(toks)
+    for k, t in enumerate(toks):
+        if t.kind != "ident" or t.text not in _LOAD_WORDS or t.start in loaded:
+            continue
+        if not jsx:
+            prev = toks[k - 1] if k else None
+            nxt = toks[k + 1] if k + 1 < n else None
+            if prev is not None and (
+                (prev.kind == "punct" and prev.text in (".", "?.")) or prev.is_("ident", "function")
+            ):
+                continue
+            if nxt is not None and nxt.kind == "punct" and nxt.text in (".", ":"):
+                continue
+            if t.start in methods:
+                continue
+            j = k + 1
+            if t.text == "import":
+                if j < n and toks[j].is_("ident", "type") and j + 1 < n and toks[j + 1].kind == "ident":
+                    j += 1
+                if j + 1 < n and toks[j].kind == "ident" and toks[j + 1].is_("punct", "="):
+                    continue
+        raise LexError(t.start, f"`{t.text}` here is not read as a load")
+
+
+def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | None]]) -> None:
+    """A check on a `.tsx` file that doesn't trust the JSX model or the lexer's
+    choices. The identifier-bounded word `import` or `require` must appear only as a
+    load the import reader reported at that exact offset, whatever follows it (a space,
+    a comment, `(`, `{`, a string). A `from` followed by a quote or backtick (after any
+    whitespace or comments) must be the `from` of a reported `import`/`export` load.
+    Anything else raises `LexError`, so no file can hide an import by confusing the
+    lexer: JSX text, strings and comments that spell these words fail closed, and so do
+    `import.meta`, `import x = require(...)` and methods or keys named `import` or
+    `require`."""
+    loaded = {offset for offset, _, _ in loads}
+    index = {t.start: k for k, t in enumerate(toks)}
+    consumed: set[int] = set()
+    for offset, kind, _ in loads:
+        k = index.get(offset)
+        if kind != "literal" or k is None:
+            continue
+        for j in range(k + 1, len(toks)):
+            if toks[j].kind == "str":
+                break
+            if toks[j].is_("ident", "from") and j + 1 < len(toks) and toks[j + 1].kind == "str":
+                consumed.add(toks[j].start)
+                break
+    for m in _RAW_IDENT.finditer(src):
+        word = m.group(0)
+        if "\\" in word:
+            word = _js_unescape(word)
+        if word in _LOAD_WORDS and m.start() not in loaded:
+            raise LexError(m.start(), f"`{m.group(0)}` here is not read as a load; JSX or the lexer hid it")
+    for m in _RAW_FROM.finditer(src):
+        if m.start() not in consumed:
+            raise LexError(m.start(), "`from` here is not part of a reported import or export")
+
+
 def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> list[Violation]:
     lines = Lines(src)
     try:
-        toks = lex_js(src)
+        toks = lex_js(src, jsx=rel.endswith(".tsx"))
+    except LexError as e:
+        return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
+    try:
+        loads, methods = _read_loads(toks)
+        keyword_idents_are_loads(toks, loads, methods, jsx=rel.endswith(".tsx"))
+        if rel.endswith(".tsx"):
+            tsx_backstop(src, toks, loads)
     except LexError as e:
         return [Violation(PARSE_RULE, rel, lines.line(e.offset), f"cannot tokenize: {e.message}")]
     found: list[Violation] = []
-    for offset, kind, spec in js_imports(toks):
+    for offset, kind, spec in loads:
         line = lines.line(offset)
         if kind == "unsupported":
             found.append(Violation(PARSE_RULE, rel, line, "unsupported import/export declaration syntax"))
