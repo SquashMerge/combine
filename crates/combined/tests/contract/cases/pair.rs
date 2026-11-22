@@ -66,24 +66,15 @@ async fn drain<T: Target>(h: &mut Harness<'_, T>, c: &mut ClientSim) -> Vec<Daem
     messages
 }
 
-/// The size of a `Resized` that changes nothing: the new generation announces its size in
-/// `Started`, so a `Resized` repeating the size it has is an old generation's.
-fn repeated_resize(messages: &[DaemonMessage]) -> Option<(u16, u16)> {
-    let mut size = None;
-    for message in messages {
-        match message {
-            DaemonMessage::Started(started) => size = Some((started.cols, started.rows)),
-            DaemonMessage::Resized(resized) => {
-                let now = (resized.cols, resized.rows);
-                if size == Some(now) {
-                    return Some(now);
-                }
-                size = Some(now);
-            }
-            _ => {}
-        }
-    }
-    None
+/// The sizes of the `Resized` messages, in order.
+fn resized_sizes(messages: &[DaemonMessage]) -> Vec<(u16, u16)> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            DaemonMessage::Resized(resized) => Some((resized.cols, resized.rows)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The shared body of cases 29-31: the owner's pair fails and, with the backend sending old
@@ -146,11 +137,11 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
         !late,
         "output from the old generation reached the client: {messages:?}"
     );
-    let repeated = repeated_resize(&messages);
+    let sizes = resized_sizes(&messages);
     ensure!(
         "late-resized",
-        repeated.is_none(),
-        "a Resized to {repeated:?}, the size the epoch already had, can only come from the old generation: {messages:?}"
+        sizes.len() <= 1 && sizes.iter().all(|size| *size == (80, 24)),
+        "the only Resized the new epoch may have is the owner's reapplied 80x24; got {sizes:?}"
     );
     ensure!(
         "owner",

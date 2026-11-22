@@ -305,11 +305,11 @@ pub async fn owner_leaving_hands_off_to_most_recently_focused<T: Target>(t: &mut
     let a = h
         .attach(&mut ca, &term, request_options(80, 24, false))
         .await?;
-    let b = h
-        .attach(&mut cb, &term, request_options(80, 24, false))
-        .await?;
     let c = h
         .attach(&mut cc, &term, request_options(80, 24, false))
+        .await?;
+    let b = h
+        .attach(&mut cb, &term, request_options(80, 24, false))
         .await?;
     let w = h
         .attach(&mut cw, &term, request_options(80, 24, true))
@@ -317,6 +317,7 @@ pub async fn owner_leaving_hands_off_to_most_recently_focused<T: Target>(t: &mut
     h.request_ownership(&mut ca, a).await?;
     h.focus(&mut cb, b).await?;
     h.focus(&mut cc, c).await?;
+    h.focus(&mut cw, w).await?;
     h.settle(&mut [&mut ca, &mut cb, &mut cc, &mut cw]).await?;
     let (mut last, owner) = heard(&cw, w)?;
     ensure!(
