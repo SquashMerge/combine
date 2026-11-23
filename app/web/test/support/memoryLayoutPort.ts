@@ -21,12 +21,14 @@ export type LayoutCall =
 export class MemoryLayoutPort implements LayoutPort {
   readonly calls: LayoutCall[] = [];
   unwatchError: string | null = null;
+  watchGate: Promise<void> | null = null;
   private readonly listeners = new Set<Listener>();
   private nextRequest = 1n;
 
   watchLayout(hostId: HostId, space: string): Promise<DecimalU64> {
     this.calls.push({ kind: 'watch', hostId, space });
-    return Promise.resolve(this.request());
+    const request = this.request();
+    return this.watchGate === null ? Promise.resolve(request) : this.watchGate.then(() => request);
   }
 
   unwatchLayout(hostId: HostId): Promise<void> {

@@ -286,6 +286,11 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
       />
+      {layout.snapshot === null && layout.error !== null && (
+        <p className="layout-error" role="alert">
+          {layout.error}
+        </p>
+      )}
       {layout.snapshot !== null && restoredTiles !== null && (
         <TileTree
           layout={layout.snapshot}

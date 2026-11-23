@@ -127,7 +127,9 @@ export function useSpaceLayout(
         }
         case 'error':
           queue.current?.onError(event.request, event.code, event.message);
-          if (event.request === watchRequest.current) setError(event.message);
+          if (watchRequest.current === null || event.request === watchRequest.current) {
+            setError(event.message);
+          }
           return;
         case 'disconnected':
           queue.current?.onDisconnected();

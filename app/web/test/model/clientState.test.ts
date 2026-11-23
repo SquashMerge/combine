@@ -96,6 +96,10 @@ describe('restoreSpaceState', () => {
     expect(restoreSpaceState(undefined, layout, terminals).activeTabs).toEqual({ t1: 'p1' });
   });
 
+  it('restores an empty stored terminal as none', () => {
+    expect(restoreSpaceState(stored({ activeTerminal: '' as TermId }), layout, terminals).activeTerminal).toBeNull();
+  });
+
   it('writes nothing back to the stored state', () => {
     const before = stored({ focusedTile: 'gone', activeTabs: { gone: 'p1' } });
     const copy = structuredClone(before);

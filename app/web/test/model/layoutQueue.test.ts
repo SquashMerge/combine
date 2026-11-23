@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DecimalU64 } from '../../src/model/ids';
 import type { LayoutOp, LayoutSnapshot } from '../../src/model/layout';
+import { loadLayoutEventFixture } from '../support/memoryLayoutPort';
 import { LayoutQueue, STALE_NOTICE } from '../../src/model/layoutQueue';
 
 function snap(revision: string, tiles: string[] = ['t1', 't2']): LayoutSnapshot {
@@ -194,5 +195,76 @@ describe('LayoutQueue', () => {
     await flush();
     const op = sent[0]?.ops[0];
     expect(op?.op === 'split_tile' && op.newTile).toMatch(/^t-[0-9a-f-]{36}$/);
+  });
+
+  it('does not send a later intent while an earlier one waits after a stale reply', async () => {
+    const { queue, sent } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.enqueue(setActive('t1'));
+    await flush();
+    queue.onError(rid(1), 'stale_layout', 'stale');
+    queue.enqueue(setActive('t2'));
+    await flush();
+    expect(sent).toHaveLength(1);
+    queue.onSnapshot(null, snap('6'));
+    await flush();
+    expect(sent.map((s) => [s.base, s.ops[0]])).toEqual([
+      ['5', setActive('t1')[0]],
+      ['6', setActive('t1')[0]],
+    ]);
+    queue.onSnapshot(rid(2), snap('7'));
+    await flush();
+    expect(sent.map((s) => [s.base, s.ops[0]])).toEqual([
+      ['5', setActive('t1')[0]],
+      ['6', setActive('t1')[0]],
+      ['7', setActive('t2')[0]],
+    ]);
+  });
+
+  it('a reply for another request does not release the flight', async () => {
+    const { queue, sent } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.enqueue(setActive('t1'));
+    queue.enqueue(setActive('t2'));
+    await flush();
+    queue.onSnapshot(rid(40), snap('6'));
+    queue.onError(rid(41), 'invalid_request', 'other');
+    await flush();
+    expect(sent).toHaveLength(1);
+    queue.onSnapshot(rid(1), snap('7'));
+    await flush();
+    expect(sent).toHaveLength(2);
+  });
+
+  it('still sends a later intent after a send was rejected', async () => {
+    const bases: string[] = [];
+    let fail = true;
+    const queue = new LayoutQueue({
+      send: (base) => {
+        bases.push(base);
+        return fail ? Promise.reject(new Error('not connected')) : Promise.resolve(rid(1));
+      },
+      onNotice: () => undefined,
+    });
+    queue.onSnapshot(null, snap('5'));
+    queue.enqueue(setActive('t1'));
+    await flush();
+    fail = false;
+    queue.enqueue(setActive('t2'));
+    await flush();
+    expect(bases).toEqual(['5', '5']);
+  });
+
+  it('builds the op shapes of the shared ops fixture', async () => {
+    const [, , , split, close] = loadLayoutEventFixture().ops;
+    const { queue, sent } = setup(() => 't3');
+    queue.onSnapshot(null, snap('5', ['t1', 't2', 't3']));
+    queue.split('t1', 'v', 'p1');
+    await flush();
+    queue.onSnapshot(rid(1), snap('6', ['t1', 't2', 't3']));
+    queue.close('t3');
+    await flush();
+    expect(sent[0]?.ops[0]).toEqual(split);
+    expect(sent[1]?.ops[0]).toEqual(close);
   });
 });

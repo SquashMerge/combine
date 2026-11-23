@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { type ClientState, defaultClientState } from '../../src/model/clientState';
 import type { DecimalU64, HostId } from '../../src/model/ids';
@@ -53,6 +53,7 @@ async function mount(state: ClientState | null) {
       port={new MemoryHostsPort(hosts())}
       clientStatePort={clientStatePort}
       layoutPort={layoutPort}
+      newTileId={() => 't-new'}
     />,
   );
   return { layoutPort, clientStatePort };
@@ -119,5 +120,42 @@ describe('App with a layout', () => {
     });
     fireEvent.click(tile.querySelector('button:not([role="tab"])') as HTMLElement);
     await waitFor(() => expect(layoutPort.calls.at(-1)?.kind).toBe('mutate'));
+  });
+
+  it('Split down and Close tile send the exact ops', async () => {
+    const { layoutPort } = await mount(saved(null, {}));
+    await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout()));
+    const t2 = await waitFor(() => {
+      const found = document.querySelector('[data-tile-id="t2"]');
+      if (found === null) throw new Error('no tile yet');
+      return found as HTMLElement;
+    });
+    const mutates = () => layoutPort.calls.filter((call) => call.kind === 'mutate');
+    fireEvent.click(within(t2).getByRole('button', { name: 'Split down' }));
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    expect(mutates()[0]).toMatchObject({
+      baseLayoutRevision: '3',
+      ops: [{ op: 'split_tile', tile: 't2', dir: 'v', newTile: 't-new', ratio: 0.5, panel: null }],
+    });
+    act(() => layoutPort.push(HOST_A, { ...layout(), layoutRevision: '4' as DecimalU64 }, '2' as DecimalU64));
+    fireEvent.click(within(t2).getByRole('button', { name: 'Close tile' }));
+    await waitFor(() => expect(mutates()).toHaveLength(2));
+    expect(mutates()[1]).toMatchObject({
+      baseLayoutRevision: '4',
+      ops: [{ op: 'close_tile', tile: 't2' }],
+    });
+  });
+
+  it('shows a failed watch even with no snapshot', async () => {
+    const { layoutPort } = await mount(saved(null, {}));
+    await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() =>
+      layoutPort.emit({ kind: 'error', hostId: HOST_A, request: '1' as DecimalU64, code: 'unknown_space', message: 'no such space' }),
+    );
+    expect((await screen.findByRole('alert')).textContent).toBe('no such space');
+    expect(document.querySelector('[data-tile-id]')).toBeNull();
   });
 });

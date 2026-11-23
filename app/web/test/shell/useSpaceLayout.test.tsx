@@ -37,7 +37,7 @@ function layout(path: string, revision = '1', readOnly = false): LayoutSnapshot 
 function mount(port: MemoryLayoutPort, initialHosts = hosts(), initial: SpaceKey | null = null) {
   return renderHook(
     (props: { hosts: HostsSnapshot; selected: SpaceKey | null }) =>
-      useSpaceLayout(port, props.hosts, props.selected),
+      useSpaceLayout(port, props.hosts, props.selected, () => 't-new'),
     { initialProps: { hosts: initialHosts, selected: initial } },
   );
 }
@@ -145,5 +145,80 @@ describe('useSpaceLayout', () => {
     const call = port.calls.at(-1);
     expect(call?.kind === 'mutate' && call.baseLayoutRevision).toBe('5');
     expect(call?.kind === 'mutate' && call.ops[0]?.op).toBe('split_tile');
+  });
+
+  async function watching() {
+    const port = new MemoryLayoutPort();
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    act(() => port.push(HOST_A, layout('/src/one', '5'), '1' as DecimalU64));
+    const mutates = () => port.calls.filter((call) => call.kind === 'mutate');
+    return { port, view, mutates };
+  }
+
+  it('sends the exact split and close ops, one at a time, released by reply snapshots', async () => {
+    const { port, view, mutates } = await watching();
+    act(() => {
+      view.result.current.split('t1', 'v');
+      view.result.current.close('t1');
+    });
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    expect(mutates()[0]).toMatchObject({
+      hostId: HOST_A,
+      space: '/src/one',
+      baseLayoutRevision: '5',
+      ops: [{ op: 'split_tile', tile: 't1', dir: 'v', newTile: 't-new', ratio: 0.5, panel: null }],
+    });
+    act(() => port.push(HOST_A, layout('/src/one', '6'), '2' as DecimalU64));
+    await waitFor(() => expect(mutates()).toHaveLength(2));
+    expect(mutates()[1]).toMatchObject({
+      baseLayoutRevision: '6',
+      ops: [{ op: 'close_tile', tile: 't1' }],
+    });
+  });
+
+  it('resends at the new base after stale_layout and a newer push', async () => {
+    const { port, view, mutates } = await watching();
+    act(() => view.result.current.close('t1'));
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '2' as DecimalU64, code: 'stale_layout', message: 'stale' }));
+    expect(mutates()).toHaveLength(1);
+    act(() => port.push(HOST_A, layout('/src/one', '6')));
+    await waitFor(() => expect(mutates()).toHaveLength(2));
+    expect(mutates()[1]).toMatchObject({ baseLayoutRevision: '6', ops: [{ op: 'close_tile', tile: 't1' }] });
+  });
+
+  it('shows an invalid_request message as the notice', async () => {
+    const { port, view, mutates } = await watching();
+    act(() => view.result.current.close('t1'));
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '2' as DecimalU64, code: 'invalid_request', message: 'no such tile' }));
+    expect(view.result.current.notice).toBe('no such tile');
+  });
+
+  it('a disconnect drops queued intents', async () => {
+    const { port, view, mutates } = await watching();
+    act(() => {
+      view.result.current.close('t1');
+      view.result.current.close('t1');
+    });
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    act(() => port.emit({ kind: 'disconnected', hostId: HOST_A }));
+    act(() => port.push(HOST_A, layout('/src/one', '6'), '2' as DecimalU64));
+    await act(() => Promise.resolve());
+    expect(mutates()).toHaveLength(1);
+  });
+
+  it('reports a watch error that arrives before the watch resolves', async () => {
+    const port = new MemoryLayoutPort();
+    let open = () => undefined as void;
+    port.watchGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '1' as DecimalU64, code: 'unknown_space', message: 'no such space' }));
+    expect(view.result.current.error).toBe('no such space');
+    open();
   });
 });
