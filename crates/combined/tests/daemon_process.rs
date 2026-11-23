@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use combine_protocol::{ClientMessage, DaemonMessage, RequestId, WatchTerminals};
 use daemon_support::{
-    combined_command, run_to_exit, DaemonPaths, DaemonProcess, ShortTempDir, WireClient,
+    combined_command, run_to_exit, wait_until, DaemonPaths, DaemonProcess, ShortTempDir, WireClient,
 };
 
 fn code(status: ExitStatus) -> Option<i32> {
@@ -140,26 +140,29 @@ fn herdr_core_backend_with_unreachable_socket_fails_at_start() {
 }
 
 #[test]
-fn herdr_core_backend_without_the_adapter_fails_at_start() {
+fn herdr_core_backend_that_closes_before_hello_fails_at_start() {
     let scratch = ShortTempDir::new();
     let paths = DaemonPaths::in_scratch(&scratch, "a");
-    // A stand-in for herdr-core's socket: it is checked and never connected to.
+    // A stand-in for herdr-core's socket: it accepts one connection and closes it unanswered.
     fs::create_dir_all(paths.herdr_core_socket.parent().unwrap()).unwrap();
     let listener = UnixListener::bind(&paths.herdr_core_socket).unwrap();
     listener.set_nonblocking(true).unwrap();
 
     let mut daemon = DaemonProcess::spawn(&scratch, &paths, "herdr-core");
+    assert!(
+        wait_until(Duration::from_secs(10), || listener.accept().is_ok()),
+        "the daemon never connected to herdr-core's socket"
+    );
     assert_eq!(code(daemon.wait_exit()), Some(3));
     let log = daemon.log();
-    assert!(log.contains("no herdr-core adapter"), "{log}");
-    assert!(log.contains("#23"), "{log}");
+    let prefix = format!(
+        "cannot start the herdr-core backend on {}",
+        paths.herdr_core_socket.display()
+    );
+    assert!(log.contains(&prefix), "{log}");
+    assert!(log.contains("hello"), "{log}");
+    assert!(!log.contains("no herdr-core adapter"), "{log}");
     assert!(!paths.socket.exists());
-    // Any connection the daemon had made would be waiting in the backlog.
-    match listener.accept() {
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-        Ok(_) => panic!("the daemon connected to herdr-core's socket"),
-        Err(error) => panic!("{error}"),
-    }
     drop(listener);
 }
 

@@ -19,7 +19,8 @@ use combined::wiring::config::{self, DaemonConfigError, DaemonEnv, HerdrCoreSour
 use combined::wiring::ids::{IdReservation, ID_BLOCK};
 use common::request_options;
 use daemon_support::{
-    refuse_default_herdr_core_in, write_daemon_config, DaemonPaths, ShortTempDir,
+    default_herdr_core_sockets, refuse_default_herdr_core_in, refuse_non_lane_herdr_core_socket,
+    write_daemon_config, DaemonPaths, ShortTempDir,
 };
 
 fn reserved(path: &Path) -> u64 {
@@ -154,6 +155,61 @@ fn test_helpers_refuse_the_default_herdr_core_socket() {
         ..DaemonEnv::default()
     };
     refuse_default_herdr_core_in(&default, &scratch, &env);
+}
+
+#[test]
+fn lane_socket_check_accepts_the_lane_shape() {
+    let scratch = ShortTempDir::new();
+    for socket in [
+        "/tmp/chc.ab12/run/herdr-core/cab12.sock",
+        "/private/tmp/chc.ab12/run/herdr-core/cab12.sock",
+    ] {
+        let socket = PathBuf::from(socket);
+        refuse_non_lane_herdr_core_socket(&socket);
+        let paths =
+            DaemonPaths::in_scratch(&scratch, "d").with_lane_herdr_core_socket(socket.clone());
+        assert!(paths.lane_herdr_core);
+        let config = write_daemon_config(&scratch, &paths, "herdr-core");
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
+        assert_eq!(written["herdr_core_socket"], socket.to_str().unwrap());
+        let reset = paths.with_herdr_core_socket(&scratch, scratch.path().join("x.sock"));
+        assert!(!reset.lane_herdr_core);
+    }
+}
+
+#[test]
+#[should_panic(expected = "is not absolute")]
+fn lane_socket_check_refuses_a_relative_path() {
+    refuse_non_lane_herdr_core_socket(Path::new("chc.ab12/run/herdr-core/c.sock"));
+}
+
+#[test]
+#[should_panic(expected = "`..` component")]
+fn lane_socket_check_refuses_a_dotdot_path() {
+    refuse_non_lane_herdr_core_socket(Path::new("/tmp/chc.ab12/run/../run/herdr-core/c.sock"));
+}
+
+#[test]
+#[should_panic(expected = "not an isolated lane's herdr-core socket")]
+fn lane_socket_check_refuses_a_root_not_named_chc() {
+    refuse_non_lane_herdr_core_socket(Path::new("/tmp/x/run/herdr-core/c.sock"));
+}
+
+#[test]
+#[should_panic(expected = "not an isolated lane's herdr-core socket")]
+fn lane_socket_check_refuses_a_socket_outside_run_herdr_core() {
+    refuse_non_lane_herdr_core_socket(Path::new("/tmp/chc.ab12/run/other/c.sock"));
+}
+
+#[test]
+#[should_panic]
+fn lane_socket_check_refuses_a_default_socket() {
+    let default = default_herdr_core_sockets(&DaemonEnv::from_process())
+        .into_iter()
+        .next()
+        .expect("the process environment has a default socket");
+    refuse_non_lane_herdr_core_socket(&default);
 }
 
 #[test]
@@ -440,7 +496,11 @@ fn herdr_core_choice(socket: PathBuf) -> BackendChoice {
 }
 
 fn build_error(choice: &BackendChoice) -> combined::wiring::StartError {
-    match futures::executor::block_on(backend::build(choice)) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    match runtime.block_on(backend::build(choice)) {
         Ok(_) => panic!("the backend should not build"),
         Err(error) => error,
     }
@@ -459,17 +519,31 @@ fn herdr_core_backend_with_missing_socket_is_unavailable() {
 }
 
 #[test]
-fn herdr_core_backend_reports_the_missing_adapter() {
+fn herdr_core_backend_that_closes_before_hello_fails_to_start() {
     let scratch = ShortTempDir::new();
     let socket = scratch.path().join("hc.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    assert!(backend::HERDR_CORE.is_none());
-    let error = build_error(&herdr_core_choice(socket));
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let accepter = std::thread::spawn(move || {
+        for _ in 0..1000 {
+            if let Ok(stream) = listener.accept() {
+                drop(stream);
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    });
+    assert!(backend::HERDR_CORE.is_some());
+    let error = build_error(&herdr_core_choice(socket.clone()));
     assert_eq!(error.exit_code(), 3);
     let text = error.to_string();
-    assert!(
-        text.contains("crates/combined/src/adapters/herdr_core"),
-        "{text}"
+    let prefix = format!(
+        "cannot start the herdr-core backend on {}: ",
+        socket.display()
     );
-    assert!(text.contains("#3") && text.contains("#23"), "{text}");
+    assert!(text.starts_with(&prefix), "{text}");
+    assert!(text.contains("hello"), "{text}");
+    assert!(!text.contains("no herdr-core adapter"), "{text}");
+    assert!(accepter.join().unwrap(), "nothing connected to the socket");
 }
