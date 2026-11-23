@@ -42,7 +42,7 @@ fn set_active_op() -> wire::LayoutOp {
 
 #[test]
 fn status_becomes_a_snapshot() {
-    let snapshot = layout_snapshot(&space("/work/trellis"), &status());
+    let snapshot = layout_snapshot(&space("/work/trellis"), &status()).unwrap();
     assert_eq!(snapshot.space, "/work/trellis");
     assert_eq!(snapshot.layout_revision, 7);
     assert!(snapshot.read_only);
@@ -74,9 +74,20 @@ fn status_without_a_notice_has_none() {
     let mut status = status();
     status.dropped = None;
     status.error = None;
-    let snapshot = layout_snapshot(&space("s"), &status);
+    let snapshot = layout_snapshot(&space("s"), &status).unwrap();
     assert_eq!(snapshot.dropped, None);
     assert_eq!(snapshot.error, None);
+}
+
+#[test]
+fn snapshot_refuses_a_ratio_the_wire_cannot_carry() {
+    let mut status = status();
+    status.layout = layout(split(
+        f64::NAN,
+        tile("a", &["p1"], Some("p1")),
+        tile("b", &[], None),
+    ));
+    assert!(layout_snapshot(&space("s"), &status).is_err());
 }
 
 #[test]
