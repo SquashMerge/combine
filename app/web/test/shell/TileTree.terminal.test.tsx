@@ -124,4 +124,41 @@ describe('TileTree terminal mount', () => {
     expect(stream.commands('close')).toHaveLength(1);
     expect(fake.instances[0]?.disposed).toBe(true);
   });
+
+  it('switching the active terminal remounts the panel: term-1 is detached and term-2 attached', async () => {
+    const port = new MemoryTerminalPort();
+    const fake = fakeXtermFactory();
+    const view = render(tree(port, fake, 't1', MOUNT));
+    await flush();
+    const resize = () => {
+      const container = document.querySelector('.terminal-view');
+      if (container === null) throw new Error('no terminal view');
+      act(() => FakeResizeObserver.resize(container, 800, 340));
+    };
+    resize();
+    await flush();
+    const first = port.streams[0];
+    if (first === undefined) throw new Error('stream not open');
+    act(() => {
+      first.emit(attachedEvent(1, 7));
+      first.emit(startedEvent(cursor(7, 1, 0)));
+      first.emit(ownershipEvent(7, 1, 8));
+    });
+    await flush();
+
+    const second = { ...MOUNT, termId: parseTermId('term-2'), label: { name: 'deploy', host: 'mini', state: 'idle' } };
+    view.rerender(tree(port, fake, 't1', second));
+    await flush();
+    act(() => first.emit(closedEvent(cursor(7, 1, 1), 'detached')));
+    await flush();
+    resize();
+    await flush();
+
+    expect(first.commands('detach')).toEqual([{ op: 'detach', attachment: '7' }]);
+    expect(first.commands('close')).toHaveLength(1);
+    expect(port.streams).toHaveLength(2);
+    expect(port.streams[1]?.commands('attach').flatMap((command) => (command.op === 'attach' ? [command.terminal] : []))).toEqual([second.termId]);
+    expect(screen.getAllByTestId('terminal-panel')).toHaveLength(1);
+    expect(screen.getByText('deploy')).toBeTruthy();
+  });
 });

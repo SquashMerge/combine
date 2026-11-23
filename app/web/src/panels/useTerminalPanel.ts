@@ -21,7 +21,9 @@ export interface TerminalPanelState {
   reattach: () => void;
 }
 
-/** `hostId` and `termId` are fixed for the panel's lifetime: key the panel by them. */
+/**
+ * `hostId` and `termId` are fixed for the panel's lifetime: key the panel by them. The controller is created once and `stop()` is permanent, so never run this hook under React.StrictMode or a Fast Refresh double-mount.
+ */
 export function useTerminalPanel({
   port,
   hostId,
