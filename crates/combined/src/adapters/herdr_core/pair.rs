@@ -20,7 +20,8 @@ use crate::ports::BackendError;
 /// How long the display half has to send its first RESIZE.
 const FIRST_RESIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) struct Half {
+/// One open viewer of the pair: its connection, the frames it receives and its channel.
+pub(super) struct Viewer {
     pub connection: Connection,
     pub frames: mpsc::UnboundedReceiver<Frame>,
     pub channel: u32,
@@ -28,8 +29,8 @@ pub(super) struct Half {
 
 /// A pair that is open.
 pub(super) struct Halves {
-    pub display: Half,
-    pub input: Option<Half>,
+    pub display: Viewer,
+    pub input: Option<Viewer>,
     /// Display frames that arrived before the first RESIZE, still to be handled.
     pub prefetched: Vec<Frame>,
     /// The PTY size the display half started with.
@@ -72,7 +73,7 @@ async fn attach_half(
     env: &Env,
     params: &OpenParams<'_>,
     display_half: bool,
-) -> Result<(Half, jsonrpc::AttachResult), OpenError> {
+) -> Result<(Viewer, jsonrpc::AttachResult), OpenError> {
     let (connection, frames) = Connection::open(&env.config.socket)
         .await
         .map_err(OpenError::Failed)?;
@@ -90,7 +91,7 @@ async fn attach_half(
     let result = jsonrpc::parse_attach_result(result).map_err(OpenError::Failed)?;
     let channel = result.channel;
     Ok((
-        Half {
+        Viewer {
             connection,
             frames,
             channel,
@@ -100,7 +101,7 @@ async fn attach_half(
 }
 
 /// The display half's first RESIZE gives `Started` its size; anything before it is kept.
-async fn first_resize(half: &mut Half) -> Result<((u16, u16), Vec<Frame>), BackendError> {
+async fn first_resize(half: &mut Viewer) -> Result<((u16, u16), Vec<Frame>), BackendError> {
     let mut prefetched = Vec::new();
     let waited = tokio::time::timeout(FIRST_RESIZE_TIMEOUT, async {
         while let Some(frame) = half.frames.recv().await {

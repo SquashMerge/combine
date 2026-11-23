@@ -74,7 +74,7 @@ impl HerdrCoreConfig {
 struct Env {
     pub(super) config: HerdrCoreConfig,
     /// The highest ownership generation any request for each terminal has carried.
-    pub(super) fence: Mutex<HashMap<String, u64>>,
+    pub(super) highest_ownership: Mutex<HashMap<String, u64>>,
     pub(super) fidelities: Mutex<Fidelities>,
     /// The core lists `automatic_input` among its features.
     pub(super) automatic_feature: bool,
@@ -133,7 +133,7 @@ impl HerdrCoreBackend {
         HerdrCoreBackend {
             env: Arc::new(Env {
                 config,
-                fence: Mutex::new(HashMap::new()),
+                highest_ownership: Mutex::new(HashMap::new()),
                 fidelities: Mutex::new(Fidelities::default()),
                 automatic_feature: hello.has_feature("automatic_input"),
                 #[cfg(feature = "test-support")]
