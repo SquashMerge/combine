@@ -787,9 +787,9 @@ Adding a node type, action or animation is a client change. The set is meant to 
 - **DivKit** (spiked 2026-11-22): a mature declarative card format. It was workable but heavy for Combine's kinds, so it stays a possible later node type (above).
 - **OpenUI** (openui.com, Thesys, MIT; OpenUI Lang 1.0): a compact line-oriented language that a model writes live in a chat, rendered only from a registered component catalog (unknown components are dropped, props are checked against schemas), streamed and parsed as it arrives, with React, Vue, Svelte and Angular renderers.
   - Why it isn't the view language:
-    - Its views call tools directly. `Query` and `Mutation` run through a `toolProvider` in the browser next to the renderer. Combine's views bind to records that panel backends produce, so a kind stays data-only and works with any backend.
-    - Its host can't veto an action: action slots aren't enforced at runtime, and there are no gesture rules or rate limits. Combine sends every effect through the action dispatcher.
-    - Its docs don't cover visibility triggers, collection keyboard navigation and scrolling, pagination, animation or tooltips, all of which the view language has.
+    - Its data model is different. UI-side tools are optional, but when a view uses `Query` or `Mutation`, the renderer runs them through a host-supplied `toolProvider` in the browser, so a view names the tools it calls. Combine's views only bind to records that panel backends produce, so a kind stays data-only and works with any backend.
+    - Its runtime has no single mandatory dispatch boundary. The renderer runs `@Set`, `@Reset` and `@Run` itself; custom actions, `@OpenUrl` and `@ToAssistant` reach the host's `onAction` handler, which can decline them; restricted action slots are prompt and schema constraints, not runtime checks. Adopting it would mean imposing Combine's dispatcher, with its gesture, provenance and rate rules, on a records-only subset of the language. Combine prefers its own smaller, backend-neutral language with those rules built in.
+    - The compared docs don't specify visibility triggers, collection keyboard navigation and scrolling, pagination, animation or tooltips as part of the language. Combine's view language specifies all of them.
   - What Combine takes from it:
     - The agent-facing authoring guide for the view language is generated from the closed node and action set, the way OpenUI generates its system prompt from the component catalog, so the guide can't drift from what the client accepts.
     - A terse text syntax that compiles to the same node tree, if agents find JSON views verbose.
@@ -878,9 +878,11 @@ The daemon discovers the MCP servers the host's agents have, but treats each one
 - A failing source shows its error with the last good data greyed out; agents see the error through `list_panels`.
 - `Stream` (planned, not in v1): a source keeps delivering updates after the first result, instead of being re-run. Whatever mechanism is chosen (see Open questions), it keeps these rules:
   - updates are record-level: an upsert or a removal keyed by the record's identity (the pointer in the kind's `paging.key`, which a streaming kind must declare), or a full replacement;
-  - selection, scroll position and other view state survive updates, and a changed value can use the `highlight` animation;
+  - selection, scroll position and other view state survive updates for records that still exist (a removed record clears its selection, as with paging), and a changed value can use the `highlight` animation;
   - delivery to the client is batched to the display frame, like terminal output, and a slow client gets the latest state, not a backlog;
-  - a streaming source needs the same approvals as the source it extends (an approved MCP server and tool, an allowlisted CLI), and its updates are admitted like any other refresh.
+  - a streaming source needs the same approvals as the source it extends (an approved MCP server and tool, an allowlisted CLI), and each update is authorized as that source's own output, never because the server is approved in general;
+  - an update delivered by an already-running approved source is an outside data change, like a file or backend event. It is not an automatic trigger and starts no new loader run, so the automatic `OnEvent` limit doesn't apply to it. But a view action that the new data causes (an `appear`, a countdown) is automatic, and so is everything downstream of it, under *Scheduling of automatic triggers*: passing through streamed data never removes automatic provenance;
+  - what a `refresh` action means on a `Stream` panel, and how an automatic restart or resnapshot of the stream is admitted, are part of the open design question.
 
 ## Agent integration
 
