@@ -381,6 +381,24 @@ fn start_server(
     .unwrap()
 }
 
+/// Starts a server on `backend` and `store`, which a test keeps so it can start another server
+/// on the same pair, with the default timing.
+pub fn server_on(
+    scratch: &ShortTempDir,
+    name: &str,
+    backend: Arc<FakeBackend>,
+    store: Arc<dyn FileStore>,
+) -> ServerHandle {
+    start_server(
+        scratch,
+        name,
+        backend,
+        "host-a",
+        ServeOptions::default(),
+        Some((store, LayoutTiming::default())),
+    )
+}
+
 /// What [`layout_server`] started.
 pub struct LayoutServer {
     pub server: ServerHandle,
