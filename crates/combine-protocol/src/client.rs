@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::display::Display;
 use crate::ids::{AttachmentId, Cursor, Epoch, OwnershipGeneration, RequestId, TermId};
 use crate::layout::LayoutOp;
+use crate::spawn::SpawnSource;
 
 /// The client's first frame. See the handshake in [`crate::client_handshake`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +125,25 @@ pub struct MutateLayout {
     pub ops: Vec<LayoutOp>,
 }
 
+/// Asks for the terminal templates of a space's panels. The daemon answers
+/// `templates` carrying this `request`. An unknown `space` gets
+/// `unknown_space`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTemplates {
+    pub request: RequestId,
+    pub space: String,
+}
+
+/// Starts a terminal in a space. The daemon answers `spawned` carrying this
+/// `request`, or an `error` with `unknown_space`, `unknown_template`,
+/// `cwd_refused` or `spawn_failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnTerminal {
+    pub request: RequestId,
+    pub space: String,
+    pub source: SpawnSource,
+}
+
 /// Typed input: frame kind 3, never JSON. A caller with more than
 /// [`MAX_INPUT_CHUNK`](crate::MAX_INPUT_CHUNK) bytes splits it, in order, with
 /// `chunks`.
@@ -166,6 +186,8 @@ pub enum ClientMessage {
     WatchLayout(WatchLayout),
     UnwatchLayout(UnwatchLayout),
     MutateLayout(MutateLayout),
+    ListTemplates(ListTemplates),
+    SpawnTerminal(SpawnTerminal),
     #[serde(skip)]
     Input(Input),
     #[serde(skip)]
@@ -190,6 +212,8 @@ impl ClientMessage {
             Self::WatchLayout(_) => "watch_layout",
             Self::UnwatchLayout(_) => "unwatch_layout",
             Self::MutateLayout(_) => "mutate_layout",
+            Self::ListTemplates(_) => "list_templates",
+            Self::SpawnTerminal(_) => "spawn_terminal",
             Self::Input(_) => "input",
             Self::AutomaticReply(_) => "automatic_reply",
         }

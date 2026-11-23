@@ -25,18 +25,20 @@ mod frame;
 mod handshake;
 mod ids;
 mod layout;
+mod spawn;
 mod stream;
 mod terminals;
 
 pub use client::{
     Ack, Attach, AttachRequestOptions, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input,
-    MutateLayout, RequestOwnership, Resize, Resume, SetDisplay, UnwatchLayout, WatchLayout,
-    WatchTerminals,
+    ListTemplates, MutateLayout, RequestOwnership, Resize, Resume, SetDisplay, SpawnTerminal,
+    UnwatchLayout, WatchLayout, WatchTerminals,
 };
 pub use codec::WireMessage;
 pub use daemon::{
     Attached, CloseReason, Closed, DaemonMessage, Data, ErrorCode, ErrorMessage, Facts, Fidelity,
-    Gap, Layout, Lost, Ownership, Resized, Resumed, Resynced, Started, Terminals, Welcome,
+    Gap, Layout, Lost, Ownership, Resized, Resumed, Resynced, Spawned, Started, Templates,
+    Terminals, Welcome,
 };
 pub use display::Display;
 pub use error::{DecodeError, EncodeError, ReadError, WriteError};
@@ -52,5 +54,6 @@ pub use ids::{
     TermId,
 };
 pub use layout::{DroppedNotice, LayoutNode, LayoutOp, LayoutSnapshot, Ratio, SplitDirection};
+pub use spawn::{SkippedPanel, SpawnSource, TemplateInfo};
 pub use stream::{read_message, write_message};
 pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};

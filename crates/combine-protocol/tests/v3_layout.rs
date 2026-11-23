@@ -79,11 +79,6 @@ fn snapshot() -> LayoutSnapshot {
 }
 
 #[test]
-fn protocol_version_is_3() {
-    assert_eq!(PROTOCOL_VERSION, 3);
-}
-
-#[test]
 fn watch_layout_round_trips() {
     let frame = control_frame(WATCH_JSON);
     let (message, used) = ClientMessage::decode(&frame).unwrap();
