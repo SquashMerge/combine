@@ -188,6 +188,14 @@ display = "hidden"
 order = 1
 paths = ["crates/combined/src/testing.rs", "crates/combined/src/testing/**"]
 
+# Integration tests of the Tauri backend. They may run in-process daemons from `combined`
+# (a dev-dependency with test-support); those references are cross-app `unknown`, reviewed.
+[layers.app-tests]
+app = "combine-app"
+display = "hidden"
+order = 0
+paths = ["app/src-tauri/tests/**"]
+
 [layers.web-tests]
 app = "combine-web"
 display = "hidden"

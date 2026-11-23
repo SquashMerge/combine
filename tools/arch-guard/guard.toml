@@ -27,6 +27,7 @@ non_production = [
   "spike/**",
   "tools/**",
   "crates/*/tests/**",
+  "app/src-tauri/tests/**",
   "crates/combined/src/testing.rs",
   "crates/combined/src/testing/**",
   "app/web/test/**",
@@ -137,6 +138,7 @@ id = "no-production-dependency-on-non-production"
 to = [
   "spike/**",
   "crates/*/tests/**",
+  "app/src-tauri/tests/**",
   "crates/combined/src/testing.rs",
   "crates/combined/src/testing/**",
   "app/web/test/**",
