@@ -12,8 +12,8 @@ use std::task::Context;
 use combine_protocol::{BackendGeneration, CloseReason, Fidelity, OwnershipGeneration, TermId};
 use combined::model::{SpaceId, TermEvent};
 use combined::ports::{
-    AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, Capabilities, FileStore,
-    StoreError, StoreRevision, TerminalBackend,
+    AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, Capabilities, FileChange,
+    FileStore, StoreError, StoreRevision, TerminalBackend, WriteOutcome,
 };
 use combined::testing::{
     FakeAttachmentRef, FakeBackend, FakeCall, FakeConfig, FakeControl, Half, MemoryFileStore,
@@ -23,6 +23,9 @@ use common::{display, request_options, spawn_spec};
 use futures::executor::block_on;
 use futures::task::{waker, ArcWake};
 use futures::{FutureExt, StreamExt};
+
+/// A read bound no test file comes near.
+const ANY_SIZE: usize = 1 << 20;
 
 const OWN: OwnershipGeneration = OwnershipGeneration(1);
 
@@ -869,24 +872,29 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
     let other = SpaceId("/other".to_string());
     block_on(async {
         assert_eq!(store.revision(&space).await, Ok(StoreRevision(0)));
-        assert_eq!(store.read(&space, "a.txt").await, Ok(None));
+        assert_eq!(store.read(&space, "a.txt", ANY_SIZE).await, Ok(None));
+        let revision = |outcome: Result<WriteOutcome, StoreError>| outcome.unwrap().revision;
         assert_eq!(
-            store.write(&space, "a.txt", b"one".to_vec()).await,
-            Ok(StoreRevision(1))
+            revision(store.write(&space, "a.txt", b"one".to_vec()).await),
+            StoreRevision(1)
         );
         assert_eq!(
-            store.write(&space, "dir/b.txt", b"two".to_vec()).await,
-            Ok(StoreRevision(2))
+            revision(store.write(&space, "dir/b.txt", b"two".to_vec()).await),
+            StoreRevision(2)
         );
         assert_eq!(
-            store.write(&space, "a.txt", b"three".to_vec()).await,
-            Ok(StoreRevision(3))
+            revision(store.write(&space, "a.txt", b"three".to_vec()).await),
+            StoreRevision(3)
         );
         assert_eq!(store.revision(&other).await, Ok(StoreRevision(0)));
-        let file = store.read(&space, "a.txt").await.unwrap().unwrap();
+        let file = store
+            .read(&space, "a.txt", ANY_SIZE)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(file.bytes, b"three");
         assert_eq!(file.revision, StoreRevision(3));
-        assert_eq!(store.read(&other, "a.txt").await, Ok(None));
+        assert_eq!(store.read(&other, "a.txt", ANY_SIZE).await, Ok(None));
 
         for path in ["", "/abs", "a/../b", "./a", "a//b", "a/", "..", "a/./b"] {
             assert_eq!(
@@ -895,13 +903,108 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
                 "{path:?}"
             );
             assert_eq!(
-                store.read(&space, path).await,
+                store.read(&space, path, ANY_SIZE).await,
                 Err(StoreError::InvalidPath),
                 "{path:?}"
             );
         }
         assert_eq!(store.revision(&space).await, Ok(StoreRevision(3)));
     });
+}
+
+#[test]
+fn memory_write_enqueues_change_before_returning() {
+    let store = MemoryFileStore::new();
+    let space = SpaceId("/repo".to_string());
+    let mut changes = store.changes();
+    block_on(async {
+        store.watch(&space).await.unwrap();
+        store
+            .write(&space, "layout.json", b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.next().now_or_never(),
+            Some(Some(FileChange {
+                space: space.clone(),
+                path: "layout.json".to_string(),
+            }))
+        );
+        assert_eq!(changes.next().now_or_never(), None);
+        let unwatched = SpaceId("/other".to_string());
+        store
+            .write(&unwatched, "layout.json", b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(changes.next().now_or_never(), None);
+        assert_eq!(store.changes().next().now_or_never(), Some(None));
+    });
+}
+
+#[test]
+fn memory_outside_edits_and_faults() {
+    let store = MemoryFileStore::new();
+    let space = SpaceId("/repo".to_string());
+    let mut changes = store.changes();
+    block_on(async {
+        store.watch(&space).await.unwrap();
+        store.write_outside(&space, "layout.json", b"one".to_vec());
+        assert!(changes.next().now_or_never().flatten().is_some());
+        assert_eq!(store.bytes(&space, "layout.json"), Some(b"one".to_vec()));
+        assert_eq!(store.revision(&space).await, Ok(StoreRevision(0)));
+        let read = store
+            .read(&space, "layout.json", ANY_SIZE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!read.read_only);
+        assert_eq!(store.read_count(&space, "layout.json"), 1);
+        store.remove_outside(&space, "layout.json");
+        assert!(changes.next().now_or_never().flatten().is_some());
+        assert_eq!(store.read(&space, "layout.json", ANY_SIZE).await, Ok(None));
+        assert_eq!(store.read_count(&space, "layout.json"), 2);
+
+        store.fail_next_write(&space, StoreError::Unavailable("boom".into()));
+        assert_eq!(
+            store.write(&space, "layout.json", Vec::new()).await,
+            Err(StoreError::Unavailable("boom".into()))
+        );
+        assert!(store.write(&space, "layout.json", Vec::new()).await.is_ok());
+        assert_eq!(store.write_count(&space, "layout.json"), 1);
+
+        store.set_read_only(&space, true);
+        let outcome = store
+            .write(&space, "layout.json", b"two".to_vec())
+            .await
+            .unwrap();
+        assert!(outcome.read_only);
+        assert_eq!(
+            store.fallback_bytes(&space, "layout.json"),
+            Some(b"two".to_vec())
+        );
+        assert_eq!(store.bytes(&space, "layout.json"), Some(Vec::new()));
+        assert!(
+            store
+                .read(&space, "layout.json", ANY_SIZE)
+                .await
+                .unwrap()
+                .unwrap()
+                .read_only
+        );
+    });
+    let bare = MemoryFileStore::new().without_fallback();
+    bare.set_read_only(&space, true);
+    assert!(matches!(
+        block_on(bare.write(&space, "layout.json", Vec::new())),
+        Err(StoreError::ReadOnly(_))
+    ));
+    assert_eq!(bare.bytes(&space, "layout.json"), None);
+    let unseen = SpaceId("/unseen".to_string());
+    assert_eq!(
+        block_on(bare.read(&unseen, "layout.json", ANY_SIZE)),
+        Ok(None)
+    );
+    assert_eq!(bare.read_count(&unseen, "layout.json"), 1);
 }
 
 /// Counts how often it is woken.

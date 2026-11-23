@@ -24,17 +24,19 @@ mod error;
 mod frame;
 mod handshake;
 mod ids;
+mod layout;
 mod stream;
 mod terminals;
 
 pub use client::{
     Ack, Attach, AttachRequestOptions, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input,
-    RequestOwnership, Resize, Resume, SetDisplay, WatchTerminals,
+    MutateLayout, RequestOwnership, Resize, Resume, SetDisplay, UnwatchLayout, WatchLayout,
+    WatchTerminals,
 };
 pub use codec::WireMessage;
 pub use daemon::{
     Attached, CloseReason, Closed, DaemonMessage, Data, ErrorCode, ErrorMessage, Facts, Fidelity,
-    Gap, Lost, Ownership, Resized, Resumed, Resynced, Started, Terminals, Welcome,
+    Gap, Layout, Lost, Ownership, Resized, Resumed, Resynced, Started, Terminals, Welcome,
 };
 pub use display::Display;
 pub use error::{DecodeError, EncodeError, ReadError, WriteError};
@@ -49,5 +51,6 @@ pub use ids::{
     AttachmentId, BackendGeneration, Cursor, Epoch, HostId, OwnershipGeneration, RequestId, Seq,
     TermId,
 };
+pub use layout::{DroppedNotice, LayoutNode, LayoutOp, LayoutSnapshot, Ratio, SplitDirection};
 pub use stream::{read_message, write_message};
 pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};

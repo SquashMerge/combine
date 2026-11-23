@@ -33,6 +33,7 @@ const ZERO_SIZE: &str = "the size must be at least 1 column and 1 row";
 const NOT_SENT: &str = "the cursor names an event that was not sent";
 const UNEXPECTED_HELLO: &str = "unexpected hello";
 const UNEXPECTED_WATCH: &str = "unexpected watch_terminals";
+const UNEXPECTED_LAYOUT: &str = "unexpected layout message";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
 const REFUSED_INPUT: &str = "the backend refused input for this attachment";
@@ -399,6 +400,27 @@ impl Core {
                 ErrorCode::InvalidRequest,
                 UNEXPECTED_WATCH,
                 Some(watch.request),
+                None,
+            ),
+            ClientMessage::WatchLayout(watch) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_LAYOUT,
+                Some(watch.request),
+                None,
+            ),
+            ClientMessage::MutateLayout(mutate) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_LAYOUT,
+                Some(mutate.request),
+                None,
+            ),
+            ClientMessage::UnwatchLayout(_) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_LAYOUT,
+                None,
                 None,
             ),
             ClientMessage::Attach(attach) => self.on_attach(connection, attach),
