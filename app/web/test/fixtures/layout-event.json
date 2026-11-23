@@ -1,0 +1,116 @@
+{
+  "snapshot": {
+    "kind": "snapshot",
+    "hostId": "host-1",
+    "request": "7",
+    "snapshot": {
+      "space": "/work",
+      "layoutRevision": "9007199254740993",
+      "root": {
+        "type": "split",
+        "dir": "h",
+        "ratio": 0.25,
+        "a": {
+          "type": "tile",
+          "id": "t1",
+          "panels": [
+            "p1",
+            "p2"
+          ],
+          "active": "p2"
+        },
+        "b": {
+          "type": "tile",
+          "id": "t2",
+          "panels": [],
+          "active": null
+        }
+      },
+      "readOnly": true,
+      "error": "layout.json is invalid",
+      "dropped": {
+        "opCount": 2,
+        "message": "dropped"
+      }
+    }
+  },
+  "push": {
+    "kind": "snapshot",
+    "hostId": "host-1",
+    "request": null,
+    "snapshot": {
+      "space": "/work",
+      "layoutRevision": "9007199254740993",
+      "root": {
+        "type": "split",
+        "dir": "h",
+        "ratio": 0.25,
+        "a": {
+          "type": "tile",
+          "id": "t1",
+          "panels": [
+            "p1",
+            "p2"
+          ],
+          "active": "p2"
+        },
+        "b": {
+          "type": "tile",
+          "id": "t2",
+          "panels": [],
+          "active": null
+        }
+      },
+      "readOnly": true,
+      "error": "layout.json is invalid",
+      "dropped": {
+        "opCount": 2,
+        "message": "dropped"
+      }
+    }
+  },
+  "error": {
+    "kind": "error",
+    "hostId": "host-1",
+    "request": "8",
+    "code": "stale_layout",
+    "message": "stale"
+  },
+  "disconnected": {
+    "kind": "disconnected",
+    "hostId": "host-1"
+  },
+  "ops": [
+    {
+      "op": "set_active",
+      "tile": "t1",
+      "panel": "p2"
+    },
+    {
+      "op": "set_ratio",
+      "leaves": [
+        "t1",
+        "t2"
+      ],
+      "ratio": 0.4
+    },
+    {
+      "op": "move_panel",
+      "panel": "p1",
+      "toTile": "t2",
+      "index": 1
+    },
+    {
+      "op": "split_tile",
+      "tile": "t1",
+      "dir": "v",
+      "newTile": "t3",
+      "ratio": 0.5,
+      "panel": "p1"
+    },
+    {
+      "op": "close_tile",
+      "tile": "t3"
+    }
+  ]
+}

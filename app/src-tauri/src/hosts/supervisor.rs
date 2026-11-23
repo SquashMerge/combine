@@ -10,7 +10,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use combine_protocol::{read_message, DaemonMessage, HostId, ReadError};
+use combine_protocol::{
+    read_message, DaemonMessage, ErrorCode, HostId, LayoutSnapshot, ReadError, RequestId,
+};
 
 use super::backoff::Backoff;
 use super::config::StoreError;
@@ -21,6 +23,7 @@ use super::identity::{
 };
 use super::link::{abort_link, Closer, ConnectError, Connector, ExitInfo, Link};
 use super::model::{ConnectionState, SpaceView};
+use super::outbound::Outbound;
 use super::text::is_blank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,12 +132,25 @@ pub trait HostEvents: Send + Sync {
     fn host_id(&self, name: &str, host_id: &HostId);
     /// The seam S4 uses to publish a host's spaces.
     fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>);
+    /// A space's layout: the reply to a request, or a push when `request` is `None`.
+    fn layout(&self, _host_id: &HostId, _request: Option<RequestId>, _snapshot: LayoutSnapshot) {}
+    /// The daemon refused a layout request. `message` is trimmed external text.
+    fn layout_error(
+        &self,
+        _host_id: &HostId,
+        _request: RequestId,
+        _code: ErrorCode,
+        _message: String,
+    ) {
+    }
+    /// The session ended, so the layout watch is gone.
+    fn layout_disconnected(&self, _host_id: &HostId) {}
 }
 
 pub struct SessionIo<'a> {
     pub host_id: &'a HostId,
-    pub reader: &'a mut dyn Read,
-    pub writer: &'a mut dyn Write,
+    pub reader: &'a mut (dyn Read + Send),
+    pub writer: &'a mut (dyn Write + Send),
     pub events: &'a dyn HostEvents,
 }
 
@@ -150,9 +166,8 @@ pub trait SessionPhase: Send {
     fn run(&mut self, io: SessionIo<'_>) -> SessionEnd;
 }
 
-/// Reads daemon messages until the link ends and ignores them. This is the resume hook: S6
-/// replaces it with a phase that first resumes each attachment from its last applied cursor,
-/// and S4 adds the v2 list requests that call [`HostEvents::spaces`].
+/// Reads daemon messages until the link ends and ignores them. The service runs
+/// [`LivePhase`](super::session::LivePhase); this one stands in for it in tests.
 #[derive(Default)]
 pub struct IdlePhase;
 
@@ -178,6 +193,7 @@ pub struct SupervisorDeps {
     pub clock: Arc<dyn Clock>,
     pub events: Arc<dyn HostEvents>,
     pub phase: PhaseFactory,
+    pub outbound: Arc<Outbound>,
 }
 
 fn stderr_detail(exit: &Option<ExitInfo>) -> Option<String> {
@@ -453,6 +469,7 @@ mod tests {
             clock: clock.clone(),
             events: recorder,
             phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+            outbound: Arc::new(Outbound::default()),
         };
         Rig {
             connector,

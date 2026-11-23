@@ -8,5 +8,7 @@ pub use backend::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, BackendResult,
     Capabilities, TerminalBackend,
 };
-pub use file_store::{FileStore, StoreError, StoreRevision, StoredFile};
+pub use file_store::{
+    valid_store_path, FileChange, FileStore, StoreError, StoreRevision, StoredFile, WriteOutcome,
+};
 pub use git_probe::{GitEntry, GitProbe};

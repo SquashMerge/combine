@@ -8,10 +8,13 @@ pub mod identity;
 pub mod link;
 pub mod local;
 pub mod model;
+pub mod outbound;
 pub mod registry;
 pub mod service;
+pub mod session;
 pub mod ssh;
 pub mod supervisor;
+pub mod terminals;
 pub mod text;
 
 #[cfg(test)]

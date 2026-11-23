@@ -63,7 +63,10 @@ fn order(view: &View) -> Vec<String> {
                     };
                     let name = &piece[..end];
                     if name.starts_with("old:") || name.starts_with("new:") {
-                        seen.push(format!("<{name}>"));
+                        let token = format!("<{name}>");
+                        if !seen.contains(&token) {
+                            seen.push(token);
+                        }
                     }
                 }
             }

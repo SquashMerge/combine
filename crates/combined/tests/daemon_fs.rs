@@ -7,6 +7,7 @@ mod daemon_support;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use combined::adapters::fs::config::{self, BackendName, ConfigFileError};
 use combined::adapters::fs::data_dir::{DataDir, DataDirError};
@@ -15,11 +16,19 @@ use combined::adapters::fs::git_probe::FsGitProbe;
 use combined::adapters::fs::host_id::{self, is_valid_host_id, HostIdError};
 use combined::adapters::fs::ids_file::{self, IdsFile, IdsFileError};
 use combined::adapters::fs::safe_write::write_atomic;
-use combined::model::SpaceId;
-use combined::ports::{FileStore, GitEntry, GitProbe, StoreError, StoreRevision};
+use combined::model::{ContentHash, SpaceId};
+use combined::ports::{
+    valid_store_path, FileChange, FileStore, GitEntry, GitProbe, StoreError, StoreRevision,
+};
 use combined::testing::MemoryFileStore;
 use daemon_support::ShortTempDir;
 use futures::executor::block_on;
+use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
+use sha2::{Digest, Sha256};
+
+/// A read bound no test file comes near.
+const ANY_SIZE: usize = 1 << 20;
 
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -413,9 +422,11 @@ fn fs_file_store_reads_back_what_it_wrote() {
     let scratch = ShortTempDir::new();
     let space = space(&scratch, "work");
     let store = FsFileStore::new();
-    let revision = block_on(store.write(&space, "layouts/a.json", b"hello".to_vec())).unwrap();
+    let revision = block_on(store.write(&space, "layouts/a.json", b"hello".to_vec()))
+        .unwrap()
+        .revision;
     assert_eq!(revision, StoreRevision(1));
-    let file = block_on(store.read(&space, "layouts/a.json"))
+    let file = block_on(store.read(&space, "layouts/a.json", ANY_SIZE))
         .unwrap()
         .unwrap();
     assert_eq!(file.bytes, b"hello");
@@ -431,11 +442,19 @@ fn fs_file_store_counts_revisions_per_space() {
     let store = FsFileStore::new();
     assert_eq!(block_on(store.revision(&a)).unwrap(), StoreRevision(0));
     block_on(store.write(&a, "x", b"1".to_vec())).unwrap();
-    let second = block_on(store.write(&a, "x", b"2".to_vec())).unwrap();
+    let second = block_on(store.write(&a, "x", b"2".to_vec()))
+        .unwrap()
+        .revision;
     assert_eq!(second, StoreRevision(2));
     assert_eq!(block_on(store.revision(&a)).unwrap(), StoreRevision(2));
     assert_eq!(block_on(store.revision(&b)).unwrap(), StoreRevision(0));
-    assert_eq!(block_on(store.read(&a, "x")).unwrap().unwrap().bytes, b"2");
+    assert_eq!(
+        block_on(store.read(&a, "x", ANY_SIZE))
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"2"
+    );
 }
 
 #[test]
@@ -443,7 +462,10 @@ fn fs_file_store_reports_a_missing_file() {
     let scratch = ShortTempDir::new();
     let space = space(&scratch, "work");
     let store = FsFileStore::new();
-    assert_eq!(block_on(store.read(&space, "nothing")).unwrap(), None);
+    assert_eq!(
+        block_on(store.read(&space, "nothing", ANY_SIZE)).unwrap(),
+        None
+    );
     assert!(!Path::new(&space.0).exists());
 }
 
@@ -469,7 +491,7 @@ fn fs_file_store_path_rules_match_memory_file_store() {
     for (path, valid) in table {
         for (name, store) in [("fs", &fs_store as &dyn FileStore), ("memory", &memory)] {
             let wrote = block_on(store.write(&space, path, b"x".to_vec()));
-            let read = block_on(store.read(&space, path));
+            let read = block_on(store.read(&space, path, ANY_SIZE));
             if valid {
                 assert!(
                     wrote.is_ok() && read.is_ok(),
@@ -493,7 +515,7 @@ fn fs_file_store_refuses_a_relative_space() {
     };
     assert!(detail.contains("cs4-relative-space"), "{detail}");
     assert!(matches!(
-        block_on(store.read(&space, "a")),
+        block_on(store.read(&space, "a", ANY_SIZE)),
         Err(StoreError::Unavailable(_))
     ));
     assert!(!Path::new("cs4-relative-space").exists());
@@ -545,7 +567,7 @@ fn escaping_space(scratch: &ShortTempDir, escape: &Escape) -> (SpaceId, &'static
 fn assert_read_refused(escape: Escape) {
     let scratch = ShortTempDir::new();
     let (space, path, sentinel) = escaping_space(&scratch, &escape);
-    let result = block_on(FsFileStore::new().read(&space, path));
+    let result = block_on(FsFileStore::new().read(&space, path, ANY_SIZE));
     assert!(
         matches!(result, Err(StoreError::Unavailable(_))),
         "{result:?}"
@@ -597,4 +619,522 @@ fn fs_file_store_refuses_to_read_a_symlinked_file() {
 #[test]
 fn fs_file_store_refuses_to_write_a_symlinked_file() {
     assert_write_refused(Escape::File);
+}
+
+// ---- the file store contract, for the real filesystem and the in-memory fake ----
+
+const LAYOUT: &str = "layout.json";
+const BOUND: Duration = Duration::from_secs(10);
+
+fn sha256(bytes: &[u8]) -> ContentHash {
+    ContentHash(Sha256::digest(bytes).into())
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+}
+
+/// Waits up to a short slice for the next change.
+fn poll_change(changes: &mut BoxStream<'static, FileChange>) -> Option<FileChange> {
+    runtime()
+        .block_on(async { tokio::time::timeout(Duration::from_millis(200), changes.next()).await })
+        .ok()
+        .flatten()
+}
+
+/// Runs `cause` until a change for `space`'s layout arrives, for at most [`BOUND`]. A watcher
+/// may not be listening yet when the first cause happens, so the cause is repeated.
+fn change_after(
+    changes: &mut BoxStream<'static, FileChange>,
+    space: &SpaceId,
+    mut cause: impl FnMut(),
+) -> Option<FileChange> {
+    let deadline = Instant::now() + BOUND;
+    while Instant::now() < deadline {
+        cause();
+        if let Some(change) = poll_change(changes) {
+            if change.space == *space {
+                return Some(change);
+            }
+        }
+    }
+    None
+}
+
+fn fs_layout(space: &SpaceId) -> PathBuf {
+    Path::new(&space.0).join(".workspace").join(LAYOUT)
+}
+
+#[test]
+fn store_contract_write_leaves_no_temp_and_reader_sees_whole_file() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let store = FsFileStore::new();
+    let (a, b) = (vec![b'a'; 200_000], vec![b'b'; 200_000]);
+    block_on(store.write(&space, LAYOUT, a.clone())).unwrap();
+    let file = fs_layout(&space);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut reads = 0;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let seen = fs::read(&file).unwrap();
+                assert!(seen == a || seen == b, "a reader saw {} bytes", seen.len());
+                reads += 1;
+            }
+            reads
+        });
+        for round in 0..40 {
+            let bytes = if round % 2 == 0 { &b } else { &a };
+            block_on(store.write(&space, LAYOUT, bytes.clone())).unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reader.join().unwrap() > 0);
+    });
+    let names: Vec<_> = fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [LAYOUT]);
+}
+
+#[test]
+fn store_contract_hash_matches_content() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let fallback = scratch.path().join("fallback");
+    let fs_store = FsFileStore::with_fallback(&fallback);
+    let memory = MemoryFileStore::new();
+    for (name, store) in [("fs", &fs_store as &dyn FileStore), ("memory", &memory)] {
+        let bytes = format!("{name} content").into_bytes();
+        let outcome = block_on(store.write(&space, LAYOUT, bytes.clone())).unwrap();
+        assert_eq!(outcome.hash, sha256(&bytes), "{name} write");
+        assert!(!outcome.read_only, "{name}");
+        let file = block_on(store.read(&space, LAYOUT, ANY_SIZE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.hash, sha256(&bytes), "{name} read");
+        assert_eq!(file.hash, outcome.hash, "{name}");
+        assert!(!file.read_only, "{name}");
+    }
+}
+
+#[test]
+fn store_contract_own_write_emits_change() {
+    let scratch = ShortTempDir::new();
+    let fs_space = space(&scratch, "work");
+    let fs_store = FsFileStore::new();
+    fs::create_dir_all(Path::new(&fs_space.0).join(".workspace")).unwrap();
+    block_on(fs_store.watch(&fs_space)).unwrap();
+    let mut fs_changes = fs_store.changes();
+    let change = change_after(&mut fs_changes, &fs_space, || {
+        block_on(fs_store.write(&fs_space, LAYOUT, b"mine".to_vec())).unwrap();
+    });
+    assert_eq!(
+        change,
+        Some(FileChange {
+            space: fs_space,
+            path: LAYOUT.to_string()
+        })
+    );
+
+    let memory = MemoryFileStore::new();
+    let memory_space = SpaceId("/repo".to_string());
+    let mut memory_changes = memory.changes();
+    block_on(memory.watch(&memory_space)).unwrap();
+    block_on(memory.write(&memory_space, LAYOUT, b"mine".to_vec())).unwrap();
+    assert_eq!(
+        poll_change(&mut memory_changes),
+        Some(FileChange {
+            space: memory_space,
+            path: LAYOUT.to_string()
+        })
+    );
+}
+
+#[test]
+fn store_contract_change_on_outside_write() {
+    let scratch = ShortTempDir::new();
+    let fs_space = space(&scratch, "work");
+    let fs_store = FsFileStore::new();
+    fs::create_dir_all(Path::new(&fs_space.0).join(".workspace")).unwrap();
+    block_on(fs_store.watch(&fs_space)).unwrap();
+    let mut fs_changes = fs_store.changes();
+    let mut round = 0;
+    let change = change_after(&mut fs_changes, &fs_space, || {
+        round += 1;
+        fs::write(fs_layout(&fs_space), format!("outside {round}")).unwrap();
+    });
+    assert!(change.is_some(), "the outside write was never reported");
+    assert_eq!(fs_store.changes().next().now_or_never(), Some(None));
+
+    let memory = MemoryFileStore::new();
+    let memory_space = SpaceId("/repo".to_string());
+    let mut memory_changes = memory.changes();
+    block_on(memory.watch(&memory_space)).unwrap();
+    memory.write_outside(&memory_space, LAYOUT, b"theirs".to_vec());
+    assert!(poll_change(&mut memory_changes).is_some());
+    memory.remove_outside(&memory_space, LAYOUT);
+    assert!(poll_change(&mut memory_changes).is_some());
+}
+
+#[test]
+fn store_contract_invalid_path() {
+    let table = [
+        ("", false),
+        ("a//b", false),
+        ("./a", false),
+        ("a/..", false),
+        ("../a", false),
+        ("/a", false),
+        ("a/", false),
+        ("a\0b", false),
+        ("a", true),
+        ("b/c.json", true),
+        ("d.e/.f", true),
+    ];
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let fs_store = FsFileStore::with_fallback(scratch.path().join("fallback"));
+    let memory = MemoryFileStore::new();
+    for (path, valid) in table {
+        assert_eq!(valid_store_path(path), valid, "{path:?}");
+        for (name, store) in [("fs", &fs_store as &dyn FileStore), ("memory", &memory)] {
+            let wrote = block_on(store.write(&space, path, b"x".to_vec()));
+            assert_eq!(wrote.is_ok(), valid, "{name} {path:?}: {wrote:?}");
+            if !valid {
+                assert_eq!(wrote, Err(StoreError::InvalidPath), "{name} {path:?}");
+                assert_eq!(
+                    block_on(store.read(&space, path, ANY_SIZE)),
+                    Err(StoreError::InvalidPath),
+                    "{name} {path:?}"
+                );
+            }
+        }
+    }
+    assert!(!scratch.path().join("fallback").exists());
+}
+
+fn hex_sha256(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Makes `folder` unwritable and says whether that holds for this user: it doesn't for root.
+fn lock_down(folder: &Path) -> bool {
+    fs::set_permissions(folder, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = folder.join("probe");
+    let writable = fs::write(&probe, b"x").is_ok();
+    let _ = fs::remove_file(&probe);
+    !writable
+}
+
+fn unlock(folder: &Path) {
+    fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn store_contract_read_only_routes_to_fallback() {
+    for workspace_exists in [false, true] {
+        let scratch = ShortTempDir::new();
+        let space = space(&scratch, "work");
+        let folder = Path::new(&space.0);
+        let locked = if workspace_exists {
+            fs::create_dir_all(folder.join(".workspace")).unwrap();
+            folder.join(".workspace")
+        } else {
+            fs::create_dir_all(folder).unwrap();
+            folder.to_path_buf()
+        };
+        if !lock_down(&locked) {
+            eprintln!("skipped: this user can write a 0o555 folder");
+            continue;
+        }
+        let root = scratch.path().join("spaces");
+        let store = FsFileStore::with_fallback(&root);
+        let written = block_on(store.write(&space, LAYOUT, b"kept aside".to_vec()));
+        let read = block_on(store.read(&space, LAYOUT, ANY_SIZE));
+        let bare = block_on(FsFileStore::new().write(&space, LAYOUT, b"x".to_vec()));
+        unlock(&locked);
+
+        let outcome = written.unwrap();
+        assert!(outcome.read_only, "workspace_exists {workspace_exists}");
+        assert_eq!(outcome.revision, StoreRevision(1));
+        assert_eq!(outcome.hash, sha256(b"kept aside"));
+        let copy = root.join(hex_sha256(&space.0)).join(LAYOUT);
+        assert_eq!(fs::read(&copy).unwrap(), b"kept aside");
+        assert!(!fs_layout(&space).exists());
+        let file = read.unwrap().unwrap();
+        assert_eq!(file.bytes, b"kept aside");
+        assert!(file.read_only);
+        assert_eq!(file.hash, outcome.hash);
+        assert!(
+            matches!(bare, Err(StoreError::ReadOnly(_))),
+            "no fallback: {bare:?}"
+        );
+        assert!(!fs_layout(&space).exists());
+    }
+}
+
+#[test]
+fn store_contract_read_only_without_fallback_is_read_only_error() {
+    let memory = MemoryFileStore::new().without_fallback();
+    let space = SpaceId("/repo".to_string());
+    memory.set_read_only(&space, true);
+    assert!(matches!(
+        block_on(memory.write(&space, LAYOUT, b"x".to_vec())),
+        Err(StoreError::ReadOnly(_))
+    ));
+}
+
+#[test]
+fn store_contract_symlinked_workspace_with_fallback_is_unavailable_and_creates_no_fallback_file() {
+    for escape in [Escape::Workspace, Escape::Folder, Escape::File] {
+        let scratch = ShortTempDir::new();
+        let (space, path, sentinel) = escaping_space(&scratch, &escape);
+        let root = scratch.path().join("spaces");
+        let store = FsFileStore::with_fallback(&root);
+        let result = block_on(store.write(&space, path, b"overwritten".to_vec()));
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), SENTINEL);
+        assert!(!root.exists(), "the fallback was reached");
+        assert_eq!(block_on(store.revision(&space)).unwrap(), StoreRevision(0));
+    }
+    let scratch = ShortTempDir::new();
+    let root = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&root);
+    let relative = SpaceId("cs7-relative-space".to_string());
+    assert!(matches!(
+        block_on(store.write(&relative, LAYOUT, b"x".to_vec())),
+        Err(StoreError::Unavailable(_))
+    ));
+    assert!(!root.exists());
+}
+
+#[test]
+fn store_contract_fallback_stays_authoritative_after_the_project_is_writable() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let folder = Path::new(&space.0);
+    fs::create_dir_all(folder.join(".workspace")).unwrap();
+    fs::write(fs_layout(&space), b"project").unwrap();
+    let workspace = folder.join(".workspace");
+    if !lock_down(&workspace) {
+        eprintln!("skipped: this user can write a 0o555 folder");
+        return;
+    }
+    let fs_store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    let first = block_on(fs_store.write(&space, LAYOUT, b"A".to_vec()));
+    unlock(&workspace);
+    let first = first.unwrap();
+    assert!(first.read_only);
+
+    let memory = MemoryFileStore::new();
+    let memory_space = SpaceId("/repo".to_string());
+    memory.write_outside(&memory_space, LAYOUT, b"project".to_vec());
+    memory.set_read_only(&memory_space, true);
+    assert!(
+        block_on(memory.write(&memory_space, LAYOUT, b"A".to_vec()))
+            .unwrap()
+            .read_only
+    );
+    memory.set_read_only(&memory_space, false);
+
+    for (name, store, space) in [
+        ("fs", &fs_store as &dyn FileStore, &space),
+        ("memory", &memory, &memory_space),
+    ] {
+        let outcome = block_on(store.write(space, LAYOUT, b"B".to_vec())).unwrap();
+        assert!(outcome.read_only, "{name}");
+        assert_eq!(outcome.hash, sha256(b"B"), "{name}");
+        let file = block_on(store.read(space, LAYOUT, ANY_SIZE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.bytes, b"B", "{name}");
+        assert_eq!(file.hash, outcome.hash, "{name}");
+        assert!(file.read_only, "{name}");
+    }
+    assert_eq!(fs::read(fs_layout(&space)).unwrap(), b"project");
+    assert_eq!(
+        memory.bytes(&memory_space, LAYOUT),
+        Some(b"project".to_vec())
+    );
+    assert_eq!(
+        memory.fallback_bytes(&memory_space, LAYOUT),
+        Some(b"B".to_vec())
+    );
+}
+
+#[test]
+fn store_contract_invalid_paths_never_reach_an_existing_fallback_target() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let root = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&root);
+    let hex = hex_sha256(&space.0);
+    fs::create_dir_all(root.join(&hex)).unwrap();
+    let victim = scratch.path().join("victim");
+    fs::write(&victim, SENTINEL).unwrap();
+    let absolute = victim.to_str().unwrap().to_string();
+    let climbing = "../../victim".to_string();
+    for path in [absolute, climbing] {
+        assert_eq!(
+            block_on(store.write(&space, &path, b"overwritten".to_vec())),
+            Err(StoreError::InvalidPath),
+            "{path}"
+        );
+        assert_eq!(
+            block_on(store.read(&space, &path, ANY_SIZE)),
+            Err(StoreError::InvalidPath),
+            "{path}"
+        );
+        assert_eq!(fs::read(&victim).unwrap(), SENTINEL, "{path}");
+    }
+}
+
+// Finding 4: reads are bounded at the I/O boundary.
+
+const LIMIT: usize = combined::core::LAYOUT_MAX_BYTES;
+
+/// A sparse file of `len` bytes: no disk blocks, but a read of it returns every byte.
+fn sparse(path: &Path, len: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+#[test]
+fn store_contract_oversized_project_file_is_too_large_and_left_alone() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    sparse(&file, 8 << 20);
+    let store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: 8 << 20,
+            read_only: false
+        })
+    );
+    assert_eq!(fs::metadata(&file).unwrap().len(), 8 << 20);
+}
+
+#[test]
+fn store_contract_read_bound_is_exact() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    let store = FsFileStore::new();
+    sparse(&file, LIMIT as u64);
+    let read = block_on(store.read(&space, LAYOUT, LIMIT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.bytes.len(), LIMIT);
+    assert_eq!(read.hash, sha256(&vec![0; LIMIT]));
+    sparse(&file, LIMIT as u64 + 1);
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
+}
+
+#[test]
+fn store_contract_oversized_fallback_copy_is_too_large_and_read_only() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let root = scratch.path().join("spaces");
+    let copy = root.join(hex_sha256(&space.0)).join(LAYOUT);
+    sparse(&copy, 8 << 20);
+    let store = FsFileStore::with_fallback(&root);
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: 8 << 20,
+            read_only: true
+        })
+    );
+    assert_eq!(fs::metadata(&copy).unwrap().len(), 8 << 20);
+}
+
+#[test]
+fn memory_store_bounds_reads_like_the_disk_store() {
+    let memory = MemoryFileStore::new();
+    let space = SpaceId("/repo".to_string());
+    memory.write_outside(&space, LAYOUT, vec![b' '; LIMIT + 1]);
+    assert_eq!(
+        block_on(memory.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
+    memory.write_outside(&space, LAYOUT, vec![b' '; LIMIT]);
+    assert_eq!(
+        block_on(memory.read(&space, LAYOUT, LIMIT))
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len(),
+        LIMIT
+    );
+}
+
+/// A file that doesn't end: a FIFO whose writer sends four times the bound and then holds its
+/// end open. An unbounded read waits for an end that doesn't come (holding at most what was
+/// sent); a bounded one stops after `limit + 1` bytes. This also covers a file growing during
+/// a read.
+#[test]
+fn store_contract_read_of_an_endless_file_stops_at_the_bound() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo failed");
+
+    let fifo = file.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+        let chunk = vec![b' '; 64 * 1024];
+        for _ in 0..(4 * LIMIT / chunk.len()) {
+            // Fails once the reader closes its end (EPIPE; Rust ignores SIGPIPE).
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+        let _ = done_rx.recv_timeout(BOUND * 3);
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader_space = space.clone();
+    std::thread::spawn(move || {
+        let store = FsFileStore::new();
+        let _ = tx.send(block_on(store.read(&reader_space, LAYOUT, LIMIT)));
+    });
+    let read = rx
+        .recv_timeout(BOUND)
+        .expect("the read of an endless file did not stop at the bound");
+    let _ = done_tx.send(());
+    assert_eq!(
+        read,
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
 }

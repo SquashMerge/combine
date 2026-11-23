@@ -8,6 +8,7 @@ use futures::FutureExt;
 use crate::common::request_options;
 use crate::contract::client::{Applied, View};
 use crate::contract::generator::Payload;
+use crate::contract::target::Unsupported;
 use crate::contract::{Case, ClientSim, Failure, Fault, Harness, Outcome, Target};
 
 const PIECE: usize = 65_536;
@@ -45,6 +46,12 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
 fn view_of(c: &ClientSim, attachment: combine_protocol::AttachmentId) -> Result<&View, Failure> {
     c.view(attachment)
         .ok_or_else(|| Failure::new("harness", "the client has no view of the attachment"))
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn same_sha(measured: [u8; 32], expected: [u8; 32]) -> bool {
@@ -241,21 +248,48 @@ pub async fn resynced_begins_a_fresh_paint_in_order<T: Target>(t: &mut T) -> Out
             resynced.is_some_and(|at| Some(at) < marked),
             "Resynced should be applied before the second marker; Resynced at {resynced:?}, marker at {marked:?}"
         );
+        let before: Vec<u8> = transcript
+            .iter()
+            .take(resynced.or(marked).unwrap_or(0))
+            .filter_map(|item| match item {
+                Applied::Bytes(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        ensure!(
+            "order-intact",
+            payload.bytes().starts_with(&before),
+            "the output before the resync is not a prefix of the payload"
+        );
+    } else {
+        let start = h
+            .target
+            .paint_start()
+            .ok_or(Unsupported("the target has no known paint start"))?;
+        let all = view_of(&c, att)?.bytes();
+        let second = find(&all, &marker).ok_or_else(|| {
+            Failure::new("harness", "the second marker is not in the measured bytes")
+        })?;
+        let measured = &all[..second];
+        let first = find(measured, start);
+        ensure!(
+            "resync-paint",
+            first.is_some(),
+            "no repaint beginning {start:?} before the second marker"
+        );
+        let before = &measured[..first.unwrap_or(0)];
+        ensure!(
+            "order-intact",
+            payload.bytes().starts_with(before) || before.starts_with(payload.bytes()),
+            "the output before the repaint is neither a prefix of the payload nor the payload and more"
+        );
+        ensure!(
+            "resynced",
+            resynced.is_none(),
+            "the backend has no resync signal, but Resynced was applied"
+        );
     }
-    let before: Vec<u8> = transcript
-        .iter()
-        .take(resynced.or(marked).unwrap_or(0))
-        .filter_map(|item| match item {
-            Applied::Bytes(bytes) => Some(bytes.as_slice()),
-            _ => None,
-        })
-        .flatten()
-        .copied()
-        .collect();
-    ensure!(
-        "order-intact",
-        payload.bytes().starts_with(&before),
-        "the output before the resync is not a prefix of the payload"
-    );
     h.finish(&[&c])
 }

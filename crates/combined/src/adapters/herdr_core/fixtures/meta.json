@@ -1,0 +1,15 @@
+{
+  "heartbeat_observed": true,
+  "herdr_core_version": "0.1.21",
+  "missed_observed": false,
+  "steps": [
+    "spawned Z, which runs through the capture",
+    "subscribed: subscribe-1.json",
+    "labelled A",
+    "attached A, focused it and resized it to 100x30",
+    "killed and removed A",
+    "spawned B and restarted the core: subscribe-2.json",
+    "waited 16 s for a heartbeat",
+    "stalled the watcher's credit, flooded size events, released"
+  ]
+}

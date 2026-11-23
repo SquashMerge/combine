@@ -98,6 +98,8 @@ fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::StaleGeneration => "stale_generation",
         ErrorCode::WatchOnly => "watch_only",
         ErrorCode::InvalidRequest => "invalid_request",
+        ErrorCode::UnknownSpace => "unknown_space",
+        ErrorCode::StaleLayout => "stale_layout",
         ErrorCode::Internal => "internal",
     }
 }
@@ -207,6 +209,8 @@ mod tests {
             (ErrorCode::StaleGeneration, "stale_generation"),
             (ErrorCode::WatchOnly, "watch_only"),
             (ErrorCode::InvalidRequest, "invalid_request"),
+            (ErrorCode::UnknownSpace, "unknown_space"),
+            (ErrorCode::StaleLayout, "stale_layout"),
             (ErrorCode::Internal, "internal"),
         ];
         for (code, name) in codes {

@@ -8,6 +8,7 @@ interface SpaceRailProps {
   snapshot: HostsSnapshot;
   selected: SpaceKey | null;
   port: HostsPort;
+  readOnlySpaces?: ReadonlySet<string>;
   onSelect: (key: SpaceKey) => void;
 }
 
@@ -15,10 +16,11 @@ interface HostSectionProps {
   host: HostView;
   selected: SpaceKey | null;
   port: HostsPort;
+  readOnlySpaces: ReadonlySet<string>;
   onSelect: (key: SpaceKey) => void;
 }
 
-function HostSection({ host, selected, port, onSelect }: HostSectionProps) {
+function HostSection({ host, selected, port, readOnlySpaces, onSelect }: HostSectionProps) {
   const { connection } = host;
   const dimmed = connection.kind !== 'connected' ? 'true' : 'false';
   const detail =
@@ -36,16 +38,19 @@ function HostSection({ host, selected, port, onSelect }: HostSectionProps) {
       <ul>
         {sortSpaces(host.spaces).map((space) => {
           const isSelected = selected !== null && sameSpace(selected, space.key);
+          const readOnly = readOnlySpaces.has(spaceKeyId(space.key));
           return (
             <li key={spaceKeyId(space.key)}>
               <button
                 type="button"
                 title={space.key.path}
                 data-dimmed={dimmed}
+                data-read-only={readOnly ? 'true' : undefined}
                 aria-current={isSelected ? 'true' : undefined}
                 onClick={() => onSelect(space.key)}
               >
                 {folderName(space.key.path)}
+                {readOnly && <span className="read-only">read-only</span>}
               </button>
             </li>
           );
@@ -56,7 +61,15 @@ function HostSection({ host, selected, port, onSelect }: HostSectionProps) {
   );
 }
 
-export function SpaceRail({ snapshot, selected, port, onSelect }: SpaceRailProps) {
+const NO_SPACES: ReadonlySet<string> = new Set();
+
+export function SpaceRail({
+  snapshot,
+  selected,
+  port,
+  readOnlySpaces = NO_SPACES,
+  onSelect,
+}: SpaceRailProps) {
   const { config, hosts } = snapshot;
   return (
     <nav aria-label="Spaces">
@@ -76,6 +89,7 @@ export function SpaceRail({ snapshot, selected, port, onSelect }: SpaceRailProps
             host={host}
             selected={selected}
             port={port}
+            readOnlySpaces={readOnlySpaces}
             onSelect={onSelect}
           />
         ))

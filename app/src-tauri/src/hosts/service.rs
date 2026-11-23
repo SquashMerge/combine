@@ -6,17 +6,19 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use combine_protocol::HostId;
+use combine_protocol::{ErrorCode, HostId, LayoutSnapshot, RequestId};
 
 use super::config::{HostConfig, HostsStore, Transport};
 use super::link::Connector;
 use super::local::{LocalSocketConnector, SocketGuardEnv};
 use super::model::{ConfigStatus, ConnectionState, HostView, HostsSnapshot, SpaceView};
+use super::outbound::Outbound;
 use super::registry::HostRegistry;
+use super::session::{LayoutSink, LivePhase};
 use super::ssh::{SshConnector, SYSTEM_SSH};
 use super::supervisor::{
-    spawn_supervisor, Clock, HostEvents, IdlePhase, PhaseFactory, SessionPhase, StopSignal,
-    SupervisorDeps, SystemClock,
+    spawn_supervisor, Clock, HostEvents, PhaseFactory, SessionPhase, StopSignal, SupervisorDeps,
+    SystemClock,
 };
 
 pub trait SnapshotSink: Send + Sync {
@@ -29,12 +31,16 @@ pub struct ServiceDeps {
     pub connector_for: ConnectorFor,
     pub clock: Arc<dyn Clock>,
     pub phase: PhaseFactory,
+    pub outbound: Arc<Outbound>,
+    pub layout_sink: Arc<dyn LayoutSink>,
 }
 
 impl ServiceDeps {
-    /// The real thing: system `ssh`, the guarded local socket, the system clock and the idle
-    /// session phase.
-    pub fn system() -> Self {
+    /// The real thing: system `ssh`, the guarded local socket, the system clock and the live
+    /// session phase, with layout traffic going to `layout_sink`.
+    pub fn system(layout_sink: Arc<dyn LayoutSink>) -> Self {
+        let outbound = Arc::new(Outbound::default());
+        let live = Arc::clone(&outbound);
         ServiceDeps {
             connector_for: Box::new(|host| match &host.transport {
                 Transport::Ssh {
@@ -51,7 +57,11 @@ impl ServiceDeps {
                 )),
             }),
             clock: Arc::new(SystemClock),
-            phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+            phase: Arc::new(move || {
+                Box::new(LivePhase::new(Arc::clone(&live))) as Box<dyn SessionPhase>
+            }),
+            outbound,
+            layout_sink,
         }
     }
 }
@@ -104,6 +114,20 @@ impl HostEvents for Inner {
 
     fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
         self.mutate(|r| r.replace_spaces(host_id, spaces));
+    }
+
+    fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
+        self.deps.layout_sink.layout(host_id, request, snapshot);
+    }
+
+    fn layout_error(&self, host_id: &HostId, request: RequestId, code: ErrorCode, message: String) {
+        self.deps
+            .layout_sink
+            .layout_error(host_id, request, code, message);
+    }
+
+    fn layout_disconnected(&self, host_id: &HostId) {
+        self.deps.layout_sink.layout_disconnected(host_id);
     }
 }
 
@@ -181,12 +205,18 @@ impl HostsService {
             clock: Arc::clone(&inner.deps.clock),
             events: inner.clone(),
             phase: Arc::clone(&inner.deps.phase),
+            outbound: Arc::clone(&inner.deps.outbound),
         };
         Running {
             name: host.name.clone(),
             thread: spawn_supervisor(host.name.clone(), stored, ssh, deps, stop.clone()),
             stop,
         }
+    }
+
+    /// The channel that sends to each connected host's daemon.
+    pub fn outbound(&self) -> Arc<Outbound> {
+        Arc::clone(&self.inner.deps.outbound)
     }
 
     pub fn snapshot(&self) -> HostsSnapshot {
@@ -245,9 +275,10 @@ mod tests {
     use super::super::config::parse_hosts;
     use super::super::identity::{duplicate_message, mismatch_message};
     use super::super::link::{ConnectError, FailureText};
+    use super::super::supervisor::IdlePhase;
     use super::super::testing::{
-        host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingSink, ScriptedConnector,
-        ShortTempDir, Step, HOST_A, HOST_B,
+        host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingLayoutSink, RecordingSink,
+        ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B,
     };
     use super::*;
 
@@ -296,6 +327,8 @@ mod tests {
             }),
             clock: Arc::new(clock),
             phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
+            outbound: Arc::new(Outbound::default()),
+            layout_sink: RecordingLayoutSink::new().0,
         };
         let (sink, snapshots) = RecordingSink::new();
         let service = HostsService::start(dir.path(), deps, sink);
@@ -365,7 +398,11 @@ mod tests {
     fn missing_hosts_json_means_no_hosts_and_no_error() {
         let dir = ShortTempDir::new();
         let (sink, _snapshots) = RecordingSink::new();
-        let service = HostsService::start(dir.path(), ServiceDeps::system(), sink);
+        let service = HostsService::start(
+            dir.path(),
+            ServiceDeps::system(RecordingLayoutSink::new().0),
+            sink,
+        );
         let snapshot = service.snapshot();
         assert_eq!(snapshot.config.error, None);
         assert!(snapshot.hosts.is_empty());
@@ -373,6 +410,60 @@ mod tests {
             snapshot.config.path,
             dir.path().join("hosts.json").to_string_lossy()
         );
+        service.stop();
+    }
+
+    #[test]
+    fn layout_events_reach_the_layout_sink() {
+        use super::super::testing::LayoutEvent;
+        use combine_protocol::{LayoutNode, LayoutSnapshot};
+
+        let dir = ShortTempDir::new();
+        let (sink, snapshots) = RecordingSink::new();
+        let (layout_sink, received) = RecordingLayoutSink::new();
+        let service = HostsService::start(dir.path(), ServiceDeps::system(layout_sink), sink);
+        drop(snapshots);
+        let events: &dyn HostEvents = &*service.inner;
+        let host = host_id(HOST_A);
+        let snapshot = LayoutSnapshot {
+            space: "/work".to_string(),
+            layout_revision: 2,
+            root: LayoutNode::Tile {
+                id: "t1".to_string(),
+                panels: Vec::new(),
+                active: None,
+            },
+            read_only: false,
+            error: None,
+            dropped: None,
+        };
+        events.layout(&host, Some(RequestId(4)), snapshot.clone());
+        events.layout_error(
+            &host,
+            RequestId(5),
+            ErrorCode::StaleLayout,
+            "stale".to_string(),
+        );
+        events.layout_disconnected(&host);
+        let recv = |rx: &Receiver<LayoutEvent>| rx.recv_timeout(super::super::testing::WAIT);
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::Layout(
+                host.clone(),
+                Some(RequestId(4)),
+                snapshot
+            ))
+        );
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::Error(
+                host.clone(),
+                RequestId(5),
+                ErrorCode::StaleLayout,
+                "stale".to_string()
+            ))
+        );
+        assert_eq!(recv(&received), Ok(LayoutEvent::Disconnected(host)));
         service.stop();
     }
 

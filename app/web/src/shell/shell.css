@@ -30,3 +30,151 @@
 [aria-current="true"] {
   font-weight: 600;
 }
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 15vh;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.palette {
+  width: 560px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid GrayText;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.palette input {
+  padding: 12px 16px;
+  border: 0;
+  border-bottom: 1px solid GrayText;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+}
+
+.palette ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.palette li {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.palette li[aria-selected="true"] {
+  background: Highlight;
+  color: HighlightText;
+}
+
+.palette li .detail {
+  opacity: 0.7;
+}
+
+.palette-empty {
+  margin: 0;
+  padding: 8px 16px;
+}
+
+.read-only {
+  margin-left: 0.5em;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.client-state-error {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  padding: 0.5em 1em;
+}
+
+.layout {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+}
+
+.layout > .split,
+.layout > .tile {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.layout-error,
+.layout-notice {
+  margin: 0;
+  padding: 0.5em 1em;
+}
+
+.split {
+  display: flex;
+}
+
+.split[data-dir="h"] {
+  flex-direction: row;
+}
+
+.split[data-dir="v"] {
+  flex-direction: column;
+}
+
+.split-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.split-pane > * {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid GrayText;
+}
+
+.tile[aria-current="true"] {
+  border-color: Highlight;
+}
+
+.tile-bar {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.tile-bar [role="tablist"] {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
+}
+
+.tile-bar [role="tab"][aria-selected="true"] {
+  font-weight: 600;
+}
+
+.tile-body {
+  flex: 1 1 auto;
+  padding: 0.5em;
+}

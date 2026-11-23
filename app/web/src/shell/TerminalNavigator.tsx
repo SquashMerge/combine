@@ -1,30 +1,58 @@
-import type { HostView, HostsSnapshot, TerminalSummary } from '../model/hosts';
+import type { HostView, HostsSnapshot, SpaceView } from '../model/hosts';
+import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
 import { groupAllTerminals } from './order';
+
+export type ActiveTerminals = ReadonlyMap<string, TermId>;
 
 interface TerminalNavigatorProps {
   snapshot: HostsSnapshot;
   selected: SpaceKey | null;
+  active: ActiveTerminals;
+  onSelectTerminal: (space: SpaceKey, id: TermId) => void;
   allSpaces: boolean;
   onToggleAllSpaces: () => void;
 }
 
-function TerminalList({ host, terminals }: { host: HostView; terminals: TerminalSummary[] }) {
+interface TerminalListProps {
+  host: HostView;
+  space: SpaceView;
+  active: ActiveTerminals;
+  onSelectTerminal: (space: SpaceKey, id: TermId) => void;
+}
+
+function TerminalList({ host, space, active, onSelectTerminal }: TerminalListProps) {
   const dimmed = host.connection.kind !== 'connected' ? 'true' : 'false';
   return (
     <ul>
-      {terminals.map((terminal) => (
-        <li key={terminal.id} data-term-id={terminal.id} data-dimmed={dimmed}>
-          <span className="name">{terminal.name}</span>
-          <span className="command">{terminal.command}</span>
-          <span className="state">{terminal.state}</span>
-        </li>
-      ))}
+      {space.terminals.map((terminal) => {
+        const isActive = active.get(spaceKeyId(space.key)) === terminal.id;
+        return (
+          <li
+            key={terminal.id}
+            data-term-id={terminal.id}
+            data-dimmed={dimmed}
+            aria-current={isActive ? 'true' : undefined}
+          >
+            <button type="button" onClick={() => onSelectTerminal(space.key, terminal.id)}>
+              <span className="name">{terminal.name}</span>
+              <span className="command">{terminal.command}</span>
+              <span className="state">{terminal.state}</span>
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }
 
-function AllSpaces({ snapshot }: { snapshot: HostsSnapshot }) {
+interface ListingProps {
+  snapshot: HostsSnapshot;
+  active: ActiveTerminals;
+  onSelectTerminal: (space: SpaceKey, id: TermId) => void;
+}
+
+function AllSpaces({ snapshot, active, onSelectTerminal }: ListingProps) {
   const groups = groupAllTerminals(snapshot);
   if (groups.length === 0) return <p>No terminals.</p>;
   return (
@@ -33,7 +61,12 @@ function AllSpaces({ snapshot }: { snapshot: HostsSnapshot }) {
         <section key={host.name} aria-label={host.name}>
           {spaces.map((space) => (
             <section key={spaceKeyId(space.key)} aria-label={folderName(space.key.path)}>
-              <TerminalList host={host} terminals={space.terminals} />
+              <TerminalList
+                host={host}
+                space={space}
+                active={active}
+                onSelectTerminal={onSelectTerminal}
+              />
             </section>
           ))}
         </section>
@@ -42,13 +75,20 @@ function AllSpaces({ snapshot }: { snapshot: HostsSnapshot }) {
   );
 }
 
-function SelectedSpace({ snapshot, selected }: { snapshot: HostsSnapshot; selected: SpaceKey | null }) {
+function SelectedSpace({
+  snapshot,
+  selected,
+  active,
+  onSelectTerminal,
+}: ListingProps & { selected: SpaceKey | null }) {
   if (selected !== null) {
     for (const host of snapshot.hosts) {
       const space = host.spaces.find((candidate) => sameSpace(candidate.key, selected));
       if (space === undefined) continue;
       if (space.terminals.length === 0) return <p>No terminals in this space.</p>;
-      return <TerminalList host={host} terminals={space.terminals} />;
+      return (
+        <TerminalList host={host} space={space} active={active} onSelectTerminal={onSelectTerminal} />
+      );
     }
   }
   return <p>Select a space to see its terminals.</p>;
@@ -57,6 +97,8 @@ function SelectedSpace({ snapshot, selected }: { snapshot: HostsSnapshot; select
 export function TerminalNavigator({
   snapshot,
   selected,
+  active,
+  onSelectTerminal,
   allSpaces,
   onToggleAllSpaces,
 }: TerminalNavigatorProps) {
@@ -66,9 +108,14 @@ export function TerminalNavigator({
         All spaces
       </button>
       {allSpaces ? (
-        <AllSpaces snapshot={snapshot} />
+        <AllSpaces snapshot={snapshot} active={active} onSelectTerminal={onSelectTerminal} />
       ) : (
-        <SelectedSpace snapshot={snapshot} selected={selected} />
+        <SelectedSpace
+          snapshot={snapshot}
+          selected={selected}
+          active={active}
+          onSelectTerminal={onSelectTerminal}
+        />
       )}
     </section>
   );

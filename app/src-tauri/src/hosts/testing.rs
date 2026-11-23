@@ -17,8 +17,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use combine_protocol::{
-    daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, ErrorMessage,
-    HostId, Welcome, WireMessage,
+    daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, ErrorCode,
+    ErrorMessage, HostId, LayoutSnapshot, RequestId, Welcome, WireMessage,
 };
 
 use super::config::StoreError;
@@ -26,6 +26,7 @@ use super::identity::HostIdStore;
 use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link};
 use super::model::{ConnectionState, HostsSnapshot, SpaceView};
 use super::service::SnapshotSink;
+use super::session::LayoutSink;
 use super::supervisor::{Clock, HostEvents, StopSignal, Wake};
 
 pub const HOST_A: &str = "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c";
@@ -422,6 +423,44 @@ impl HostEvents for RecordingEvents {
 
     fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
         self.send(Event::Spaces(host_id.clone(), spaces));
+    }
+}
+
+/// What a [`RecordingLayoutSink`] was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutEvent {
+    Layout(HostId, Option<RequestId>, LayoutSnapshot),
+    Error(HostId, RequestId, ErrorCode, String),
+    Disconnected(HostId),
+}
+
+/// Sends every layout call to a channel.
+pub struct RecordingLayoutSink {
+    tx: Mutex<Sender<LayoutEvent>>,
+}
+
+impl RecordingLayoutSink {
+    pub fn new() -> (Arc<RecordingLayoutSink>, Receiver<LayoutEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (Arc::new(RecordingLayoutSink { tx: Mutex::new(tx) }), rx)
+    }
+
+    fn send(&self, event: LayoutEvent) {
+        let _ = lock(&self.tx).send(event);
+    }
+}
+
+impl LayoutSink for RecordingLayoutSink {
+    fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
+        self.send(LayoutEvent::Layout(host_id.clone(), request, snapshot));
+    }
+
+    fn layout_error(&self, host_id: &HostId, request: RequestId, code: ErrorCode, message: String) {
+        self.send(LayoutEvent::Error(host_id.clone(), request, code, message));
+    }
+
+    fn layout_disconnected(&self, host_id: &HostId) {
+        self.send(LayoutEvent::Disconnected(host_id.clone()));
     }
 }
 

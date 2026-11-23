@@ -213,22 +213,48 @@ pub async fn slow_client_output_stays_bounded<T: Target>(t: &mut T) -> Outcome {
             resynced.is_some(),
             "the backend resynced in band, so Resynced should have been applied"
         );
+        let before: Vec<u8> = transcript
+            .iter()
+            .take(resynced.unwrap_or(transcript.len()))
+            .filter_map(|item| match item {
+                Applied::Bytes(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        ensure!(
+            "order-intact",
+            payload.bytes().starts_with(&before),
+            "the output before the resync is not a prefix of the payload"
+        );
+    } else {
+        ensure!(
+            "resynced",
+            resynced.is_none(),
+            "the backend has no resync signal, but Resynced was applied"
+        );
+        let measured = view.bytes();
+        let painted = h
+            .target
+            .paint_start()
+            .and_then(|start| measured.windows(start.len()).position(|w| w == start));
+        match painted {
+            Some(at) => {
+                ensure!(
+                    "order-intact",
+                    payload.bytes().starts_with(&measured[..at]),
+                    "the output before the repaint is not a prefix of the payload"
+                );
+                ensure!(
+                    "screen-ends-right",
+                    measured.ends_with(&payload.bytes()[payload.len() - PIECE..]),
+                    "the stream does not end with the payload's last {PIECE} bytes"
+                );
+            }
+            None => exact(view, &payload)?,
+        }
     }
-    let before: Vec<u8> = transcript
-        .iter()
-        .take(resynced.unwrap_or(transcript.len()))
-        .filter_map(|item| match item {
-            Applied::Bytes(bytes) => Some(bytes.as_slice()),
-            _ => None,
-        })
-        .flatten()
-        .copied()
-        .collect();
-    ensure!(
-        "order-intact",
-        payload.bytes().starts_with(&before),
-        "the output before the resync is not a prefix of the payload"
-    );
     within_bounds(&stats_of(&h, att)?, &h.config)?;
     h.finish(&[&c])
 }
