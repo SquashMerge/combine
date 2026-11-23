@@ -103,7 +103,7 @@ lsof -a -p "$(pgrep -x combined)" -i    # prints nothing
 lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
 ```
 
-The first prints nothing, because `lsof` shows no network socket for `combined`. The second lists only `combined.sock`.
+The first prints nothing, because `lsof` shows no network socket for `combined`. The second lists `combined.sock` and the daemon's other Unix sockets (its connections to herdr-core, its clients' connections and the runtime's internal socket pair), none of them a network socket.
 
 ## Exit codes
 
