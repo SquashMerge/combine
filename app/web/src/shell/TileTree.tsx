@@ -48,6 +48,8 @@ function Node({ node, closable, ...rest }: NodeProps) {
     rest;
   const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
   const focused = focusedTile === node.id;
+  // The panel fills the whole body: a placeholder beside it would overflow the container the PTY is sized from.
+  const hasTerminal = focused && terminal !== null;
   return (
     <div
       className="tile"
@@ -81,8 +83,8 @@ function Node({ node, closable, ...rest }: NodeProps) {
         </button>
       </div>
       <div className="tile-body" role="tabpanel">
-        {active ?? 'No panels'}
-        {focused && terminal !== null && (
+        {!hasTerminal && (active ?? 'No panels')}
+        {hasTerminal && (
           // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
           <TerminalPanel
             key={`${terminal.hostId}/${terminal.termId}`}

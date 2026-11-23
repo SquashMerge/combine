@@ -105,7 +105,12 @@ export function createTauriTerminalPort(): TerminalPort {
           }
           throw error;
         }
-        listener(event);
+        try {
+          listener(event);
+        } catch (error) {
+          // A throw here would leave the Channel's message index behind and stall every later message.
+          console.error(error);
+        }
       };
       const stream = await invoke<string>(TERMINAL_OPEN_STREAM_COMMAND, { hostId, channel });
       return createStream(stream);
