@@ -6,6 +6,13 @@
 ///
 /// `areas` are the case modules in scope (each has `cases::<T>()`), and `cases` lists every
 /// case name of those areas, in order.
+///
+/// The optional `lane:` / `lane_target:` pair gates every case on a preflight. `lane` is a
+/// closure returning `Result<(), String>`, run at the start of each case's test before the
+/// target is constructed; on `Err(reason)` the case records `Verdict::Skip(reason)` under the
+/// `lane_target` label in the contract report and returns without building a target. The
+/// real-core lane uses it so cases skip, with their reason recorded, when the lane is off.
+/// Without the pair the preflight always passes.
 #[allow(unused_macros)]
 macro_rules! contract {
     (
