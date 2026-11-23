@@ -6,6 +6,7 @@ import { ModelError } from '../../src/model/ids';
 import {
   type SpawnEvent,
   SpawnError,
+  type SpawnSource,
   SpawnReplies,
   formatCommandLine,
   parseSpawnEvent,
@@ -16,6 +17,7 @@ interface Fixture {
   templates: unknown;
   spawned: unknown;
   error: unknown;
+  changed: unknown;
   disconnected: unknown;
   sources: unknown[];
 }
@@ -25,6 +27,26 @@ const fixture = JSON.parse(
 ) as Fixture;
 
 const req = (n: string): DecimalU64 => n as DecimalU64;
+const FIXTURE_HASH = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+
+function templatesEvent(template: Record<string, unknown>): unknown {
+  return {
+    kind: 'templates',
+    hostId: 'h',
+    request: '1',
+    list: { space: '/s', templates: [template], skipped: [], error: null },
+  };
+}
+
+const goodTemplate = {
+  panel: 'p',
+  title: null,
+  slot: 's',
+  argv: ['a'],
+  env: {},
+  cwd: '.',
+  hash: FIXTURE_HASH,
+};
 
 describe('parseSpawnEvent', () => {
   it('parses_fixture_events', () => {
@@ -34,6 +56,7 @@ describe('parseSpawnEvent', () => {
     expect(templates.request).toBe('9007199254740993');
     expect(templates.list.space).toBe('/work');
     expect(templates.list.templates[0]?.title).toBe('Claude');
+    expect(templates.list.templates[0]?.hash).toBe(FIXTURE_HASH);
     expect(templates.list.skipped).toEqual([{ panel: 'notes', reason: 'not a terminal panel' }]);
     expect(templates.list.error).toBeNull();
     expect(parseSpawnEvent(fixture.spawned)).toEqual({
@@ -50,7 +73,47 @@ describe('parseSpawnEvent', () => {
       code: 'cwd_refused',
       message: 'the template\'s cwd "../x" has a .. segment',
     });
+    expect(parseSpawnEvent(fixture.changed)).toEqual({
+      kind: 'error',
+      hostId: 'host-1',
+      request: '10',
+      code: 'template_changed',
+      message: 'the panel claude changed since it was listed; review it and choose again',
+    });
     expect(parseSpawnEvent(fixture.disconnected)).toEqual({ kind: 'disconnected', hostId: 'host-1' });
+  });
+
+  it('template_hash_round_trips_to_the_template_source', () => {
+    const templates = parseSpawnEvent(fixture.templates);
+    if (templates.kind !== 'templates') throw new Error('unreachable');
+    const t = templates.list.templates[0];
+    if (t === undefined) throw new Error('unreachable');
+    const source: SpawnSource = { kind: 'template', panel: t.panel, hash: t.hash };
+    expect(fixture.sources).toEqual([{ kind: 'shell' }, source]);
+    expect(parseSpawnEvent(templatesEvent(goodTemplate))).toMatchObject({
+      list: { templates: [{ hash: FIXTURE_HASH }] },
+    });
+  });
+
+  it('rejects_a_missing_or_malformed_template_hash', () => {
+    const { hash: _omitted, ...noHash } = goodTemplate;
+    const bad: unknown[] = [
+      noHash,
+      { ...goodTemplate, hash: null },
+      { ...goodTemplate, hash: 7 },
+      { ...goodTemplate, hash: '' },
+      { ...goodTemplate, hash: FIXTURE_HASH.slice(1) },
+      { ...goodTemplate, hash: `${FIXTURE_HASH}0` },
+      { ...goodTemplate, hash: FIXTURE_HASH.toUpperCase() },
+      { ...goodTemplate, hash: `${FIXTURE_HASH.slice(1)}g` },
+      { ...goodTemplate, hash: ` ${FIXTURE_HASH.slice(1)}` },
+      { ...goodTemplate, hash: `${FIXTURE_HASH.slice(1)}\n` },
+    ];
+    for (const template of bad) {
+      expect(() => parseSpawnEvent(templatesEvent(template as Record<string, unknown>))).toThrow(
+        ModelError,
+      );
+    }
   });
 
   it('parse_keeps_argv_env_cwd_exact', () => {
@@ -58,7 +121,7 @@ describe('parseSpawnEvent', () => {
     const json = JSON.parse(
       `{"kind":"templates","hostId":"h","request":"1","list":{"space":"/s","templates":[` +
         `{"panel":"p","title":null,"slot":"p","argv":["", "${odd.replace('\n', '\\n')}"],` +
-        `"env":{"${key}":"\\u0007 v "},"cwd":" ./x "}],"skipped":[],"error":"boom"}}`,
+        `"env":{"${key}":"\\u0007 v "},"cwd":" ./x ","hash":"${FIXTURE_HASH}"}],"skipped":[],"error":"boom"}}`,
     ) as unknown;
     const event = parseSpawnEvent(json);
     if (event.kind !== 'templates') throw new Error('unreachable');

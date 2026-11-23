@@ -13,6 +13,7 @@ const fixture = JSON.parse(
   readFileSync(resolve(import.meta.dirname, '..', 'fixtures', 'spawn-event.json'), 'utf8'),
 ) as Record<string, Record<string, unknown>>;
 const hostId = 'host-1' as HostId;
+const HASH = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
 
 type Handler = (event: { payload: unknown }) => void;
 let handler: Handler | null;
@@ -66,14 +67,14 @@ describe('createTauriSpawnPort', () => {
       return '9007199254740993';
     });
     const port = createTauriSpawnPort();
-    expect(
-      await port.spawnTerminal(hostId, '/work', { kind: 'template', panel: 'claude' }),
-    ).toBe('hc:t12');
+    const source = { kind: 'template', panel: 'claude', hash: HASH } as const;
+    expect(await port.spawnTerminal(hostId, '/work', source)).toBe('hc:t12');
     expect(invoke).toHaveBeenCalledWith('spawn_terminal', {
       hostId,
       space: '/work',
-      source: { kind: 'template', panel: 'claude' },
+      source: (fixture['sources'] as unknown as unknown[])[1],
     });
+    expect(invoke).toHaveBeenCalledWith('spawn_terminal', { hostId, space: '/work', source });
   });
 
   it('lists templates for the matching request only', async () => {
@@ -97,6 +98,21 @@ describe('createTauriSpawnPort', () => {
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(SpawnError);
     expect((error as SpawnError).code).toBe('cwd_refused');
+  });
+
+  it('template_changed_rejects_with_its_code_and_message', async () => {
+    invoke.mockImplementation(async () => {
+      reply(fixture['changed']);
+      return '10';
+    });
+    const error = await createTauriSpawnPort()
+      .spawnTerminal(hostId, '/work', { kind: 'template', panel: 'claude', hash: HASH })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SpawnError);
+    expect(error).toMatchObject({
+      code: 'template_changed',
+      message: 'the panel claude changed since it was listed; review it and choose again',
+    });
   });
 
   it('rejects a reply of the wrong kind', async () => {

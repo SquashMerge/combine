@@ -3,7 +3,14 @@ import type { SpawnPort } from '../ipc/port';
 import type { HostsSnapshot } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, spaceKeyId } from '../model/space';
-import { type SpawnSource, type TemplateList, formatCommandLine, quoteWord } from '../model/spawn';
+import {
+  SpawnError,
+  type SpawnSource,
+  TEMPLATE_CHANGED,
+  type TemplateList,
+  formatCommandLine,
+  quoteWord,
+} from '../model/spawn';
 import './addTerminal.css';
 
 interface AddTerminalMenuProps {
@@ -68,18 +75,11 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
     setStarting(null);
   }
 
-  function toggle() {
-    if (open) {
-      close();
-      return;
-    }
-    if (selected === null) return;
+  function loadTemplates(space: SpaceKey) {
     generation.current += 1;
     const mine = generation.current;
-    setOpen(true);
-    setSpawnError(null);
     setListing({ kind: 'loading' });
-    port.listTemplates(selected.hostId, selected.path).then(
+    port.listTemplates(space.hostId, space.path).then(
       (list) => {
         if (generation.current === mine) setListing({ kind: 'loaded', list });
       },
@@ -87,6 +87,17 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
         if (generation.current === mine) setListing({ kind: 'failed', message: messageOf(error) });
       },
     );
+  }
+
+  function toggle() {
+    if (open) {
+      close();
+      return;
+    }
+    if (selected === null) return;
+    setOpen(true);
+    setSpawnError(null);
+    loadTemplates(selected);
   }
 
   function choose(key: string, source: SpawnSource) {
@@ -107,7 +118,13 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
         if (generation.current !== mine) return;
         busy.current = false;
         setStarting(null);
-        setSpawnError(messageOf(error));
+        if (error instanceof SpawnError && error.code === TEMPLATE_CHANGED) {
+          // The listed definition is stale: show the new one and wait for another click.
+          setSpawnError(error.message);
+          loadTemplates(selected);
+          return;
+        }
+        setSpawnError(`Couldn't add the terminal: ${messageOf(error)}`);
       },
     );
   }
@@ -152,7 +169,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
                 role="menuitem"
                 disabled={starting !== null}
                 onClick={() => {
-                  choose(key, { kind: 'template', panel: template.panel });
+                  choose(key, { kind: 'template', panel: template.panel, hash: template.hash });
                 }}
               >
                 <span>{itemLabel(key, template.title ?? template.slot)}</span>
@@ -177,7 +194,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
           {listing.kind === 'failed' && (
             <p role="alert">Couldn't list templates: {listing.message}</p>
           )}
-          {spawnError !== null && <p role="alert">Couldn't add the terminal: {spawnError}</p>}
+          {spawnError !== null && <p role="alert">{spawnError}</p>}
         </div>
       )}
     </div>
