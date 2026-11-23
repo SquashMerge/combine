@@ -12,7 +12,6 @@ use super::model::{ClientSpaceState, ClientStateFile, LastSpace, VERSION};
 
 const MAX_FILE_BYTES: u64 = 1 << 20;
 const MAX_TEMP_ATTEMPTS: u64 = 16;
-const MAX_LOCK_ATTEMPTS: u32 = 8;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -51,7 +50,10 @@ pub enum LoadOutcome {
 
 enum Status {
     Invalid,
-    Loaded { bytes: Vec<u8> },
+    /// `bytes` is the file Combine loaded or last wrote; `None` means there was no file.
+    Loaded {
+        bytes: Option<Vec<u8>>,
+    },
 }
 
 struct Inner {
@@ -76,16 +78,25 @@ fn parse(bytes: &[u8]) -> Result<ClientStateFile, String> {
     Ok(file)
 }
 
-fn read_current(path: &Path) -> Result<Option<Vec<u8>>, String> {
+/// Reads at most one byte past the limit, so an oversized file is seen without reading it whole.
+/// `None` means there is no file.
+fn read_bounded(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("the client state file could not be read: {e}")),
+        Err(e) => return Err(e),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("the client state file could not be read: {e}"))?;
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn read_current(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let Some(bytes) =
+        read_bounded(path).map_err(|e| format!("the client state file could not be read: {e}"))?
+    else {
+        return Ok(None);
+    };
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err("the client state file is too large".to_string());
     }
@@ -99,7 +110,7 @@ impl ClientStateStore {
         let (inner, outcome) = match read_current(&path) {
             Ok(None) => (
                 Inner {
-                    status: Status::Loaded { bytes: Vec::new() },
+                    status: Status::Loaded { bytes: None },
                     file: ClientStateFile::default(),
                 },
                 LoadOutcome::Missing,
@@ -107,7 +118,7 @@ impl ClientStateStore {
             Ok(Some(bytes)) => match parse(&bytes) {
                 Ok(file) => (
                     Inner {
-                        status: Status::Loaded { bytes },
+                        status: Status::Loaded { bytes: Some(bytes) },
                         file,
                     },
                     LoadOutcome::Loaded,
@@ -155,63 +166,70 @@ impl ClientStateStore {
         let mut bytes =
             serde_json::to_vec_pretty(&next).map_err(|e| StateError::Io(e.to_string()))?;
         bytes.push(b'\n');
-        self.write_checked(loaded, &bytes)?;
-        inner.status = Status::Loaded { bytes };
+        self.write_checked(loaded.as_deref(), &bytes)?;
+        inner.status = Status::Loaded { bytes: Some(bytes) };
         inner.file = next;
         Ok(())
     }
 
-    /// Locks the file, refuses if it differs from `loaded`, then replaces it with `bytes`.
-    fn write_checked(&self, loaded: &[u8], bytes: &[u8]) -> Result<(), StateError> {
+    /// Takes the lock, refuses if the file is not `loaded` (`None`: still missing), then replaces
+    /// it with `bytes`. The lock is held until the rename and directory sync are done.
+    fn write_checked(&self, loaded: Option<&[u8]>, bytes: &[u8]) -> Result<(), StateError> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir).map_err(|e| StateError::Io(e.to_string()))?;
         }
-        let lock = self.lock_file()?;
-        let mut current = Vec::new();
-        if let Some(mut file) = lock.as_ref() {
-            file.read_to_end(&mut current)
-                .map_err(|e| StateError::Io(e.to_string()))?;
-        }
-        if current != loaded {
+        let _lock = self.lock_file()?;
+        // A file over the limit reads as one byte too long, so it never equals `loaded`.
+        let current = read_bounded(&self.path).map_err(|e| StateError::Io(e.to_string()))?;
+        if current.as_deref() != loaded {
             return Err(StateError::ChangedOnDisk);
         }
         let first = NEXT_TEMP.fetch_add(MAX_TEMP_ATTEMPTS, Ordering::Relaxed);
         self.write_safely_from(bytes, first)
     }
 
-    /// Takes an exclusive advisory lock on the file itself, so concurrent stores and processes
-    /// serialize their whole read-compare-write. `None` means it does not exist. A writer renames
-    /// a new file over the old one, so after locking, the handle must still be the file at the
-    /// path (same device and inode); otherwise it is released and the lock is retaken.
-    fn lock_file(&self) -> Result<Option<fs::File>, StateError> {
-        for _ in 0..MAX_LOCK_ATTEMPTS {
-            let file = match fs::File::open(&self.path) {
-                Ok(file) => file,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(StateError::Io(e.to_string())),
-            };
-            file.lock().map_err(|e| StateError::Io(e.to_string()))?;
-            let held = file.metadata().map_err(|e| StateError::Io(e.to_string()))?;
-            match fs::metadata(&self.path) {
-                Ok(at_path) if (at_path.dev(), at_path.ino()) == (held.dev(), held.ino()) => {
-                    return Ok(Some(file))
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(StateError::Io(e.to_string())),
-            }
+    fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// `<state file>.lock`, next to the state file.
+    fn lock_path(&self) -> PathBuf {
+        self.path
+            .with_file_name(format!("{}.lock", self.file_name()))
+    }
+
+    /// Takes an exclusive advisory lock on the lock file, so concurrent stores and processes
+    /// serialize their whole read-compare-write, including the first write to a missing state file.
+    /// The lock file is created (mode 0600) on first use and is never renamed or removed, so every
+    /// writer locks the same inode. A symlink or anything but a regular file at its path is refused.
+    fn lock_file(&self) -> Result<fs::File, StateError> {
+        let path = self.lock_path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| StateError::Io(e.to_string()))?;
+        let held = file.metadata().map_err(|e| StateError::Io(e.to_string()))?;
+        let at_path = fs::symlink_metadata(&path).map_err(|e| StateError::Io(e.to_string()))?;
+        if !at_path.file_type().is_file()
+            || (at_path.dev(), at_path.ino()) != (held.dev(), held.ino())
+        {
+            return Err(StateError::Io(
+                "the client state lock file is not a regular file".to_string(),
+            ));
         }
-        Err(StateError::Io(
-            "the client state file kept being replaced while locking it".to_string(),
-        ))
+        file.lock().map_err(|e| StateError::Io(e.to_string()))?;
+        Ok(file)
     }
 
     fn temp_path(&self, n: u64) -> PathBuf {
-        let name = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = self.file_name();
         self.path
             .with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
     }
@@ -311,6 +329,9 @@ mod tests {
         store.set_last_space(last_space("s1", 1)).expect("write");
         let meta = fs::metadata(store.path()).expect("state file");
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let lock = fs::symlink_metadata(store.lock_path()).expect("lock file");
+        assert!(lock.file_type().is_file());
+        assert_eq!(lock.permissions().mode() & 0o777, 0o600);
         let parent = store.path().parent().expect("parent");
         assert!(leftovers(parent).is_empty());
 
@@ -433,6 +454,79 @@ mod tests {
             let parent = first.path().parent().expect("parent");
             assert!(leftovers(parent).is_empty(), "round {round}");
         }
+    }
+
+    #[test]
+    fn concurrent_first_writes_to_a_missing_file_never_lose_a_write() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for round in 0..60 {
+            let dir = TestDir::new();
+            let (first, first_outcome) = store_at(&dir, ID_A);
+            let (second, second_outcome) = store_at(&dir, ID_A);
+            assert_eq!(first_outcome, LoadOutcome::Missing, "round {round}");
+            assert_eq!(second_outcome, LoadOutcome::Missing, "round {round}");
+            let barrier = Barrier::new(2);
+            let (a, b) = thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    barrier.wait();
+                    first.set_last_space(last_space("first", 1))
+                });
+                let b = scope.spawn(|| {
+                    barrier.wait();
+                    second.set_last_space(last_space("second", 2))
+                });
+                (a.join().expect("thread a"), b.join().expect("thread b"))
+            });
+            let on_disk = store_at(&dir, ID_A).0.snapshot().last_space;
+            match (a, b) {
+                (Ok(()), Err(StateError::ChangedOnDisk)) => {
+                    assert_eq!(on_disk, Some(last_space("first", 1)), "round {round}");
+                    assert_eq!(second.snapshot().last_space, None, "round {round}");
+                }
+                (Err(StateError::ChangedOnDisk), Ok(())) => {
+                    assert_eq!(on_disk, Some(last_space("second", 2)), "round {round}");
+                    assert_eq!(first.snapshot().last_space, None, "round {round}");
+                }
+                other => panic!("round {round}: unexpected outcomes {other:?}"),
+            }
+            let mode = fs::metadata(first.path())
+                .expect("state file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "round {round}");
+            let parent = first.path().parent().expect("parent");
+            assert!(leftovers(parent).is_empty(), "round {round}");
+        }
+    }
+
+    #[test]
+    fn file_created_behind_a_missing_load_refuses_write() {
+        let dir = TestDir::new();
+        let (store, outcome) = store_at(&dir, ID_A);
+        assert_eq!(outcome, LoadOutcome::Missing);
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("mkdir");
+        fs::write(store.path(), b"").expect("empty file behind the store");
+        assert_eq!(
+            store.set_last_space(last_space("s1", 1)),
+            Err(StateError::ChangedOnDisk)
+        );
+        assert_eq!(fs::read(store.path()).expect("read"), b"");
+    }
+
+    #[test]
+    fn symlinked_lock_file_is_refused() {
+        let dir = TestDir::new();
+        let (store, _) = store_at(&dir, ID_A);
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("mkdir");
+        let target = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, store.lock_path()).expect("plant symlink");
+        assert!(matches!(
+            store.set_last_space(last_space("s1", 1)),
+            Err(StateError::Io(_))
+        ));
+        assert!(!store.path().exists());
     }
 
     #[test]
