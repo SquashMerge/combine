@@ -10,6 +10,7 @@ mod machine;
 mod ownership;
 mod panels;
 mod spaces;
+mod spawn;
 mod terminal_list;
 
 pub use config::{ConfigError, CoreConfig, EVENT_OVERHEAD};
@@ -35,4 +36,5 @@ pub use panels::{
     REASON_MAX_BYTES,
 };
 pub use spaces::Spaces;
+pub use spawn::{PanelRead, SpawnEffect, SpawnTicket, Spawns, MAX_SPAWN_IN_FLIGHT};
 pub use terminal_list::TerminalList;

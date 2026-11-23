@@ -116,7 +116,7 @@ impl From<StoreError> for LayoutWritten {
     }
 }
 
-fn store_error_detail(error: StoreError) -> String {
+pub(super) fn store_error_detail(error: StoreError) -> String {
     match error {
         StoreError::InvalidPath => "invalid path".to_string(),
         StoreError::Unavailable(detail) | StoreError::ReadOnly(detail) => detail,
