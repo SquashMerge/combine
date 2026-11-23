@@ -126,6 +126,31 @@ mod tests {
     }
 
     #[test]
+    fn oversized_write_is_an_error_not_a_panic() {
+        let dir = TestDir::new();
+        let states = ClientStates::new(dir.path().to_path_buf());
+        states
+            .set_last_space(ID_A, last_space("s1", 1))
+            .expect("seed");
+        let mut big = space_state("big");
+        big.group_state = serde_json::json!({ "filler": "x".repeat(1 << 20) });
+        let err = states
+            .set_space_state(ID_A, "/big", big)
+            .expect_err("over the limit");
+        assert!(matches!(
+            err,
+            ServiceError::State(StateError::TooLarge { .. })
+        ));
+        assert!(err.to_string().contains("did not save it"), "{err}");
+        let view = ClientStates::new(dir.path().to_path_buf())
+            .client_state(ID_A)
+            .expect("view");
+        assert_eq!(view.error, None);
+        assert_eq!(view.file.last_space, Some(last_space("s1", 1)));
+        assert!(view.file.spaces.is_empty());
+    }
+
+    #[test]
     fn invalid_file_shows_error_and_is_never_overwritten() {
         let dir = TestDir::new();
         let path = client_state_path(dir.path(), ID_A).expect("path");

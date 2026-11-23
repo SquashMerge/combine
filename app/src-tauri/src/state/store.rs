@@ -21,6 +21,11 @@ pub enum StateError {
     Invalid,
     /// The file is not what Combine loaded or last wrote.
     ChangedOnDisk,
+    /// The new contents, `bytes` long, would be over the size limit the loader accepts, so
+    /// nothing was written.
+    TooLarge {
+        bytes: u64,
+    },
     Io(String),
 }
 
@@ -32,6 +37,11 @@ impl fmt::Display for StateError {
             }
             StateError::ChangedOnDisk => f.write_str(
                 "the client state file changed on disk, so Combine did not overwrite it",
+            ),
+            StateError::TooLarge { bytes } => write!(
+                f,
+                "the client state would be {bytes} bytes, over the {MAX_FILE_BYTES}-byte limit, \
+                 so Combine did not save it"
             ),
             StateError::Io(e) => write!(f, "could not write the client state file: {e}"),
         }
@@ -76,6 +86,18 @@ fn parse(bytes: &[u8]) -> Result<ClientStateFile, String> {
         ));
     }
     Ok(file)
+}
+
+/// The bytes a write stores: pretty-printed JSON and a trailing newline. Refuses contents the
+/// loader would reject as too large, so a successful write always loads again.
+fn encode(file: &ClientStateFile) -> Result<Vec<u8>, StateError> {
+    let mut bytes = serde_json::to_vec_pretty(file).map_err(|e| StateError::Io(e.to_string()))?;
+    bytes.push(b'\n');
+    let len = bytes.len() as u64;
+    if len > MAX_FILE_BYTES {
+        return Err(StateError::TooLarge { bytes: len });
+    }
+    Ok(bytes)
 }
 
 /// Reads at most one byte past the limit, so an oversized file is seen without reading it whole.
@@ -163,9 +185,7 @@ impl ClientStateStore {
         };
         let mut next = inner.file.clone();
         change(&mut next);
-        let mut bytes =
-            serde_json::to_vec_pretty(&next).map_err(|e| StateError::Io(e.to_string()))?;
-        bytes.push(b'\n');
+        let bytes = encode(&next)?;
         self.write_checked(loaded.as_deref(), &bytes)?;
         inner.status = Status::Loaded { bytes: Some(bytes) };
         inner.file = next;
@@ -527,6 +547,61 @@ mod tests {
             Err(StateError::Io(_))
         ));
         assert!(!store.path().exists());
+    }
+
+    /// A space state whose `group_state` string makes the file, with `store`'s current contents,
+    /// exactly `target` bytes long.
+    fn space_state_sized(store: &ClientStateStore, key: &str, target: u64) -> ClientSpaceState {
+        let sized = |filler: usize| {
+            let mut state = space_state("big");
+            state.group_state = serde_json::json!({ "filler": "x".repeat(filler) });
+            let mut file = store.snapshot();
+            file.spaces.insert(key.to_string(), state.clone());
+            let len = serde_json::to_vec_pretty(&file).expect("serialize").len() as u64 + 1;
+            (state, len)
+        };
+        let (_, base) = sized(0);
+        let (state, len) = sized((target - base) as usize);
+        assert_eq!(len, target);
+        state
+    }
+
+    #[test]
+    fn write_over_the_load_limit_is_refused_and_changes_nothing() {
+        let dir = TestDir::new();
+        let (store, _) = store_at(&dir, ID_A);
+        store
+            .set_last_space(last_space("s1", 1))
+            .expect("seed a valid file");
+        let before_disk = fs::read(store.path()).expect("read");
+        let before_memory = store.snapshot();
+
+        let over = space_state_sized(&store, "/big", MAX_FILE_BYTES + 1);
+        assert_eq!(
+            store.set_space_state("/big", over),
+            Err(StateError::TooLarge {
+                bytes: MAX_FILE_BYTES + 1
+            })
+        );
+        assert_eq!(fs::read(store.path()).expect("read"), before_disk);
+        assert_eq!(store.snapshot(), before_memory);
+        let (reloaded, outcome) = store_at(&dir, ID_A);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(reloaded.snapshot(), before_memory);
+        assert!(leftovers(store.path().parent().expect("parent")).is_empty());
+
+        let at_limit = space_state_sized(&store, "/big", MAX_FILE_BYTES);
+        store
+            .set_space_state("/big", at_limit.clone())
+            .expect("a file at the limit is written");
+        assert_eq!(
+            fs::metadata(store.path()).expect("state file").len(),
+            MAX_FILE_BYTES
+        );
+        let (reloaded, outcome) = store_at(&dir, ID_A);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(reloaded.snapshot().spaces.get("/big"), Some(&at_limit));
+        assert_eq!(reloaded.snapshot().last_space, Some(last_space("s1", 1)));
     }
 
     #[test]
