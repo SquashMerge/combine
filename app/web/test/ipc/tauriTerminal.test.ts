@@ -119,9 +119,24 @@ describe('createTauriTerminalPort', () => {
     expect(events).toEqual([{ type: 'connection', connected: false }]);
   });
 
-  it('passes a rejection message through unchanged', async () => {
+  it('turns a bare string rejection into an Error with the same message', async () => {
     const stream = await createTauriTerminalPort().openStream(hostId, () => undefined);
-    mocks.invoke.mockRejectedValueOnce('not connected');
-    await expect(stream.focus(u64('1'))).rejects.toBe('not connected');
+    mocks.invoke.mockRejectedValue('not connected');
+    for (const call of [
+      () => stream.input(u64('1'), new Uint8Array([1])),
+      () => stream.focus(u64('1')),
+    ]) {
+      const error: unknown = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('not connected');
+    }
+    const open: unknown = await createTauriTerminalPort()
+      .openStream(hostId, () => undefined)
+      .catch((e: unknown) => e);
+    expect(open).toBeInstanceOf(Error);
+    expect((open as Error).message).toBe('not connected');
+    const original = new Error('boom');
+    mocks.invoke.mockRejectedValue(original);
+    await expect(stream.focus(u64('1'))).rejects.toBe(original);
   });
 });

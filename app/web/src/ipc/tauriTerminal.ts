@@ -1,4 +1,4 @@
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { Channel, invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { ModelError } from '../model/ids';
 import { parseDataFrame, parseTerminalStreamEvent } from '../model/terminal';
 import {
@@ -16,6 +16,18 @@ import {
   TERMINAL_SET_DISPLAY_COMMAND,
 } from './names';
 import type { TerminalPort, TerminalStream, TerminalStreamListener } from './terminalPort';
+
+async function invoke<T = unknown>(
+  command: string,
+  ...rest: [args?: Parameters<typeof tauriInvoke>[1], options?: Parameters<typeof tauriInvoke>[2]]
+): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, ...rest);
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error(typeof error === 'string' ? error : JSON.stringify(error));
+  }
+}
 
 function decodeMessage(message: unknown) {
   if (message instanceof ArrayBuffer) return parseDataFrame(new Uint8Array(message));
