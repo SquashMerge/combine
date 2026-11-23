@@ -83,6 +83,18 @@ describe('TileTree terminal mount', () => {
     expect(port.streams).toHaveLength(1);
   });
 
+  it("the focused tile's body holds only the panel, and other tiles keep the placeholder", async () => {
+    const port = new MemoryTerminalPort();
+    render(tree(port, fakeXtermFactory(), 't1', MOUNT));
+    await flush();
+    const body = document.querySelector('[data-tile-id="t1"] .tile-body');
+    if (body === null) throw new Error('no tile body');
+    expect(body.childNodes).toHaveLength(1);
+    expect(body.firstElementChild).toBe(screen.getByTestId('terminal-panel'));
+    expect(body.textContent).not.toContain('p1');
+    expect(document.querySelector('[data-tile-id="t2"] .tile-body')?.textContent).toBe('No panels');
+  });
+
   it('renders no panel in an unfocused tile or without an active terminal', async () => {
     const port = new MemoryTerminalPort();
     const fake = fakeXtermFactory();

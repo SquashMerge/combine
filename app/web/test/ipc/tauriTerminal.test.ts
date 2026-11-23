@@ -46,6 +46,22 @@ beforeEach(() => {
 });
 
 describe('createTauriTerminalPort', () => {
+  it('a listener that throws does not stop later events from being delivered', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const events: TerminalStreamEvent[] = [];
+    await createTauriTerminalPort().openStream(hostId, (event) => {
+      events.push(event);
+      if (events.length === 1) throw new Error('listener failed');
+    });
+    const channel = mocks.channels[0]!;
+    const bytes = frame(1n, 2n, 3n, [104]);
+    expect(() => channel.onmessage(bytes.buffer)).not.toThrow();
+    channel.onmessage(bytes.buffer);
+    expect(events).toHaveLength(2);
+    expect(errors).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
   it('routes ArrayBuffer messages to data events', async () => {
     const events: TerminalStreamEvent[] = [];
     await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
