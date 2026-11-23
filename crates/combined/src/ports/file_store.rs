@@ -46,6 +46,13 @@ pub enum StoreError {
     Unavailable(String),
     /// The project can't be written and the store has no fallback.
     ReadOnly(String),
+    /// A read found a file larger than the caller's `max_bytes`. The store read no more than
+    /// `max_bytes + 1` bytes of it; `size` is at least that, and more when the store knows.
+    TooLarge {
+        size: u64,
+        /// True when the file is the fallback copy, as for [`StoredFile::read_only`].
+        read_only: bool,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -54,6 +61,7 @@ impl fmt::Display for StoreError {
             StoreError::InvalidPath => write!(f, "invalid path"),
             StoreError::Unavailable(detail) => write!(f, "store unavailable: {detail}"),
             StoreError::ReadOnly(detail) => write!(f, "store is read-only: {detail}"),
+            StoreError::TooLarge { size, .. } => write!(f, "the file is too large: {size} bytes"),
         }
     }
 }
@@ -73,8 +81,14 @@ pub fn valid_store_path(path: &str) -> bool {
 #[async_trait]
 pub trait FileStore: Send + Sync {
     /// `path` is relative to `<space>/.workspace/`: '/'-separated, non-empty, no `.`/`..`
-    /// segments, not absolute.
-    async fn read(&self, space: &SpaceId, path: &str) -> Result<Option<StoredFile>, StoreError>;
+    /// segments, not absolute. A file larger than `max_bytes` is [`StoreError::TooLarge`]: the
+    /// store never holds more than `max_bytes + 1` of its bytes, even if it grows meanwhile.
+    async fn read(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<StoredFile>, StoreError>;
     async fn write(
         &self,
         space: &SpaceId,

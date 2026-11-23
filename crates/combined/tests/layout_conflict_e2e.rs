@@ -423,3 +423,50 @@ fn held_change_is_written_once_the_file_can_be_read() {
     assert_eq!(stored_ratio(&server.work), 0.5);
     assert!(!fallback.exists());
 }
+
+/// Finding 4, over real files: an 8 MiB sparse `layout.json` is reported as too large, the
+/// way an invalid file is, and is never replaced.
+#[test]
+fn oversized_layout_file_is_invalid_and_never_replaced() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let mut server = layout_server(&scratch, "o", store, QUICK, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let dir = server.work.join(".workspace");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(LAYOUT_FILE);
+    let size: u64 = 8 << 20;
+    fs::File::create(&file).unwrap().set_len(size).unwrap();
+
+    let mut client = WireClient::open(&server.socket).0;
+    let snapshot = watch(&mut client, &space, 1);
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some(
+            "layout.json can't be used: the layout is 8388608 bytes; the limit is 262144. \
+             Showing the last good layout. Changes made now aren't saved, and are lost if the \
+             daemon restarts, until layout.json is fixed."
+        )
+    );
+    assert_eq!(
+        mutate(&mut client, &space, 2, 0, split_main()).layout_revision,
+        1
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    client.send(&ClientMessage::UnwatchLayout(UnwatchLayout {}));
+    client.send(&ClientMessage::WatchLayout(WatchLayout {
+        request: RequestId(3),
+        space: space.clone(),
+    }));
+    answer(&client, 3);
+    assert!(server.server.shutdown().is_none());
+
+    assert_eq!(fs::metadata(&file).unwrap().len(), size);
+    let head = &fs::read(&file).unwrap()[..64];
+    assert!(head.iter().all(|byte| *byte == 0), "the file was replaced");
+    assert!(!fallback.exists());
+}

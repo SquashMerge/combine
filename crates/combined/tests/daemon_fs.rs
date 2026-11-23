@@ -27,6 +27,9 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 use sha2::{Digest, Sha256};
 
+/// A read bound no test file comes near.
+const ANY_SIZE: usize = 1 << 20;
+
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
@@ -423,7 +426,7 @@ fn fs_file_store_reads_back_what_it_wrote() {
         .unwrap()
         .revision;
     assert_eq!(revision, StoreRevision(1));
-    let file = block_on(store.read(&space, "layouts/a.json"))
+    let file = block_on(store.read(&space, "layouts/a.json", ANY_SIZE))
         .unwrap()
         .unwrap();
     assert_eq!(file.bytes, b"hello");
@@ -445,7 +448,13 @@ fn fs_file_store_counts_revisions_per_space() {
     assert_eq!(second, StoreRevision(2));
     assert_eq!(block_on(store.revision(&a)).unwrap(), StoreRevision(2));
     assert_eq!(block_on(store.revision(&b)).unwrap(), StoreRevision(0));
-    assert_eq!(block_on(store.read(&a, "x")).unwrap().unwrap().bytes, b"2");
+    assert_eq!(
+        block_on(store.read(&a, "x", ANY_SIZE))
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"2"
+    );
 }
 
 #[test]
@@ -453,7 +462,10 @@ fn fs_file_store_reports_a_missing_file() {
     let scratch = ShortTempDir::new();
     let space = space(&scratch, "work");
     let store = FsFileStore::new();
-    assert_eq!(block_on(store.read(&space, "nothing")).unwrap(), None);
+    assert_eq!(
+        block_on(store.read(&space, "nothing", ANY_SIZE)).unwrap(),
+        None
+    );
     assert!(!Path::new(&space.0).exists());
 }
 
@@ -479,7 +491,7 @@ fn fs_file_store_path_rules_match_memory_file_store() {
     for (path, valid) in table {
         for (name, store) in [("fs", &fs_store as &dyn FileStore), ("memory", &memory)] {
             let wrote = block_on(store.write(&space, path, b"x".to_vec()));
-            let read = block_on(store.read(&space, path));
+            let read = block_on(store.read(&space, path, ANY_SIZE));
             if valid {
                 assert!(
                     wrote.is_ok() && read.is_ok(),
@@ -503,7 +515,7 @@ fn fs_file_store_refuses_a_relative_space() {
     };
     assert!(detail.contains("cs4-relative-space"), "{detail}");
     assert!(matches!(
-        block_on(store.read(&space, "a")),
+        block_on(store.read(&space, "a", ANY_SIZE)),
         Err(StoreError::Unavailable(_))
     ));
     assert!(!Path::new("cs4-relative-space").exists());
@@ -555,7 +567,7 @@ fn escaping_space(scratch: &ShortTempDir, escape: &Escape) -> (SpaceId, &'static
 fn assert_read_refused(escape: Escape) {
     let scratch = ShortTempDir::new();
     let (space, path, sentinel) = escaping_space(&scratch, &escape);
-    let result = block_on(FsFileStore::new().read(&space, path));
+    let result = block_on(FsFileStore::new().read(&space, path, ANY_SIZE));
     assert!(
         matches!(result, Err(StoreError::Unavailable(_))),
         "{result:?}"
@@ -701,7 +713,9 @@ fn store_contract_hash_matches_content() {
         let outcome = block_on(store.write(&space, LAYOUT, bytes.clone())).unwrap();
         assert_eq!(outcome.hash, sha256(&bytes), "{name} write");
         assert!(!outcome.read_only, "{name}");
-        let file = block_on(store.read(&space, LAYOUT)).unwrap().unwrap();
+        let file = block_on(store.read(&space, LAYOUT, ANY_SIZE))
+            .unwrap()
+            .unwrap();
         assert_eq!(file.hash, sha256(&bytes), "{name} read");
         assert_eq!(file.hash, outcome.hash, "{name}");
         assert!(!file.read_only, "{name}");
@@ -794,7 +808,7 @@ fn store_contract_invalid_path() {
             if !valid {
                 assert_eq!(wrote, Err(StoreError::InvalidPath), "{name} {path:?}");
                 assert_eq!(
-                    block_on(store.read(&space, path)),
+                    block_on(store.read(&space, path, ANY_SIZE)),
                     Err(StoreError::InvalidPath),
                     "{name} {path:?}"
                 );
@@ -844,7 +858,7 @@ fn store_contract_read_only_routes_to_fallback() {
         let root = scratch.path().join("spaces");
         let store = FsFileStore::with_fallback(&root);
         let written = block_on(store.write(&space, LAYOUT, b"kept aside".to_vec()));
-        let read = block_on(store.read(&space, LAYOUT));
+        let read = block_on(store.read(&space, LAYOUT, ANY_SIZE));
         let bare = block_on(FsFileStore::new().write(&space, LAYOUT, b"x".to_vec()));
         unlock(&locked);
 
@@ -941,7 +955,9 @@ fn store_contract_fallback_stays_authoritative_after_the_project_is_writable() {
         let outcome = block_on(store.write(space, LAYOUT, b"B".to_vec())).unwrap();
         assert!(outcome.read_only, "{name}");
         assert_eq!(outcome.hash, sha256(b"B"), "{name}");
-        let file = block_on(store.read(space, LAYOUT)).unwrap().unwrap();
+        let file = block_on(store.read(space, LAYOUT, ANY_SIZE))
+            .unwrap()
+            .unwrap();
         assert_eq!(file.bytes, b"B", "{name}");
         assert_eq!(file.hash, outcome.hash, "{name}");
         assert!(file.read_only, "{name}");
@@ -976,10 +992,149 @@ fn store_contract_invalid_paths_never_reach_an_existing_fallback_target() {
             "{path}"
         );
         assert_eq!(
-            block_on(store.read(&space, &path)),
+            block_on(store.read(&space, &path, ANY_SIZE)),
             Err(StoreError::InvalidPath),
             "{path}"
         );
         assert_eq!(fs::read(&victim).unwrap(), SENTINEL, "{path}");
     }
+}
+
+// Finding 4: reads are bounded at the I/O boundary.
+
+const LIMIT: usize = combined::core::LAYOUT_MAX_BYTES;
+
+/// A sparse file of `len` bytes: no disk blocks, but a read of it returns every byte.
+fn sparse(path: &Path, len: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+#[test]
+fn store_contract_oversized_project_file_is_too_large_and_left_alone() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    sparse(&file, 8 << 20);
+    let store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: 8 << 20,
+            read_only: false
+        })
+    );
+    assert_eq!(fs::metadata(&file).unwrap().len(), 8 << 20);
+}
+
+#[test]
+fn store_contract_read_bound_is_exact() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    let store = FsFileStore::new();
+    sparse(&file, LIMIT as u64);
+    let read = block_on(store.read(&space, LAYOUT, LIMIT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.bytes.len(), LIMIT);
+    assert_eq!(read.hash, sha256(&vec![0; LIMIT]));
+    sparse(&file, LIMIT as u64 + 1);
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
+}
+
+#[test]
+fn store_contract_oversized_fallback_copy_is_too_large_and_read_only() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let root = scratch.path().join("spaces");
+    let copy = root.join(hex_sha256(&space.0)).join(LAYOUT);
+    sparse(&copy, 8 << 20);
+    let store = FsFileStore::with_fallback(&root);
+    assert_eq!(
+        block_on(store.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: 8 << 20,
+            read_only: true
+        })
+    );
+    assert_eq!(fs::metadata(&copy).unwrap().len(), 8 << 20);
+}
+
+#[test]
+fn memory_store_bounds_reads_like_the_disk_store() {
+    let memory = MemoryFileStore::new();
+    let space = SpaceId("/repo".to_string());
+    memory.write_outside(&space, LAYOUT, vec![b' '; LIMIT + 1]);
+    assert_eq!(
+        block_on(memory.read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
+    memory.write_outside(&space, LAYOUT, vec![b' '; LIMIT]);
+    assert_eq!(
+        block_on(memory.read(&space, LAYOUT, LIMIT))
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len(),
+        LIMIT
+    );
+}
+
+/// A file that doesn't end: a FIFO whose writer sends four times the bound and then holds its
+/// end open. An unbounded read waits for an end that doesn't come (holding at most what was
+/// sent); a bounded one stops after `limit + 1` bytes. This also covers a file growing during
+/// a read.
+#[test]
+fn store_contract_read_of_an_endless_file_stops_at_the_bound() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo failed");
+
+    let fifo = file.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+        let chunk = vec![b' '; 64 * 1024];
+        for _ in 0..(4 * LIMIT / chunk.len()) {
+            // Fails once the reader closes its end (EPIPE; Rust ignores SIGPIPE).
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+        let _ = done_rx.recv_timeout(BOUND * 3);
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader_space = space.clone();
+    std::thread::spawn(move || {
+        let store = FsFileStore::new();
+        let _ = tx.send(block_on(store.read(&reader_space, LAYOUT, LIMIT)));
+    });
+    let read = rx
+        .recv_timeout(BOUND)
+        .expect("the read of an endless file did not stop at the bound");
+    let _ = done_tx.send(());
+    assert_eq!(
+        read,
+        Err(StoreError::TooLarge {
+            size: LIMIT as u64 + 1,
+            read_only: false
+        })
+    );
 }

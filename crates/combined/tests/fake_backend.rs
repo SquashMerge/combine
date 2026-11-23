@@ -24,6 +24,9 @@ use futures::executor::block_on;
 use futures::task::{waker, ArcWake};
 use futures::{FutureExt, StreamExt};
 
+/// A read bound no test file comes near.
+const ANY_SIZE: usize = 1 << 20;
+
 const OWN: OwnershipGeneration = OwnershipGeneration(1);
 
 type Seen = Vec<(u64, AttachEvent)>;
@@ -869,7 +872,7 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
     let other = SpaceId("/other".to_string());
     block_on(async {
         assert_eq!(store.revision(&space).await, Ok(StoreRevision(0)));
-        assert_eq!(store.read(&space, "a.txt").await, Ok(None));
+        assert_eq!(store.read(&space, "a.txt", ANY_SIZE).await, Ok(None));
         let revision = |outcome: Result<WriteOutcome, StoreError>| outcome.unwrap().revision;
         assert_eq!(
             revision(store.write(&space, "a.txt", b"one".to_vec()).await),
@@ -884,10 +887,14 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
             StoreRevision(3)
         );
         assert_eq!(store.revision(&other).await, Ok(StoreRevision(0)));
-        let file = store.read(&space, "a.txt").await.unwrap().unwrap();
+        let file = store
+            .read(&space, "a.txt", ANY_SIZE)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(file.bytes, b"three");
         assert_eq!(file.revision, StoreRevision(3));
-        assert_eq!(store.read(&other, "a.txt").await, Ok(None));
+        assert_eq!(store.read(&other, "a.txt", ANY_SIZE).await, Ok(None));
 
         for path in ["", "/abs", "a/../b", "./a", "a//b", "a/", "..", "a/./b"] {
             assert_eq!(
@@ -896,7 +903,7 @@ fn memory_file_store_counts_revisions_and_refuses_bad_paths() {
                 "{path:?}"
             );
             assert_eq!(
-                store.read(&space, path).await,
+                store.read(&space, path, ANY_SIZE).await,
                 Err(StoreError::InvalidPath),
                 "{path:?}"
             );
@@ -945,12 +952,16 @@ fn memory_outside_edits_and_faults() {
         assert!(changes.next().now_or_never().flatten().is_some());
         assert_eq!(store.bytes(&space, "layout.json"), Some(b"one".to_vec()));
         assert_eq!(store.revision(&space).await, Ok(StoreRevision(0)));
-        let read = store.read(&space, "layout.json").await.unwrap().unwrap();
+        let read = store
+            .read(&space, "layout.json", ANY_SIZE)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!read.read_only);
         assert_eq!(store.read_count(&space, "layout.json"), 1);
         store.remove_outside(&space, "layout.json");
         assert!(changes.next().now_or_never().flatten().is_some());
-        assert_eq!(store.read(&space, "layout.json").await, Ok(None));
+        assert_eq!(store.read(&space, "layout.json", ANY_SIZE).await, Ok(None));
         assert_eq!(store.read_count(&space, "layout.json"), 2);
 
         store.fail_next_write(&space, StoreError::Unavailable("boom".into()));
@@ -974,7 +985,7 @@ fn memory_outside_edits_and_faults() {
         assert_eq!(store.bytes(&space, "layout.json"), Some(Vec::new()));
         assert!(
             store
-                .read(&space, "layout.json")
+                .read(&space, "layout.json", ANY_SIZE)
                 .await
                 .unwrap()
                 .unwrap()
@@ -989,7 +1000,10 @@ fn memory_outside_edits_and_faults() {
     ));
     assert_eq!(bare.bytes(&space, "layout.json"), None);
     let unseen = SpaceId("/unseen".to_string());
-    assert_eq!(block_on(bare.read(&unseen, "layout.json")), Ok(None));
+    assert_eq!(
+        block_on(bare.read(&unseen, "layout.json", ANY_SIZE)),
+        Ok(None)
+    );
     assert_eq!(bare.read_count(&unseen, "layout.json"), 1);
 }
 

@@ -27,7 +27,7 @@ use super::socket::BoundSocket;
 use super::{ServeOptions, ServerParts, ServerStats};
 use crate::core::{
     layout_snapshot, ops_from_wire, ConnectionId, Driver, LayoutEffect, LayoutRead, LayoutWritten,
-    Layouts, MutateError, TerminalList, WatchError, LAYOUT_FILE,
+    Layouts, MutateError, TerminalList, WatchError, LAYOUT_FILE, LAYOUT_MAX_BYTES,
 };
 use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent};
 use crate::ports::{FileChange, FileStore};
@@ -537,10 +537,11 @@ impl Server {
                         }
                     }
                     LayoutEffect::Read { space } => {
-                        let read = match self.store.read(&space, LAYOUT_FILE).await {
-                            Ok(file) => LayoutRead::from(file),
-                            Err(error) => LayoutRead::from(error),
-                        };
+                        let read =
+                            match self.store.read(&space, LAYOUT_FILE, LAYOUT_MAX_BYTES).await {
+                                Ok(file) => LayoutRead::from(file),
+                                Err(error) => LayoutRead::from(error),
+                            };
                         self.layouts.apply_read(&space, read, self.clock.now());
                     }
                     LayoutEffect::Write { space, bytes, .. } => {

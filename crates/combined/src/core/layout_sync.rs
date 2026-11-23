@@ -52,6 +52,11 @@ pub enum LayoutRead {
         hash: ContentHash,
         read_only: bool,
     },
+    /// The file is larger than [`LAYOUT_MAX_BYTES`], so the store didn't read it whole.
+    TooLarge {
+        size: u64,
+        read_only: bool,
+    },
     /// The read itself failed, so nothing is known about the file's content.
     Failed(String),
 }
@@ -86,7 +91,10 @@ impl From<Option<StoredFile>> for LayoutRead {
 
 impl From<StoreError> for LayoutRead {
     fn from(error: StoreError) -> LayoutRead {
-        LayoutRead::Failed(store_error_detail(error))
+        match error {
+            StoreError::TooLarge { size, read_only } => LayoutRead::TooLarge { size, read_only },
+            other => LayoutRead::Failed(store_error_detail(other)),
+        }
     }
 }
 
@@ -112,6 +120,7 @@ fn store_error_detail(error: StoreError) -> String {
     match error {
         StoreError::InvalidPath => "invalid path".to_string(),
         StoreError::Unavailable(detail) | StoreError::ReadOnly(detail) => detail,
+        StoreError::TooLarge { size, .. } => format!("the file is {size} bytes"),
     }
 }
 
@@ -476,7 +485,8 @@ impl SpaceState {
                 changed && !first
             }
             LayoutRead::Missing => {
-                if !first && self.known_hash.is_none() && !self.unread {
+                // `invalid` with no hash is an oversized file, so a missing one now is a change.
+                if !first && self.known_hash.is_none() && !self.unread && !self.invalid {
                     return false;
                 }
                 self.known_hash = None;
@@ -495,6 +505,14 @@ impl SpaceState {
                 self.known_hash = Some(hash);
                 self.read_only = read_only;
                 self.reload(parse_bytes(&bytes), first, now, timing);
+                !first
+            }
+            LayoutRead::TooLarge { size, read_only } => {
+                // Unread past the limit, so there is no hash: such a read is never ignored.
+                self.known_hash = None;
+                self.read_only = read_only;
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
+                self.reload(Err(LayoutError::TooLarge(size)), first, now, timing);
                 !first
             }
         }

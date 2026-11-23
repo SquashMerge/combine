@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -204,9 +204,38 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
     Ok(Some(file))
 }
 
+/// What a bounded read found.
+enum Bounded {
+    Bytes(Vec<u8>),
+    /// More than the bound: the file's size, as far as is known.
+    TooLarge(u64),
+}
+
+/// Reads `path`, but never more than `max_bytes + 1` bytes of it, so a huge file, or one that
+/// grows during the read, costs at most that.
+fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let cap = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(usize::try_from(len.min(cap)).unwrap_or(0));
+    file.take(cap).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        return Ok(Bounded::TooLarge(len.max(read)));
+    }
+    Ok(Bounded::Bytes(bytes))
+}
+
 #[async_trait]
 impl FileStore for FsFileStore {
-    async fn read(&self, space: &SpaceId, path: &str) -> Result<Option<StoredFile>, StoreError> {
+    async fn read(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<StoredFile>, StoreError> {
         let revisions = self
             .revisions
             .lock()
@@ -214,8 +243,8 @@ impl FileStore for FsFileStore {
         let revision = StoreRevision(revisions.get(space).copied().unwrap_or(0));
         file_path(space, path)?;
         if let Some(copy) = self.fallback_file(space, path) {
-            match std::fs::read(&copy) {
-                Ok(bytes) => return Ok(Some(stored(bytes, revision, true))),
+            match read_bounded(&copy, max_bytes) {
+                Ok(found) => return found_file(found, revision, true).map(Some),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(unavailable(error)),
             }
@@ -223,12 +252,11 @@ impl FileStore for FsFileStore {
         let Some(file) = checked_file(space, path, false).map_err(Checked::into_store)? else {
             return Ok(None);
         };
-        let bytes = match std::fs::read(&file) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(unavailable(error)),
-        };
-        Ok(Some(stored(bytes, revision, false)))
+        match read_bounded(&file, max_bytes) {
+            Ok(found) => found_file(found, revision, false).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(unavailable(error)),
+        }
     }
 
     async fn write(
@@ -317,6 +345,17 @@ impl FileStore for FsFileStore {
             .boxed(),
             None => stream::empty().boxed(),
         }
+    }
+}
+
+fn found_file(
+    found: Bounded,
+    revision: StoreRevision,
+    read_only: bool,
+) -> Result<StoredFile, StoreError> {
+    match found {
+        Bounded::Bytes(bytes) => Ok(stored(bytes, revision, read_only)),
+        Bounded::TooLarge(size) => Err(StoreError::TooLarge { size, read_only }),
     }
 }
 

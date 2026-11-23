@@ -909,6 +909,106 @@ fn failed_read_keeps_state_and_reports_once() {
     assert_eq!(sim.disk[&space("main")], bytes_of(&layout_before));
 }
 
+// Finding 4: an oversized file is invalid, and the store reports it without its bytes.
+
+fn oversized() -> Vec<u8> {
+    let mut bytes = bytes_of(&two_tiles());
+    bytes.resize(LAYOUT_MAX_BYTES + 1, b' ');
+    bytes
+}
+
+const TOO_LARGE: &str = "layout.json can't be used: the layout is 262145 bytes; the limit is \
+     262144. Showing the last good layout. Changes made now aren't saved, and are lost if the \
+     daemon restarts, until layout.json is fixed.";
+
+#[test]
+fn oversized_file_is_invalid_and_never_written() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    let revision = sim.revision("main");
+    sim.outside_write(oversized(), Millis(10));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error.as_deref(), Some(TOO_LARGE));
+    assert_eq!(status.layout_revision, LayoutRevision(revision.0 + 1));
+    assert_eq!(active_of(&status.layout, "a").as_deref(), Some("p3"));
+    assert_eq!(sim.layouts.next_deadline(), None);
+    sim.mutate(vec![set_ratio(&["a", "b"], 0.25)], Millis(20))
+        .unwrap();
+    for how in FLUSHES {
+        assert_eq!(try_flush(&mut sim, how, Millis(100_000)), 0, "{how:?}");
+    }
+    assert_eq!(sim.written(), 0);
+    assert_eq!(sim.disk[&space("main")], oversized());
+}
+
+#[test]
+fn oversized_file_at_start_shows_the_error_over_defaults() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), oversized());
+    sim.watch(MAIN, "main", Millis(0));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.layout, combined::core::default_layout());
+    assert_eq!(status.error.as_deref(), Some(TOO_LARGE));
+    assert_eq!(status.layout_revision, LayoutRevision(0));
+}
+
+#[test]
+fn oversized_file_read_again_is_not_ignored() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.outside_write(oversized(), Millis(10));
+    let revision = sim.revision("main");
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(20));
+    assert_eq!(sim.revision("main"), LayoutRevision(revision.0 + 1));
+}
+
+#[test]
+fn removing_an_oversized_file_reloads_defaults() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.outside_write(oversized(), Millis(10));
+    sim.mutate(vec![set_active("a", "p3")], Millis(20)).unwrap();
+    let revision = sim.revision("main");
+    sim.disk.remove(&space("main"));
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(30));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.layout_revision, LayoutRevision(revision.0 + 1));
+    assert_eq!(status.error, None);
+    assert_eq!(status.layout, combined::core::default_layout());
+    assert_eq!(status.dropped.unwrap().op_count, 1);
+}
+
+#[test]
+fn fixing_an_oversized_file_runs_the_conflict_rule() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.outside_write(oversized(), Millis(10));
+    sim.outside_write(bytes_of(&with_ratio(&two_tiles(), 0.3)), Millis(1_000));
+    assert_eq!(sim.layouts.status(&space("main")).unwrap().error, None);
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(1_500)));
+    sim.layouts.tick(Millis(1_500));
+    sim.settle(Millis(1_500));
+    let current = sim.current("main");
+    assert_eq!(root_ratio(&current), 0.3);
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p3"));
+    assert_eq!(sim.disk[&space("main")], bytes_of(&current));
+}
+
+#[test]
+fn store_too_large_error_becomes_a_too_large_read() {
+    use combined::ports::StoreError;
+    assert_eq!(
+        LayoutRead::from(StoreError::TooLarge {
+            size: 9,
+            read_only: true
+        }),
+        LayoutRead::TooLarge {
+            size: 9,
+            read_only: true
+        }
+    );
+}
+
 // Finding 1: a failed read blocks every write until a read succeeds.
 
 const READ_FAILED: &str = "Couldn't read layout.json (permission denied). Showing the last good \

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use combined::core::{
     encode_layout, ConnectionId, LayoutEffect, LayoutOp, LayoutRead, LayoutTiming, LayoutWritten,
-    Layouts, MutateError,
+    Layouts, MutateError, LAYOUT_MAX_BYTES,
 };
 use combined::model::{
     ContentHash, LayoutRevision, Millis, PanelId, SpaceId, SpaceLayout, Split, SplitDir, SplitNode,
@@ -138,6 +138,13 @@ impl Sim {
                         let read = match (&self.failing_reads, self.disk.get(&space)) {
                             (Some(detail), _) => LayoutRead::Failed(detail.clone()),
                             (None, None) => LayoutRead::Missing,
+                            // What a store bounded by the limit reports.
+                            (None, Some(bytes)) if bytes.len() > LAYOUT_MAX_BYTES => {
+                                LayoutRead::TooLarge {
+                                    size: bytes.len() as u64,
+                                    read_only: false,
+                                }
+                            }
                             (None, Some(bytes)) => LayoutRead::Found {
                                 hash: hash(bytes),
                                 bytes: bytes.clone(),

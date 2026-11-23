@@ -165,7 +165,12 @@ impl MemoryFileStore {
 
 #[async_trait]
 impl FileStore for MemoryFileStore {
-    async fn read(&self, space: &SpaceId, path: &str) -> Result<Option<StoredFile>, StoreError> {
+    async fn read(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<StoredFile>, StoreError> {
         if !valid_store_path(path) {
             return Err(StoreError::InvalidPath);
         }
@@ -180,6 +185,12 @@ impl FileStore for MemoryFileStore {
                 None => return Ok(None),
             },
         };
+        if bytes.len() > max_bytes {
+            return Err(StoreError::TooLarge {
+                size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                read_only,
+            });
+        }
         Ok(Some(StoredFile {
             bytes: bytes.clone(),
             revision,
