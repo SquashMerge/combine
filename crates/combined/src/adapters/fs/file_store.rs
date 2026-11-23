@@ -1,5 +1,8 @@
 //! The per-space file store on disk, at `<space>/.workspace/<path>`.
 //!
+//! Panel reads use `read`, which looks at the fallback copy first; `list_dir` lists only the
+//! project's folder.
+//!
 //! A pulled repository can put a symlink at `.workspace`, at any directory under it or at the
 //! file itself, so the store refuses every symlink on the way: each component is checked with
 //! `symlink_metadata`, the verified directory is canonicalized and must still lie under the
@@ -31,7 +34,8 @@ use super::safe_write::write_atomic;
 use super::watcher::SpaceWatcher;
 use crate::model::{ContentHash, SpaceId};
 use crate::ports::{
-    valid_store_path, FileChange, FileStore, StoreError, StoreRevision, StoredFile, WriteOutcome,
+    valid_store_path, DirListing, EntryKind, FileChange, FileStore, ListedEntry, StoreError,
+    StoreRevision, StoredFile, WriteOutcome,
 };
 
 /// Files under each space's `.workspace/` folder. Revisions are kept in memory: each space's
@@ -120,7 +124,7 @@ fn is_denied(error: &io::Error) -> bool {
     )
 }
 
-/// Why [`checked_file`] gave up: the store refused the path, or creating a folder was denied.
+/// Why [`checked_folder`] gave up: the store refused the path, or creating a folder was denied.
 enum Checked {
     Refused(StoreError),
     Denied(io::Error),
@@ -150,16 +154,26 @@ fn created(error: io::Error) -> Checked {
     }
 }
 
-/// Verifies `<space>/.workspace` and every directory down to the file's parent, and returns the
-/// file's path inside the canonical parent. `None` means a component is missing, which only a
-/// read without `create` reaches. A symlink at any component, including the file, is refused.
+/// Verifies `<space>/.workspace` and every directory in `folders` below it, and returns the
+/// canonical path of the last one. `None` means a component is missing, which only a call
+/// without `create` reaches. A symlink or non-directory at any component is refused, and the
+/// canonical folder must still lie under the canonical `.workspace`.
 ///
 /// The checks and the later open are separate steps: see the module note on the race.
-fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<PathBuf>, Checked> {
-    file_path(space, path)?;
-    let workspace = Path::new(&space.0).join(".workspace");
-    let segments: Vec<&str> = path.split('/').collect();
-    let (name, folders) = segments.split_last().ok_or(StoreError::InvalidPath)?;
+fn checked_folder(
+    space: &SpaceId,
+    folders: &[&str],
+    create: bool,
+) -> Result<Option<PathBuf>, Checked> {
+    let folder = Path::new(&space.0);
+    if !folder.is_absolute() {
+        return Err(StoreError::Unavailable(format!(
+            "space {} is not an absolute folder",
+            space.0
+        ))
+        .into());
+    }
+    let workspace = folder.join(".workspace");
     let mut dir = workspace.clone();
     for step in std::iter::once(None).chain(folders.iter().map(Some)) {
         match step {
@@ -188,10 +202,23 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
         }
     }
     let root = std::fs::canonicalize(&workspace).map_err(unavailable)?;
-    let parent = std::fs::canonicalize(&dir).map_err(unavailable)?;
-    if !parent.starts_with(&root) {
+    let canonical = std::fs::canonicalize(&dir).map_err(unavailable)?;
+    if !canonical.starts_with(&root) {
         return Err(refused(&dir, "resolves outside .workspace").into());
     }
+    Ok(Some(canonical))
+}
+
+/// Verifies the folders down to the file's parent with [`checked_folder`] and returns the
+/// file's path inside the canonical parent. `None` means a folder is missing. A symlink at the
+/// file itself is refused too.
+fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<PathBuf>, Checked> {
+    file_path(space, path)?;
+    let segments: Vec<&str> = path.split('/').collect();
+    let (name, folders) = segments.split_last().ok_or(StoreError::InvalidPath)?;
+    let Some(parent) = checked_folder(space, folders, create)? else {
+        return Ok(None);
+    };
     let file = parent.join(name);
     match std::fs::symlink_metadata(&file) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -202,6 +229,37 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
         Err(error) => return Err(unavailable(error).into()),
     }
     Ok(Some(file))
+}
+
+/// Lists the entries of `dir`, skipping names that aren't UTF-8. Stops after `max_entries + 1`
+/// kept entries, sorts them by name and cuts the list to `max_entries`.
+fn read_listing(dir: &Path, max_entries: usize) -> Result<DirListing, StoreError> {
+    let keep = max_entries.saturating_add(1);
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(unavailable)? {
+        let entry = entry.map_err(unavailable)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let file_type = entry.file_type().map_err(unavailable)?;
+        let kind = if file_type.is_symlink() {
+            EntryKind::Symlink
+        } else if file_type.is_dir() {
+            EntryKind::Directory
+        } else if file_type.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        entries.push(ListedEntry { name, kind });
+        if entries.len() >= keep {
+            break;
+        }
+    }
+    entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    let truncated = entries.len() > max_entries;
+    entries.truncate(max_entries);
+    Ok(DirListing { entries, truncated })
 }
 
 /// What a bounded read found.
@@ -307,6 +365,20 @@ impl FileStore for FsFileStore {
             hash: content_hash(&bytes),
             read_only: aside.is_some(),
         })
+    }
+
+    async fn list_dir(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Option<DirListing>, StoreError> {
+        file_path(space, path)?;
+        let folders: Vec<&str> = path.split('/').collect();
+        let Some(dir) = checked_folder(space, &folders, false).map_err(Checked::into_store)? else {
+            return Ok(None);
+        };
+        read_listing(&dir, max_entries).map(Some)
     }
 
     async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError> {
