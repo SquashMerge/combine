@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { HostsPort } from '../../src/ipc/port';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
+import { MemoryLayoutPort } from '../support/memoryLayoutPort';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
 
@@ -20,7 +21,7 @@ function sample() {
 }
 
 async function mount(port: HostsPort = new MemoryHostsPort(sample())) {
-  render(<App port={port} clientStatePort={new MemoryClientStatePort()} />);
+  render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
   await act(async () => {});
 }

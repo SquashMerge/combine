@@ -36,6 +36,17 @@ describe('parseClientState', () => {
     expect(state.error).toBeNull();
   });
 
+  it('accepts an empty activeTerminal, as the state store does', () => {
+    const file = resolve(import.meta.dirname, '..', 'fixtures', 'client-state.json');
+    const json = JSON.parse(readFileSync(file, 'utf8')) as {
+      spaces: Record<string, { activeTerminal: unknown }>;
+    };
+    json.spaces['/work/a']!.activeTerminal = '';
+    expect(parseClientState(json).spaces['/work/a']?.activeTerminal).toBe('');
+    json.spaces['/work/a']!.activeTerminal = 7;
+    expect(() => parseClientState(json)).toThrow();
+  });
+
   it('rejects a timestamp that is not a decimal string', () => {
     expect(() =>
       parseClientState({ version: 1, lastSpace: { spaceId: 'a', selectedAtMs: 5 }, spaces: {}, error: null }),
