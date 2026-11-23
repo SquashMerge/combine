@@ -10,7 +10,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use combine_protocol::{read_message, DaemonMessage, HostId, ReadError};
+use combine_protocol::{
+    read_message, DaemonMessage, ErrorCode, HostId, LayoutSnapshot, ReadError, RequestId,
+};
 
 use super::backoff::Backoff;
 use super::config::StoreError;
@@ -130,6 +132,19 @@ pub trait HostEvents: Send + Sync {
     fn host_id(&self, name: &str, host_id: &HostId);
     /// The seam S4 uses to publish a host's spaces.
     fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>);
+    /// A space's layout: the reply to a request, or a push when `request` is `None`.
+    fn layout(&self, _host_id: &HostId, _request: Option<RequestId>, _snapshot: LayoutSnapshot) {}
+    /// The daemon refused a layout request. `message` is trimmed external text.
+    fn layout_error(
+        &self,
+        _host_id: &HostId,
+        _request: RequestId,
+        _code: ErrorCode,
+        _message: String,
+    ) {
+    }
+    /// The session ended, so the layout watch is gone.
+    fn layout_disconnected(&self, _host_id: &HostId) {}
 }
 
 pub struct SessionIo<'a> {

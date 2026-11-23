@@ -18,6 +18,7 @@ const MAX_KINDS: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Terminals,
+    Layout,
 }
 
 /// What the writer thread receives.
