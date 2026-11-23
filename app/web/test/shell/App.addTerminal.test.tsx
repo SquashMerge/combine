@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TermId } from '../../src/model/ids';
 import { App } from '../../src/shell/App';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
@@ -54,6 +54,39 @@ const spaceWrites = (port: MemoryClientStatePort) =>
   );
 
 describe('App Add terminal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pending_activation_expires_after_ten_seconds', async () => {
+    const { spawn, hostsPort, clientStatePort } = await mount([terminal('t1', 'first')]);
+    await waitFor(() => expect(active()).toEqual(['t1']));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await addShell();
+    expect(spawn.spawnCalls()).toHaveLength(1);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    act(() => hostsPort.push(hosts([terminal('t1', 'first'), terminal('t9', 'new')], '2')));
+    await act(async () => {});
+    expect(active()).toEqual(['t1']);
+    expect(spaceWrites(clientStatePort)).toEqual(['t1']);
+  });
+
+  it('pending_activation_still_live_just_before_ten_seconds', async () => {
+    const { hostsPort } = await mount([terminal('t1', 'first')]);
+    await waitFor(() => expect(active()).toEqual(['t1']));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await addShell();
+    await act(async () => {
+      vi.advanceTimersByTime(9_999);
+    });
+    act(() => hostsPort.push(hosts([terminal('t1', 'first'), terminal('t9', 'new')], '2')));
+    await act(async () => {});
+    vi.useRealTimers();
+    await waitFor(() => expect(active()).toEqual(['t9']));
+  });
+
   it('spawned_terminal_becomes_active_once_listed', async () => {
     const { spawn, hostsPort, clientStatePort } = await mount([terminal('t1', 'first')]);
     await waitFor(() => expect(active()).toEqual(['t1']));

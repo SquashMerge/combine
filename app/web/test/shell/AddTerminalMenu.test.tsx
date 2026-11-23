@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TermId } from '../../src/model/ids';
 import type { SpaceKey } from '../../src/model/space';
 import type { TemplateList, TerminalTemplate } from '../../src/model/spawn';
@@ -164,6 +164,44 @@ describe('AddTerminalMenu', () => {
     expect(menu()).toBeNull();
     expect(button().getAttribute('aria-expanded')).toBe('false');
     expect(port.spawnCalls()).toHaveLength(0);
+  });
+
+  it('escape_listener_is_removed_on_every_close_and_on_unmount', async () => {
+    const add = vi.spyOn(document, 'addEventListener');
+    const remove = vi.spyOn(document, 'removeEventListener');
+    try {
+      const port = new MemorySpawnPort();
+      const { unmount } = (() => {
+        const onSpawned = vi.fn();
+        return render(
+          <AddTerminalMenu port={port} snapshot={hosts} selected={alpha} onSpawned={onSpawned} />,
+        );
+      })();
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        await open();
+        fireEvent.keyDown(document.body, { key: 'Escape' });
+        expect(menu()).toBeNull();
+      }
+      const keydown = (spy: typeof add) =>
+        spy.mock.calls.filter(([type]) => type === 'keydown').map(([, handler]) => handler);
+      const added = keydown(add);
+      expect(added).toHaveLength(3);
+      // Every handler that was added has been removed again, closed menu or not.
+      expect(keydown(remove)).toEqual(added);
+      // Closing without Escape (a second click on the button) also removes it.
+      await open();
+      expect(keydown(add)).toHaveLength(4);
+      fireEvent.click(button());
+      expect(keydown(remove)).toHaveLength(4);
+      // And unmounting an open menu removes it.
+      await open();
+      expect(keydown(add)).toHaveLength(5);
+      unmount();
+      expect(keydown(remove)).toEqual(keydown(add));
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
   });
 
   it('shell_click_sends_shell_source', async () => {

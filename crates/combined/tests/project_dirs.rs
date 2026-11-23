@@ -108,3 +108,22 @@ fn root_behind_symlink_uses_canonical_root() {
     assert_eq!(FsProjectDirs.check_dir(&root, ""), Ok(()));
     assert_eq!(FsProjectDirs.check_dir(&root, "sub"), Ok(()));
 }
+
+#[test]
+fn git_detection_is_case_insensitive_and_exact() {
+    let scratch = ShortTempDir::new();
+    let project = project(&scratch);
+    fs::create_dir_all(project.join(".GIT/hooks")).unwrap();
+    fs::create_dir_all(project.join(".github/workflows")).unwrap();
+    let root = root_of(&scratch);
+    assert_eq!(
+        FsProjectDirs.check_dir(&root, ".GIT"),
+        Err(DirRefusal::InsideGit)
+    );
+    assert_eq!(
+        FsProjectDirs.check_dir(&root, ".GIT/hooks"),
+        Err(DirRefusal::InsideGit)
+    );
+    assert_eq!(FsProjectDirs.check_dir(&root, ".github"), Ok(()));
+    assert_eq!(FsProjectDirs.check_dir(&root, ".github/workflows"), Ok(()));
+}

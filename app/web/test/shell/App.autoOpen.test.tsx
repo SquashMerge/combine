@@ -159,4 +159,19 @@ describe('App auto-open', () => {
     expect(clientStatePort.writes).toEqual([]);
     expectNoSpawn(spawn);
   });
+
+  it('auto_open_writes_once_per_repair_and_settles', async () => {
+    // A stored terminal that is no longer listed is replaced once; later snapshots (same list, an
+    // exited-only list, a list with the stored terminal back) never rewrite what is valid.
+    const { spawn, hostsPort, clientStatePort } = mount(stored('t-gone'));
+    await rail('alpha');
+    await waitFor(() => expect(active()).toEqual(['t2']));
+    await act(async () => {});
+    expect(spaceWrites(clientStatePort)).toHaveLength(1);
+    act(() => hostsPort.push(hosts([], '2')));
+    await act(async () => {});
+    expect(spaceWrites(clientStatePort)).toHaveLength(1);
+    expect(active()).toEqual(['t2']);
+    expectNoSpawn(spawn);
+  });
 });

@@ -37,11 +37,16 @@ fn fake_server_lists_eleven_terminals_in_creation_order() {
     client.send(&ClientMessage::WatchTerminals(WatchTerminals {
         request: RequestId(1),
     }));
-    let snapshot = loop {
-        if let DaemonMessage::Terminals(terminals) = client.recv() {
-            break terminals;
-        }
-    };
+    // Wait (bounded; `recv` itself times out) until all eleven are listed, so a snapshot taken
+    // before the daemon's list caught up with the seeding cannot fail the test.
+    let snapshot = (0..200)
+        .find_map(|_| match client.recv() {
+            DaemonMessage::Terminals(terminals) if terminals.terminals.len() == spawned.len() => {
+                Some(terminals)
+            }
+            _ => None,
+        })
+        .expect("all eleven terminals were never listed");
 
     let listed: Vec<TermId> = snapshot.terminals.iter().map(|t| t.id.clone()).collect();
     assert_eq!(listed, spawned);
