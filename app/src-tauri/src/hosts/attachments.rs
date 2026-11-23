@@ -823,6 +823,23 @@ mod tests {
     }
 
     #[test]
+    fn gap_with_a_request_that_is_not_pending_is_not_delivered_and_keeps_the_route() {
+        let rig = Rig::with_streams();
+        rig.attached(S1, 10);
+        assert!(rig.route(gap(10, Some(99))).is_none());
+        assert_eq!(rig.seen(), []);
+        assert_eq!(
+            rig.forward(
+                S1,
+                ClientMessage::Focus(Focus {
+                    attachment: AttachmentId(10)
+                })
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn resumed_reply_routes_to_its_stream() {
         let rig = Rig::with_streams();
         rig.router

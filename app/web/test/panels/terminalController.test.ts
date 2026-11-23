@@ -1128,3 +1128,49 @@ describe('terminalController automatic replies', () => {
     ]);
   });
 });
+
+describe('terminalController resize guards (test-verifier)', () => {
+  it('ownership moving away during the resize debounce sends no resize', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 1);
+    t.controller.setContainerSize(805, 349);
+    vi.advanceTimersByTime(50);
+    t.stream().emit(ownershipEvent(7, 2, 8));
+    vi.advanceTimersByTime(500);
+    expect(t.controller.getView().ownership).toBe('other');
+    expect(t.stream().commands('resize')).toEqual([]);
+  });
+
+  it('a resize already sent at this generation and size is not sent again', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 1);
+    t.controller.setContainerSize(805, 349);
+    vi.advanceTimersByTime(100);
+    expect(t.stream().commands('resize')).toHaveLength(1);
+    // Same fit (100x20) from a different container size; the PTY has not answered with Resized.
+    t.controller.setContainerSize(807, 351);
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toHaveLength(1);
+  });
+
+  it('a fresh attachment forgets the sent resize and sends again at the same generation', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 1);
+    t.controller.setContainerSize(805, 349);
+    vi.advanceTimersByTime(100);
+    expect(t.stream().commands('resize')).toHaveLength(1);
+    t.stream().emit(gapEvent(7, null));
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    t.stream().emit(attachedEvent(2, 8));
+    t.stream().emit(ownershipEvent(8, 1, 8));
+    t.stream().emit(startedEvent(cursor(8, 1, 0)));
+    await Promise.resolve();
+    vi.advanceTimersByTime(16);
+    t.controller.setContainerSize(806, 350);
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
+      { op: 'resize', attachment: '8', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
+    ]);
+  });
+});
