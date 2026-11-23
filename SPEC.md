@@ -1,4 +1,4 @@
-# Combine — Spec (rev 16)
+# Combine — Spec (rev 17)
 
 Updated 2026-11-22
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 16 (prior art: OpenUI; streaming panel data):** the view language section gains a *Prior art* note on DivKit and OpenUI: what Combine takes from each and why neither is the view language. Streaming panel data is a planned requirement, not in v1: a `Stream` refresh policy is reserved, with the rules any design must keep (record updates keyed by the kind's `paging.key`, view state surviving updates, frame-batched delivery, the same approvals as other sources). Its mechanism is an open question. No behaviour changes in this revision.
 
 **Changes from rev 15 (S3, herdr-core adapter):** the herdr-core adapter is built (`crates/combined/src/adapters/herdr_core/`) and the contract suite runs against a real core: the adapter's constructor takes the socket path explicitly and refuses a protocol generation it doesn't know; capabilities, the `hc:` ID, the request mapping with its fencing (a superseded write goes out as AUTOMATIC_INPUT, or as DATA on a core without it), reopen bounds and policy (40 attempts 250 ms apart, a 250 ms wait after a core-wide EOF), restart versus crash (`AttachResult.terminal.screen`, sticky per terminal), `list`, `spawn` (`no_parent`, never `on`), `kill`, `watch` (a `missed` or lost subscription is re-subscribed and diffed) and the display mapping are written down; event payload shapes come only from a committed capture of a real core (`sh tools/verify-herdr-core --capture`); the real-core run (`sh tools/verify-herdr-core`) starts an isolated core of its own, pins its id, never signals anything but that core and the run's own test binary, and has a 1,320 s deadline and a 46-line audit; case 11 is a recorded skip, because herdr-core itself would have to make the second connection, which the isolation rule can't check; the Silent-fake run of cases 10 and 22, a sentinel size for the late `Resized` of an old generation, and first-occurrence token order in the resize cases are recorded.
 
@@ -781,6 +783,19 @@ Views stay outside the execution manifest, because these rules bound what any vi
 
 Adding a node type, action or animation is a client change. The set is meant to stay small and grow from real kinds. A richer declarative card format, such as DivKit (spiked 2026-11-22), is a possible later node type if card-heavy kinds need it.
 
+*Prior art.* Two generative-UI formats were compared with the view language on 2026-11-22. Neither replaces it.
+- **DivKit** (spiked 2026-11-22): a mature declarative card format. It was workable but heavy for Combine's kinds, so it stays a possible later node type (above).
+- **OpenUI** (openui.com, Thesys, MIT; OpenUI Lang 1.0): a compact line-oriented language that a model writes live in a chat, rendered only from a registered component catalog (unknown components are dropped, props are checked against schemas), streamed and parsed as it arrives, with React, Vue, Svelte and Angular renderers.
+  - Why it isn't the view language:
+    - Its data model is different. UI-side tools are optional, but when a view uses `Query` or `Mutation`, the renderer runs them through a host-supplied `toolProvider` in the browser, so a view names the tools it calls. Combine's views only bind to records that panel backends produce, so a kind stays data-only and works with any backend.
+    - Its runtime has no single mandatory dispatch boundary. The renderer runs `@Set`, `@Reset` and `@Run` itself; custom actions, `@OpenUrl` and `@ToAssistant` reach the host's `onAction` handler, which can decline them; restricted action slots are prompt and schema constraints, not runtime checks. Adopting it would mean imposing Combine's dispatcher, with its gesture, provenance and rate rules, on a records-only subset of the language. Combine prefers its own smaller, backend-neutral language with those rules built in.
+    - The compared docs don't specify visibility triggers, collection keyboard navigation and scrolling, pagination, animation or tooltips as part of the language. Combine's view language specifies all of them.
+  - What Combine takes from it:
+    - The agent-facing authoring guide for the view language is generated from the closed node and action set, the way OpenUI generates its system prompt from the component catalog, so the guide can't drift from what the client accepts.
+    - A terse text syntax that compiles to the same node tree, if agents find JSON views verbose.
+    - Incremental edits: an agent changing a view sends only the changed parts.
+    - Strict parsing with clear errors: unknown nodes, bad bindings and unreachable parts are reported to the agent.
+
 **Panel groups**
 
 - A group definition lives in the host's group library (`groups/github/`): a params schema (e.g. `repo`), a shared `lib.js`, and panel templates such as PR list, PR detail, checks, diff, issue list and issue detail. Each template names the `KindId` it fills, and the kind must be in the host's kind library. The group's params supply the `scope` of the references it produces.
@@ -861,6 +876,13 @@ The daemon discovers the MCP servers the host's agents have, but treats each one
 - An entry is fresh until the shortest interval among the panels using it has passed, or an event invalidates it. A stale entry is still shown, greyed, while a fetch runs.
 - In-flight deduplication: a request for a key that is already being fetched waits on that fetch instead of starting another. A shared fetch is cancelled only when no request still waits on it.
 - A failing source shows its error with the last good data greyed out; agents see the error through `list_panels`.
+- `Stream` (planned, not in v1): a source keeps delivering updates after the first result, instead of being re-run. Whatever mechanism is chosen (see Open questions), it keeps these rules:
+  - updates are record-level: an upsert or a removal keyed by the record's identity (the pointer in the kind's `paging.key`, which a streaming kind must declare), or a full replacement;
+  - selection, scroll position and other view state survive updates for records that still exist (a removed record clears its selection, as with paging), and a changed value can use the `highlight` animation;
+  - delivery to the client is batched to the display frame, like terminal output, and a slow client gets the latest state, not a backlog;
+  - a streaming source needs the same approvals as the source it extends (an approved MCP server and tool, an allowlisted CLI), and each update is authorized as that source's own output, never because the server is approved in general;
+  - an update delivered by an already-running approved source is an outside data change, like a file or backend event. It is not an automatic trigger and starts no new loader run, so the automatic `OnEvent` limit doesn't apply to it. But a view action that the new data causes (an `appear`, a countdown) is automatic, and so is everything downstream of it, under *Scheduling of automatic triggers*: passing through streamed data never removes automatic provenance;
+  - what a `refresh` action means on a `Stream` panel, and how an automatic restart or resnapshot of the stream is admitted, are part of the open design question.
 
 ## Agent integration
 
@@ -1126,6 +1148,10 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 - [x] Does herdr-core give an ordered first paint? Yes: `terminal.attach` sends a first paint, then live bytes, on one channel. M0 confirmed it for terminals that predate the daemon and across planned restarts.
 - [ ] Should panels live in each project's `.workspace/`, or in the daemon's data directory, out of the repo?
+
+**New in rev 17**
+
+- [ ] What carries streaming panel data (the `Stream` policy)? Candidates: MCP resource subscriptions or notifications from an approved server, a long-running allowlisted CLI that writes JSON lines, a file watcher for `File` sources, and repeated `push_panel_data` calls from an agent. Which milestone takes it is open too; it is not in v1's first version.
 
 **New in rev 15**
 
