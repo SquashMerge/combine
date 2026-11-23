@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 
 use combine_protocol::{ErrorCode, HostId, LayoutSnapshot, RequestId};
 
+use super::attachments::{Attachments, TerminalSink};
 use super::config::{HostConfig, HostsStore, Transport};
 use super::link::Connector;
 use super::local::{LocalSocketConnector, SocketGuardEnv};
@@ -35,15 +36,22 @@ pub struct ServiceDeps {
     pub outbound: Arc<Outbound>,
     pub layout_sink: Arc<dyn LayoutSink>,
     pub spawn_sink: Arc<dyn SpawnSink>,
+    pub attachments: Arc<Attachments>,
 }
 
 impl ServiceDeps {
     /// The real thing: system `ssh`, the guarded local socket, the system clock and the live
-    /// session phase, with layout traffic going to `layout_sink` and spawn
-    /// replies to `spawn_sink`.
-    pub fn system(layout_sink: Arc<dyn LayoutSink>, spawn_sink: Arc<dyn SpawnSink>) -> Self {
+    /// session phase, with layout traffic going to `layout_sink`, spawn replies to `spawn_sink`
+    /// and terminal traffic to `terminal_sink`.
+    pub fn system(
+        layout_sink: Arc<dyn LayoutSink>,
+        spawn_sink: Arc<dyn SpawnSink>,
+        terminal_sink: Arc<dyn TerminalSink>,
+    ) -> Self {
         let outbound = Arc::new(Outbound::default());
+        let attachments = Arc::new(Attachments::new(terminal_sink));
         let live = Arc::clone(&outbound);
+        let routed = Arc::clone(&attachments);
         ServiceDeps {
             connector_for: Box::new(|host| match &host.transport {
                 Transport::Ssh {
@@ -61,11 +69,13 @@ impl ServiceDeps {
             }),
             clock: Arc::new(SystemClock),
             phase: Arc::new(move || {
-                Box::new(LivePhase::new(Arc::clone(&live))) as Box<dyn SessionPhase>
+                Box::new(LivePhase::new(Arc::clone(&live), Arc::clone(&routed)))
+                    as Box<dyn SessionPhase>
             }),
             outbound,
             layout_sink,
             spawn_sink,
+            attachments,
         }
     }
 }
@@ -227,6 +237,11 @@ impl HostsService {
         Arc::clone(&self.inner.deps.outbound)
     }
 
+    /// The router for panel streams.
+    pub fn attachments(&self) -> Arc<Attachments> {
+        Arc::clone(&self.inner.deps.attachments)
+    }
+
     pub fn snapshot(&self) -> HostsSnapshot {
         self.inner.registry().snapshot()
     }
@@ -286,7 +301,8 @@ mod tests {
     use super::super::supervisor::IdlePhase;
     use super::super::testing::{
         host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingLayoutSink, RecordingSink,
-        RecordingSpawnSink, ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B,
+        RecordingSpawnSink, RecordingTerminalSink, ScriptedConnector, ShortTempDir, Step, HOST_A,
+        HOST_B,
     };
     use super::*;
 
@@ -338,6 +354,7 @@ mod tests {
             outbound: Arc::new(Outbound::default()),
             layout_sink: RecordingLayoutSink::new().0,
             spawn_sink: RecordingSpawnSink::new().0,
+            attachments: Arc::new(Attachments::new(RecordingTerminalSink::new())),
         };
         let (sink, snapshots) = RecordingSink::new();
         let service = HostsService::start(dir.path(), deps, sink);
@@ -409,7 +426,11 @@ mod tests {
         let (sink, _snapshots) = RecordingSink::new();
         let service = HostsService::start(
             dir.path(),
-            ServiceDeps::system(RecordingLayoutSink::new().0, RecordingSpawnSink::new().0),
+            ServiceDeps::system(
+                RecordingLayoutSink::new().0,
+                RecordingSpawnSink::new().0,
+                RecordingTerminalSink::new(),
+            ),
             sink,
         );
         let snapshot = service.snapshot();
@@ -429,7 +450,11 @@ mod tests {
         let (spawn_sink, received) = RecordingSpawnSink::new();
         let service = HostsService::start(
             dir.path(),
-            ServiceDeps::system(RecordingLayoutSink::new().0, spawn_sink),
+            ServiceDeps::system(
+                RecordingLayoutSink::new().0,
+                spawn_sink,
+                RecordingTerminalSink::new(),
+            ),
             sink,
         );
         let events: &dyn HostEvents = &*service.inner;
@@ -461,7 +486,11 @@ mod tests {
         let (layout_sink, received) = RecordingLayoutSink::new();
         let service = HostsService::start(
             dir.path(),
-            ServiceDeps::system(layout_sink, RecordingSpawnSink::new().0),
+            ServiceDeps::system(
+                layout_sink,
+                RecordingSpawnSink::new().0,
+                RecordingTerminalSink::new(),
+            ),
             sink,
         );
         drop(snapshots);

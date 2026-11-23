@@ -20,6 +20,8 @@ pub enum RequestKind {
     Terminals,
     Layout,
     Spawn,
+    Attach,
+    Resume,
 }
 
 /// What the writer thread receives.

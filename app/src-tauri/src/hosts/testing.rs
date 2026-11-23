@@ -21,6 +21,7 @@ use combine_protocol::{
     ErrorMessage, HostId, LayoutSnapshot, RequestId, Welcome, WireMessage,
 };
 
+use super::attachments::{StreamDelivery, StreamId, TerminalSink};
 use super::config::StoreError;
 use super::identity::HostIdStore;
 use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link};
@@ -462,6 +463,51 @@ impl LayoutSink for RecordingLayoutSink {
 
     fn layout_disconnected(&self, host_id: &HostId) {
         self.send(LayoutEvent::Disconnected(host_id.clone()));
+    }
+}
+
+/// What a [`RecordingTerminalSink`] was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivered {
+    Connection(bool),
+    Message(DaemonMessage),
+}
+
+/// Records every delivery to a panel stream, in order.
+#[derive(Default)]
+pub struct RecordingTerminalSink {
+    seen: Mutex<Vec<(StreamId, Delivered)>>,
+}
+
+impl RecordingTerminalSink {
+    pub fn new() -> Arc<RecordingTerminalSink> {
+        Arc::new(RecordingTerminalSink::default())
+    }
+
+    pub fn deliveries(&self) -> Vec<(StreamId, Delivered)> {
+        lock(&self.seen).clone()
+    }
+
+    /// Waits until at least `count` deliveries have arrived, then returns all of them.
+    pub fn wait_for(&self, count: usize) -> Vec<(StreamId, Delivered)> {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let seen = self.deliveries();
+            if seen.len() >= count || std::time::Instant::now() > deadline {
+                return seen;
+            }
+            thread::yield_now();
+        }
+    }
+}
+
+impl TerminalSink for RecordingTerminalSink {
+    fn deliver(&self, stream: StreamId, event: StreamDelivery<'_>) {
+        let delivered = match event {
+            StreamDelivery::Connection { connected } => Delivered::Connection(connected),
+            StreamDelivery::Message(message) => Delivered::Message(message.clone()),
+        };
+        lock(&self.seen).push((stream, delivered));
     }
 }
 

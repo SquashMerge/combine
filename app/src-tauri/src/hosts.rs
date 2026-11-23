@@ -1,5 +1,6 @@
 //! Host connections: hosts.json, the SSH bridge, the local socket, the handshake, the host ID check and reconnecting. Nothing here imports Tauri.
 
+pub mod attachments;
 pub mod backoff;
 pub mod config;
 pub mod failure;

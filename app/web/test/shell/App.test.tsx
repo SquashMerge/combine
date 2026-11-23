@@ -6,6 +6,7 @@ import type { HostsPort } from '../../src/ipc/port';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
 import { DeferredClientStatePort } from '../support/deferredClientStatePort';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
@@ -15,7 +16,7 @@ const connecting = { kind: 'connecting' } as const;
 describe('App', () => {
   it('keeps the newest revision', async () => {
     const port = new MemoryHostsPort(snapshot([host('r10', null, connecting)], '10'));
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('region', { name: 'r10' });
     act(() => port.push(snapshot([host('r9', null, connecting)], '9')));
     expect(screen.queryByRole('region', { name: 'r9' })).toBeNull();
@@ -28,7 +29,7 @@ describe('App', () => {
 
   it('orders revisions above 2^53 exactly', async () => {
     const port = new MemoryHostsPort(snapshot([host('a', null, connecting)], '9007199254740992'));
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('region', { name: 'a' });
     act(() => port.push(snapshot([host('b', null, connecting)], '9007199254740993')));
     expect(screen.getByRole('region', { name: 'b' })).toBeTruthy();
@@ -53,7 +54,7 @@ describe('App', () => {
       },
       retryHost: () => Promise.resolve(),
     };
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('region', { name: 'pushed' });
     expect(calls).toEqual(['subscribe', 'get']);
     expect(screen.queryByRole('region', { name: 'stale' })).toBeNull();
@@ -61,7 +62,7 @@ describe('App', () => {
 
   it('unsubscribes on unmount', async () => {
     const port = new MemoryHostsPort(snapshot([host('a', null, connecting)]));
-    const view = render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    const view = render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('region', { name: 'a' });
     expect(port.listenerCount()).toBe(1);
     view.unmount();
@@ -72,7 +73,7 @@ describe('App', () => {
     const port = new MemoryHostsPort(
       snapshot([host('mini', null, { kind: 'failed', message: 'nope', detail: null })]),
     );
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     expect(port.retryCalls).toEqual(['mini']);
   });
@@ -83,7 +84,7 @@ describe('App', () => {
       onSnapshot: () => Promise.resolve(() => undefined),
       retryHost: () => Promise.resolve(),
     };
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Cannot reach the Combine backend: boom'));
   });
 
@@ -131,7 +132,7 @@ describe('App', () => {
         [HOST_A, saved('/src/alpha', '9007199254740992')],
         [HOST_B, saved('/src/mimir', '9007199254740993')],
       ]);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
       await waitFor(() => expect(current()).toHaveLength(1));
       expect(current()[0]?.textContent).toBe('mimir');
       expect(document.querySelector('[data-term-id="t3"]')).not.toBeNull();
@@ -142,14 +143,14 @@ describe('App', () => {
         [HOST_A, saved('/src/alpha', '5')],
         [HOST_B, saved('/src/removed', '9')],
       ]);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
       await waitFor(() => expect(current()[0]?.textContent).toBe('alpha'));
     });
 
     it('restores active terminal', async () => {
       const states = new Map<HostId, ClientState>([[HOST_A, saved('/src/alpha', '1', 't2')]]);
       const clientStatePort = new MemoryClientStatePort(states);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
       await waitFor(() => expect(document.querySelector('[data-term-id="t2"][aria-current="true"]')).not.toBeNull());
       expect(document.querySelector('[data-term-id="t1"][aria-current="true"]')).toBeNull();
       expect(clientStatePort.writes).toEqual([]);
@@ -158,7 +159,7 @@ describe('App', () => {
     it('drops a stored active terminal the host no longer has', async () => {
       const states = new Map<HostId, ClientState>([[HOST_A, saved('/src/alpha', '1', 't9')]]);
       const clientStatePort = new MemoryClientStatePort(states);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
       await waitFor(() => expect(current()[0]?.textContent).toBe('alpha'));
       await waitFor(() => expect(document.querySelector('[data-term-id="t1"][aria-current="true"]')).not.toBeNull());
       expect(document.querySelector('[data-term-id="t9"]')).toBeNull();
@@ -173,7 +174,7 @@ describe('App', () => {
         [HOST_A, saved('/src/alpha', '1', 't2')],
         [HOST_B, saved('/src/mimir', '2', 't4')],
       ]);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort(states)} />);
       fireEvent.click(await screen.findByRole('button', { name: 'All spaces' }));
       await waitFor(() => expect(document.querySelectorAll('[data-term-id][aria-current="true"]')).toHaveLength(2));
       expect(document.querySelector('[data-term-id="t2"][aria-current="true"]')).not.toBeNull();
@@ -185,7 +186,7 @@ describe('App', () => {
         [HOST_A, { ...defaultClientState('client state file is not valid JSON'), lastSpace: null }],
       ]);
       const clientStatePort = new MemoryClientStatePort(states);
-      render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
+      render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
       const alert = await screen.findByRole('alert');
       expect(alert.textContent).toContain('Client state for mac: client state file is not valid JSON');
       expect(current()).toHaveLength(0);
@@ -199,6 +200,7 @@ describe('App', () => {
       const clientStatePort = new DeferredClientStatePort();
       render(
         <App
+          terminalPort={new MemoryTerminalPort()}
           layoutPort={new MemoryLayoutPort()}
           port={new MemoryHostsPort(sample())}
           clientStatePort={clientStatePort}
@@ -235,7 +237,7 @@ describe('App', () => {
       async function mountDeferred(now?: () => number) {
         const hosts = new MemoryHostsPort(sample());
         const port = new DeferredClientStatePort();
-        render(<App layoutPort={new MemoryLayoutPort()} port={hosts} clientStatePort={port} {...(now ? { now } : {})} />);
+        render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={hosts} clientStatePort={port} {...(now ? { now } : {})} />);
         await screen.findByRole('navigation', { name: 'Spaces' });
         await waitFor(() => expect(port.loads).toHaveLength(2));
         return { hosts, port };
