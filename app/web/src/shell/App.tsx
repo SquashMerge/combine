@@ -13,11 +13,13 @@ import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
+import type { TerminalPort } from '../ipc/terminalPort';
+import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import type { HostsSnapshot } from '../model/hosts';
 import { firstTileId, layoutTiles } from '../model/layout';
 import { CommandPalette } from './CommandPalette';
 import { SpaceRail } from './SpaceRail';
-import { TileTree } from './TileTree';
+import { type TerminalMount, TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
 import { useSpaceLayout } from './useSpaceLayout';
 import { useHostsSnapshot } from './useHostsSnapshot';
@@ -27,6 +29,8 @@ interface AppProps {
   port: HostsPort;
   clientStatePort: ClientStatePort;
   layoutPort: LayoutPort;
+  terminalPort: TerminalPort;
+  createAdapter?: XtermAdapterFactory;
   newTileId?: () => string;
   now?: () => number;
 }
@@ -49,7 +53,15 @@ interface PendingSelection {
   selectedAtMs: DecimalU64;
 }
 
-export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.now }: AppProps) {
+export function App({
+  port,
+  clientStatePort,
+  layoutPort,
+  terminalPort,
+  createAdapter,
+  newTileId,
+  now = Date.now,
+}: AppProps) {
   const { snapshot, error } = useHostsSnapshot(port);
   const [selected, setSelected] = useState<SpaceKey | null>(null);
   const [allSpaces, setAllSpaces] = useState(false);
@@ -232,6 +244,21 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
     return { ...result, focusedTile: result.focusedTile ?? firstTileId(root) };
   }, [layout.snapshot, selected, snapshot, states]);
 
+  const mountedTerminal = useMemo<TerminalMount | null>(() => {
+    if (selected === null) return null;
+    const hostView = snapshot?.hosts.find((candidate) => candidate.hostId === selected.hostId);
+    const termId = activeTerminals.get(spaceKeyId(selected));
+    const summary = hostView?.spaces
+      .find((candidate) => candidate.key.path === selected.path)
+      ?.terminals.find((terminal) => terminal.id === termId);
+    if (hostView === undefined || summary === undefined) return null;
+    return {
+      hostId: selected.hostId,
+      termId: summary.id,
+      label: { name: summary.name, host: hostView.name, state: summary.state },
+    };
+  }, [activeTerminals, selected, snapshot]);
+
   const changeSpaceState = useCallback(
     (space: SpaceKey, change: (state: ClientSpaceState) => ClientSpaceState) => {
       const { hostId, path } = space;
@@ -311,6 +338,9 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
           onSelectTab={selectTab}
           onSplit={layout.split}
           onClose={layout.close}
+          terminalPort={terminalPort}
+          terminal={mountedTerminal}
+          {...(createAdapter === undefined ? {} : { createAdapter })}
         />
       )}
       <CommandPalette
