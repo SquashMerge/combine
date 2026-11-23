@@ -10,6 +10,18 @@ import {
   RETRY_HOST_COMMAND,
   SET_CLIENT_SPACE_STATE_COMMAND,
   SET_LAST_SPACE_COMMAND,
+  TERMINAL_OPEN_STREAM_COMMAND,
+  TERMINAL_CLOSE_STREAM_COMMAND,
+  TERMINAL_ATTACH_COMMAND,
+  TERMINAL_RESUME_COMMAND,
+  TERMINAL_DETACH_COMMAND,
+  TERMINAL_ACK_COMMAND,
+  TERMINAL_RESIZE_COMMAND,
+  TERMINAL_FOCUS_COMMAND,
+  TERMINAL_SET_DISPLAY_COMMAND,
+  TERMINAL_REQUEST_OWNERSHIP_COMMAND,
+  TERMINAL_INPUT_COMMAND,
+  TERMINAL_AUTOMATIC_REPLY_COMMAND,
   UNWATCH_LAYOUT_COMMAND,
   WATCH_LAYOUT_COMMAND,
 } from '../../src/ipc/names';
@@ -28,6 +40,18 @@ const contract = JSON.parse(
     watchLayout: string;
     unwatchLayout: string;
     mutateLayout: string;
+    terminalOpenStream: string;
+    terminalCloseStream: string;
+    terminalAttach: string;
+    terminalResume: string;
+    terminalDetach: string;
+    terminalAck: string;
+    terminalResize: string;
+    terminalFocus: string;
+    terminalSetDisplay: string;
+    terminalRequestOwnership: string;
+    terminalInput: string;
+    terminalAutomaticReply: string;
   };
 };
 
@@ -42,4 +66,16 @@ it('matches the shared ipc contract fixture', () => {
   expect(WATCH_LAYOUT_COMMAND).toBe(contract.commands.watchLayout);
   expect(UNWATCH_LAYOUT_COMMAND).toBe(contract.commands.unwatchLayout);
   expect(MUTATE_LAYOUT_COMMAND).toBe(contract.commands.mutateLayout);
+  expect(TERMINAL_OPEN_STREAM_COMMAND).toBe(contract.commands.terminalOpenStream);
+  expect(TERMINAL_CLOSE_STREAM_COMMAND).toBe(contract.commands.terminalCloseStream);
+  expect(TERMINAL_ATTACH_COMMAND).toBe(contract.commands.terminalAttach);
+  expect(TERMINAL_RESUME_COMMAND).toBe(contract.commands.terminalResume);
+  expect(TERMINAL_DETACH_COMMAND).toBe(contract.commands.terminalDetach);
+  expect(TERMINAL_ACK_COMMAND).toBe(contract.commands.terminalAck);
+  expect(TERMINAL_RESIZE_COMMAND).toBe(contract.commands.terminalResize);
+  expect(TERMINAL_FOCUS_COMMAND).toBe(contract.commands.terminalFocus);
+  expect(TERMINAL_SET_DISPLAY_COMMAND).toBe(contract.commands.terminalSetDisplay);
+  expect(TERMINAL_REQUEST_OWNERSHIP_COMMAND).toBe(contract.commands.terminalRequestOwnership);
+  expect(TERMINAL_INPUT_COMMAND).toBe(contract.commands.terminalInput);
+  expect(TERMINAL_AUTOMATIC_REPLY_COMMAND).toBe(contract.commands.terminalAutomaticReply);
 });
