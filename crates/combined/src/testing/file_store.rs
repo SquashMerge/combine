@@ -11,7 +11,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::model::{ContentHash, SpaceId};
 use crate::ports::{
-    valid_store_path, FileChange, FileStore, StoreError, StoreRevision, StoredFile, WriteOutcome,
+    valid_store_path, DirListing, EntryKind, FileChange, FileStore, ListedEntry, StoreError,
+    StoreRevision, StoredFile, WriteOutcome,
 };
 
 #[derive(Default)]
@@ -24,6 +25,7 @@ struct SpaceFiles {
     watched: bool,
     write_counts: BTreeMap<String, u64>,
     read_counts: BTreeMap<String, u64>,
+    list_counts: BTreeMap<String, u64>,
     fail_next_write: Option<StoreError>,
 }
 
@@ -161,6 +163,17 @@ impl MemoryFileStore {
             .copied()
             .unwrap_or(0)
     }
+
+    /// How many listings of the folder reached the store, after the path check.
+    pub fn list_count(&self, space: &SpaceId, path: &str) -> u64 {
+        let state = self.state();
+        state
+            .spaces
+            .get(space)
+            .and_then(|entry| entry.list_counts.get(path))
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 #[async_trait]
@@ -232,6 +245,48 @@ impl FileStore for MemoryFileStore {
             hash,
             read_only,
         })
+    }
+
+    async fn list_dir(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Option<DirListing>, StoreError> {
+        if !valid_store_path(path) {
+            return Err(StoreError::InvalidPath);
+        }
+        let mut state = self.state();
+        let entry = state.spaces.entry(space.clone()).or_default();
+        *entry.list_counts.entry(path.to_string()).or_default() += 1;
+        let prefix = format!("{path}/");
+        let mut found: BTreeMap<&str, EntryKind> = BTreeMap::new();
+        for key in entry.files.keys() {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((name, _)) => {
+                    found.insert(name, EntryKind::Directory);
+                }
+                None => {
+                    found.entry(rest).or_insert(EntryKind::File);
+                }
+            }
+        }
+        if found.is_empty() {
+            return Ok(None);
+        }
+        let truncated = found.len() > max_entries;
+        let entries = found
+            .into_iter()
+            .take(max_entries)
+            .map(|(name, kind)| ListedEntry {
+                name: name.to_string(),
+                kind,
+            })
+            .collect();
+        Ok(Some(DirListing { entries, truncated }))
     }
 
     async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError> {

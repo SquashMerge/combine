@@ -147,6 +147,8 @@ impl IpcTerminalEvent {
             DaemonMessage::Welcome(_)
             | DaemonMessage::Terminals(_)
             | DaemonMessage::Layout(_)
+            | DaemonMessage::Templates(_)
+            | DaemonMessage::Spawned(_)
             | DaemonMessage::Data(_) => return None,
         })
     }

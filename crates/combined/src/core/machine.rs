@@ -34,6 +34,7 @@ const NOT_SENT: &str = "the cursor names an event that was not sent";
 const UNEXPECTED_HELLO: &str = "unexpected hello";
 const UNEXPECTED_WATCH: &str = "unexpected watch_terminals";
 const UNEXPECTED_LAYOUT: &str = "unexpected layout message";
+const UNEXPECTED_SPAWN: &str = "unexpected spawn message";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
 const REFUSED_INPUT: &str = "the backend refused input for this attachment";
@@ -414,6 +415,20 @@ impl Core {
                 ErrorCode::InvalidRequest,
                 UNEXPECTED_LAYOUT,
                 Some(mutate.request),
+                None,
+            ),
+            ClientMessage::ListTemplates(list) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_SPAWN,
+                Some(list.request),
+                None,
+            ),
+            ClientMessage::SpawnTerminal(spawn) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_SPAWN,
+                Some(spawn.request),
                 None,
             ),
             ClientMessage::UnwatchLayout(_) => self.send_error(

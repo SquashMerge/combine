@@ -214,6 +214,28 @@ pub fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// Makes a FIFO at `path`, creating its folder. Pair it with [`release_fifo`].
+pub fn make_fifo(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let made = Command::new("/usr/bin/mkfifo").arg(path).status().unwrap();
+    assert!(made.success(), "mkfifo failed");
+}
+
+/// Frees anyone blocked opening or reading the FIFO at `path`: opens it for writing without
+/// waiting for a reader, writes `bytes` and closes it, so a blocked open returns and a blocked
+/// read reaches the end. A test calls it before asserting, so a regression that blocks on the
+/// FIFO fails the test instead of hanging it.
+pub fn release_fifo(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut writer = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .unwrap();
+    let _ = writer.write_all(bytes);
+}
+
 /// How long a test waits for the daemon to send something before it fails.
 pub const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -379,6 +401,24 @@ fn start_server(
         options,
     )
     .unwrap()
+}
+
+/// Starts a server on `backend` and `store`, which a test keeps so it can start another server
+/// on the same pair, with the default timing.
+pub fn server_on(
+    scratch: &ShortTempDir,
+    name: &str,
+    backend: Arc<FakeBackend>,
+    store: Arc<dyn FileStore>,
+) -> ServerHandle {
+    start_server(
+        scratch,
+        name,
+        backend,
+        "host-a",
+        ServeOptions::default(),
+        Some((store, LayoutTiming::default())),
+    )
 }
 
 /// What [`layout_server`] started.

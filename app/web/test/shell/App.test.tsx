@@ -161,8 +161,12 @@ describe('App', () => {
       const clientStatePort = new MemoryClientStatePort(states);
       render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={clientStatePort} />);
       await waitFor(() => expect(current()[0]?.textContent).toBe('alpha'));
-      expect(document.querySelector('[data-term-id][aria-current="true"]')).toBeNull();
-      expect(clientStatePort.writes).toEqual([]);
+      await waitFor(() => expect(document.querySelector('[data-term-id="t1"][aria-current="true"]')).not.toBeNull());
+      expect(document.querySelector('[data-term-id="t9"]')).toBeNull();
+      expect(document.querySelectorAll('[data-term-id][aria-current="true"]')).toHaveLength(1);
+      expect(clientStatePort.writes).toEqual([
+        expect.objectContaining({ kind: 'space', hostId: HOST_A, path: '/src/alpha', state: expect.objectContaining({ activeTerminal: 't1' }) }),
+      ]);
     });
 
     it('keeps each space its own active terminal', async () => {
@@ -210,16 +214,18 @@ describe('App', () => {
         clientStatePort.resolve(HOST_B, defaultClientState());
       });
       fireEvent.click(screen.getByRole('button', { name: 'mimir' }));
-      expect(clientStatePort.writes).toEqual([{ kind: 'last', hostId: HOST_B, spaceId: '/src/mimir', selectedAtMs: '1001' }]);
+      expect(clientStatePort.writes[0]).toEqual({ kind: 'last', hostId: HOST_B, spaceId: '/src/mimir', selectedAtMs: '1001' });
+      expect(clientStatePort.writes).toHaveLength(2);
+      expect(clientStatePort.writes[1]).toMatchObject({ kind: 'space', path: '/src/mimir', state: { activeTerminal: 't3' } });
       fireEvent.click(document.querySelector('[data-term-id="t4"] button') as Element);
-      expect(clientStatePort.writes).toHaveLength(3);
-      expect(clientStatePort.writes[1]).toMatchObject({
+      expect(clientStatePort.writes).toHaveLength(4);
+      expect(clientStatePort.writes[2]).toMatchObject({
         kind: 'space',
         hostId: HOST_B,
         path: '/src/mimir',
         state: { activeTerminal: 't4' },
       });
-      expect(clientStatePort.writes[2]).toMatchObject({ kind: 'last', selectedAtMs: '1002' });
+      expect(clientStatePort.writes[3]).toMatchObject({ kind: 'last', selectedAtMs: '1002' });
       expect(document.querySelector('[data-term-id="t4"][aria-current="true"]')).not.toBeNull();
     });
 

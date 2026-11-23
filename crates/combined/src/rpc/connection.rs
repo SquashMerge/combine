@@ -173,6 +173,9 @@ fn write_one<W: Write>(out: &mut W, message: &DaemonMessage) -> Result<(), Write
                 DaemonMessage::Terminals(terminals) => {
                     ("the terminal list".to_string(), terminals.request)
                 }
+                DaemonMessage::Templates(templates) => {
+                    ("the template list".to_string(), Some(templates.request))
+                }
                 other => (format!("a {} message", other.type_name()), None),
             };
             write_message(

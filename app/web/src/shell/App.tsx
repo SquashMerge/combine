@@ -12,16 +12,18 @@ import {
 import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
-import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
+import type { ClientStatePort, HostsPort, LayoutPort, SpawnPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import type { HostsSnapshot } from '../model/hosts';
 import { type LayoutSnapshot, firstTileId, layoutTiles } from '../model/layout';
+import { AddTerminalMenu } from './AddTerminalMenu';
 import { CommandPalette } from './CommandPalette';
 import { SpaceRail } from './SpaceRail';
 import { type TerminalMount, TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
 import { useSpaceLayout } from './useSpaceLayout';
+import { useAutoOpenTerminal } from './useAutoOpenTerminal';
 import { useHostsSnapshot } from './useHostsSnapshot';
 import './shell.css';
 
@@ -29,6 +31,7 @@ interface AppProps {
   port: HostsPort;
   clientStatePort: ClientStatePort;
   layoutPort: LayoutPort;
+  spawnPort?: SpawnPort;
   terminalPort: TerminalPort;
   createAdapter?: XtermAdapterFactory;
   newTileId?: () => string;
@@ -57,6 +60,7 @@ export function App({
   port,
   clientStatePort,
   layoutPort,
+  spawnPort,
   terminalPort,
   createAdapter,
   newTileId,
@@ -288,6 +292,8 @@ export function App({
     [clientStatePort, persist, updateStates],
   );
 
+  const autoOpen = useAutoOpenTerminal(snapshot, selected, states, changeSpaceState);
+
   const focusTile = useCallback(
     (tile: string) => {
       if (selected === null) return;
@@ -336,6 +342,16 @@ export function App({
         onSelectTerminal={selectTerminal}
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
+        actions={
+          spawnPort === undefined ? undefined : (
+            <AddTerminalMenu
+              port={spawnPort}
+              snapshot={snapshot}
+              selected={selected}
+              onSpawned={autoOpen.activateWhenListed}
+            />
+          )
+        }
       />
       {shownLayout === null && layout.error !== null && (
         <p className="layout-error" role="alert">

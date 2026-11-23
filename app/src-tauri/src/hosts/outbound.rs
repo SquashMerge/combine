@@ -19,6 +19,7 @@ const MAX_KINDS: usize = 1024;
 pub enum RequestKind {
     Terminals,
     Layout,
+    Spawn,
     Attach,
     Resume,
 }

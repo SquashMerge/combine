@@ -1,18 +1,16 @@
 //! The host's terminals and their spaces, as `terminals` snapshots report them.
 
-use std::collections::BTreeMap;
-
 use combine_protocol::{RequestId, SpaceInfo, SpaceKind, TerminalInfo, TerminalState, Terminals};
 
 use super::spaces::Spaces;
-use crate::model::{RootKind, Space, TermEvent, TermInfo, TermState};
+use crate::model::{RootKind, Space, SpaceId, TermEvent, TermInfo, TermState};
 use crate::ports::GitProbe;
 
 /// What the backend last told the daemon about its terminals, and whether that
 /// changed since [`take_changed`](Self::take_changed) last said so.
 pub struct TerminalList {
     spaces: Spaces,
-    terminals: BTreeMap<String, TermInfo>,
+    terminals: Vec<TermInfo>,
     changed: bool,
 }
 
@@ -20,38 +18,43 @@ impl TerminalList {
     pub fn new(probe: Box<dyn GitProbe>) -> TerminalList {
         TerminalList {
             spaces: Spaces::new(probe),
-            terminals: BTreeMap::new(),
+            terminals: Vec::new(),
             changed: false,
         }
     }
 
-    /// Replaces the table with the backend's list.
+    /// Replaces the table with the backend's list, in its order. The first of any duplicate IDs wins.
     pub fn apply_list(&mut self, list: &[TermInfo]) {
         self.spaces.apply_list(list);
-        self.terminals = list
-            .iter()
-            .map(|info| (info.id.0.clone(), info.clone()))
-            .collect();
+        self.terminals.clear();
+        for info in list {
+            if !self.terminals.iter().any(|known| known.id == info.id) {
+                self.terminals.push(info.clone());
+            }
+        }
         self.changed = true;
     }
 
-    /// `Created` and `Changed` insert or replace a terminal, `Exited` keeps it
-    /// with its exit code and `Lost` removes it. `Restarted` changes nothing.
+    /// `Created` and `Changed` replace a known terminal in place and append an unknown one,
+    /// `Exited` keeps it with its exit code and `Lost` removes it. `Restarted` changes nothing.
     pub fn apply_event(&mut self, event: &TermEvent) {
         self.spaces.apply_event(event);
         match event {
             TermEvent::Created(info) | TermEvent::Changed(info) => {
-                self.terminals.insert(info.id.0.clone(), info.clone());
+                match self.terminals.iter_mut().find(|known| known.id == info.id) {
+                    Some(known) => *known = info.clone(),
+                    None => self.terminals.push(info.clone()),
+                }
             }
             TermEvent::Exited { id, exit_code } => {
-                if let Some(info) = self.terminals.get_mut(&id.0) {
+                if let Some(info) = self.terminals.iter_mut().find(|known| known.id == *id) {
                     info.state = TermState::Exited {
                         exit_code: *exit_code,
                     };
                 }
             }
             TermEvent::Lost { id } => {
-                self.terminals.remove(&id.0);
+                self.terminals.retain(|known| known.id != *id);
             }
             TermEvent::Restarted { .. } => return,
         }
@@ -63,11 +66,17 @@ impl TerminalList {
         std::mem::take(&mut self.changed)
     }
 
-    /// A full snapshot: terminals sorted by ID, and the spaces that hold them.
+    /// Whether any listed terminal is in `space`.
+    pub fn space_listed(&self, space: &SpaceId) -> bool {
+        self.spaces.contains(space)
+    }
+
+    /// A full snapshot: terminals in the backend's list order, and the spaces that hold them
+    /// sorted by ID.
     pub fn snapshot(&self, request: Option<RequestId>) -> Terminals {
         Terminals {
             request,
-            terminals: self.terminals.values().map(terminal_info).collect(),
+            terminals: self.terminals.iter().map(terminal_info).collect(),
             spaces: self.spaces.spaces().into_iter().map(space_info).collect(),
         }
     }

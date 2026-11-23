@@ -3,6 +3,9 @@
 
 use combine_protocol::{Display, Fidelity, TermId};
 
+use crate::model::SpawnSpec;
+use crate::ports::BackendError;
+
 use super::world::{lock, Shared};
 use super::{FakeAttachmentRef, FakeCall, Half};
 
@@ -60,6 +63,11 @@ impl FakeControl {
         lock(&self.world).calls()
     }
 
+    /// Every spawn the fake was asked for, in order, refused ones included.
+    pub fn spawn_specs(&self) -> Vec<SpawnSpec> {
+        lock(&self.world).spawn_specs()
+    }
+
     /// In attach order, closed ones included.
     pub fn attachments(&self, term: &TermId) -> Vec<FakeAttachmentRef> {
         lock(&self.world).attachments_of(term)
@@ -105,6 +113,11 @@ impl FakeControl {
     /// The next `count` opens of the terminal fail halfway.
     pub fn fail_next_opens(&self, term: &TermId, count: u32) {
         lock(&self.world).fail_next_opens(term, count);
+    }
+
+    /// The next spawn fails with `error`: no terminal, no event and no `FakeCall::Spawn`.
+    pub fn fail_next_spawn(&self, error: BackendError) {
+        lock(&self.world).fail_next_spawn(error);
     }
 
     pub fn restart_backend(&self) {

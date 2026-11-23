@@ -1,7 +1,8 @@
 import type { ClientSpaceState, ClientState } from '../model/clientState';
 import type { HostsSnapshot } from '../model/hosts';
-import type { DecimalU64, HostId } from '../model/ids';
+import type { DecimalU64, HostId, TermId } from '../model/ids';
 import type { LayoutEvent, LayoutOp } from '../model/layout';
+import type { SpawnSource, TemplateList } from '../model/spawn';
 
 export type Unsubscribe = () => void;
 
@@ -27,4 +28,9 @@ export interface LayoutPort {
     ops: LayoutOp[],
   ): Promise<DecimalU64>;
   onLayoutEvent(listener: (event: LayoutEvent) => void): Promise<Unsubscribe>;
+}
+
+export interface SpawnPort {
+  listTemplates(hostId: HostId, space: string): Promise<TemplateList>;
+  spawnTerminal(hostId: HostId, space: string, source: SpawnSource): Promise<TermId>;
 }

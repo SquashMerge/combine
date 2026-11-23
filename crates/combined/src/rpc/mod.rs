@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::core::{Driver, LayoutTiming, TerminalList};
 use crate::model::Millis;
-use crate::ports::FileStore;
+use crate::ports::{FileStore, ProjectDirs};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
@@ -66,6 +66,8 @@ pub struct ServerParts {
     /// Where spaces' `layout.json` files are read and written.
     pub file_store: Arc<dyn FileStore>,
     pub layout_timing: LayoutTiming,
+    /// Checks the folders a spawn would start in.
+    pub project_dirs: Box<dyn ProjectDirs>,
 }
 
 /// Counters the server keeps for whoever started it.

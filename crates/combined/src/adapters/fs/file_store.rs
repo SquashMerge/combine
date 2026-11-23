@@ -1,5 +1,8 @@
 //! The per-space file store on disk, at `<space>/.workspace/<path>`.
 //!
+//! Panel reads use `read`, which looks at the fallback copy first; `list_dir` lists only the
+//! project's folder.
+//!
 //! A pulled repository can put a symlink at `.workspace`, at any directory under it or at the
 //! file itself, so the store refuses every symlink on the way: each component is checked with
 //! `symlink_metadata`, the verified directory is canonicalized and must still lie under the
@@ -11,14 +14,22 @@
 //! for a symlink, a path outside `.workspace` or a relative space is not such a failure: it
 //! stays `Unavailable` and never reaches the fallback.
 //!
-//! This is not race-free. Std offers no descriptor-relative or `O_NOFOLLOW` open without
-//! `unsafe` or a new dependency, so a process that can modify the space's folder while a call
-//! runs can still swap a component for a symlink between the check and the open. The checks
-//! close the case of a symlink already present in the working tree, not a concurrent attacker.
+//! A read takes only a regular file. A FIFO, device, socket or directory at the file's path,
+//! in the project or as the fallback copy, is refused with "is not a regular file" and never
+//! read: the daemon reads on its one server loop, and a blocking open or read of a FIFO would
+//! stall every client. The file is opened with `O_NONBLOCK`, so even a FIFO swapped in after
+//! the type check doesn't block the open, and `O_NOFOLLOW`; its type is then checked again on
+//! the opened handle, before any byte is read.
+//!
+//! The directory checks are not race-free. Std offers no descriptor-relative open without
+//! `unsafe`, so a process that can modify the space's folder while a call runs can still swap
+//! a directory component for a symlink between the check and the open. The checks close the
+//! case of a symlink already present in the working tree, not a concurrent attacker.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, Read as _};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -31,7 +42,8 @@ use super::safe_write::write_atomic;
 use super::watcher::SpaceWatcher;
 use crate::model::{ContentHash, SpaceId};
 use crate::ports::{
-    valid_store_path, FileChange, FileStore, StoreError, StoreRevision, StoredFile, WriteOutcome,
+    valid_store_path, DirListing, EntryKind, FileChange, FileStore, ListedEntry, StoreError,
+    StoreRevision, StoredFile, WriteOutcome,
 };
 
 /// Files under each space's `.workspace/` folder. Revisions are kept in memory: each space's
@@ -120,7 +132,7 @@ fn is_denied(error: &io::Error) -> bool {
     )
 }
 
-/// Why [`checked_file`] gave up: the store refused the path, or creating a folder was denied.
+/// Why [`checked_folder`] gave up: the store refused the path, or creating a folder was denied.
 enum Checked {
     Refused(StoreError),
     Denied(io::Error),
@@ -150,16 +162,26 @@ fn created(error: io::Error) -> Checked {
     }
 }
 
-/// Verifies `<space>/.workspace` and every directory down to the file's parent, and returns the
-/// file's path inside the canonical parent. `None` means a component is missing, which only a
-/// read without `create` reaches. A symlink at any component, including the file, is refused.
+/// Verifies `<space>/.workspace` and every directory in `folders` below it, and returns the
+/// canonical path of the last one. `None` means a component is missing, which only a call
+/// without `create` reaches. A symlink or non-directory at any component is refused, and the
+/// canonical folder must still lie under the canonical `.workspace`.
 ///
 /// The checks and the later open are separate steps: see the module note on the race.
-fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<PathBuf>, Checked> {
-    file_path(space, path)?;
-    let workspace = Path::new(&space.0).join(".workspace");
-    let segments: Vec<&str> = path.split('/').collect();
-    let (name, folders) = segments.split_last().ok_or(StoreError::InvalidPath)?;
+fn checked_folder(
+    space: &SpaceId,
+    folders: &[&str],
+    create: bool,
+) -> Result<Option<PathBuf>, Checked> {
+    let folder = Path::new(&space.0);
+    if !folder.is_absolute() {
+        return Err(StoreError::Unavailable(format!(
+            "space {} is not an absolute folder",
+            space.0
+        ))
+        .into());
+    }
+    let workspace = folder.join(".workspace");
     let mut dir = workspace.clone();
     for step in std::iter::once(None).chain(folders.iter().map(Some)) {
         match step {
@@ -188,10 +210,23 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
         }
     }
     let root = std::fs::canonicalize(&workspace).map_err(unavailable)?;
-    let parent = std::fs::canonicalize(&dir).map_err(unavailable)?;
-    if !parent.starts_with(&root) {
+    let canonical = std::fs::canonicalize(&dir).map_err(unavailable)?;
+    if !canonical.starts_with(&root) {
         return Err(refused(&dir, "resolves outside .workspace").into());
     }
+    Ok(Some(canonical))
+}
+
+/// Verifies the folders down to the file's parent with [`checked_folder`] and returns the
+/// file's path inside the canonical parent. `None` means a folder is missing. A symlink at the
+/// file itself is refused too.
+fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<PathBuf>, Checked> {
+    file_path(space, path)?;
+    let segments: Vec<&str> = path.split('/').collect();
+    let (name, folders) = segments.split_last().ok_or(StoreError::InvalidPath)?;
+    let Some(parent) = checked_folder(space, folders, create)? else {
+        return Ok(None);
+    };
     let file = parent.join(name);
     match std::fs::symlink_metadata(&file) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -204,18 +239,62 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
     Ok(Some(file))
 }
 
+/// Lists the entries of `dir`, skipping names that aren't UTF-8. Stops after `max_entries + 1`
+/// kept entries, sorts them by name and cuts the list to `max_entries`.
+fn read_listing(dir: &Path, max_entries: usize) -> Result<DirListing, StoreError> {
+    let keep = max_entries.saturating_add(1);
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(unavailable)? {
+        let entry = entry.map_err(unavailable)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let file_type = entry.file_type().map_err(unavailable)?;
+        let kind = if file_type.is_symlink() {
+            EntryKind::Symlink
+        } else if file_type.is_dir() {
+            EntryKind::Directory
+        } else if file_type.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        entries.push(ListedEntry { name, kind });
+        if entries.len() >= keep {
+            break;
+        }
+    }
+    entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    let truncated = entries.len() > max_entries;
+    entries.truncate(max_entries);
+    Ok(DirListing { entries, truncated })
+}
+
 /// What a bounded read found.
 enum Bounded {
     Bytes(Vec<u8>),
     /// More than the bound: the file's size, as far as is known.
     TooLarge(u64),
+    /// Not a regular file: nothing was read.
+    NotRegular,
 }
 
 /// Reads `path`, but never more than `max_bytes + 1` bytes of it, so a huge file, or one that
-/// grows during the read, costs at most that.
+/// grows during the read, costs at most that. Only a regular file is read, and neither the
+/// open nor the read waits on a FIFO: see the module note.
 fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
+    if !std::fs::symlink_metadata(path)?.file_type().is_file() {
+        return Ok(Bounded::NotRegular);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Ok(Bounded::NotRegular);
+    }
+    let len = meta.len();
     let cap = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -244,7 +323,10 @@ impl FileStore for FsFileStore {
         file_path(space, path)?;
         if let Some(copy) = self.fallback_file(space, path) {
             match read_bounded(&copy, max_bytes) {
-                Ok(found) => return found_file(found, revision, true).map(Some),
+                Ok(found) => {
+                    let what = format!("the fallback copy of {path}");
+                    return found_file(found, revision, true, &what).map(Some);
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(unavailable(error)),
             }
@@ -253,7 +335,9 @@ impl FileStore for FsFileStore {
             return Ok(None);
         };
         match read_bounded(&file, max_bytes) {
-            Ok(found) => found_file(found, revision, false).map(Some),
+            Ok(found) => {
+                found_file(found, revision, false, &format!(".workspace/{path}")).map(Some)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(unavailable(error)),
         }
@@ -309,6 +393,20 @@ impl FileStore for FsFileStore {
         })
     }
 
+    async fn list_dir(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Option<DirListing>, StoreError> {
+        file_path(space, path)?;
+        let folders: Vec<&str> = path.split('/').collect();
+        let Some(dir) = checked_folder(space, &folders, false).map_err(Checked::into_store)? else {
+            return Ok(None);
+        };
+        read_listing(&dir, max_entries).map(Some)
+    }
+
     async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError> {
         let revisions = self
             .revisions
@@ -348,14 +446,19 @@ impl FileStore for FsFileStore {
     }
 }
 
+/// `what` names the file in the refusal of one that isn't regular.
 fn found_file(
     found: Bounded,
     revision: StoreRevision,
     read_only: bool,
+    what: &str,
 ) -> Result<StoredFile, StoreError> {
     match found {
         Bounded::Bytes(bytes) => Ok(stored(bytes, revision, read_only)),
         Bounded::TooLarge(size) => Err(StoreError::TooLarge { size, read_only }),
+        Bounded::NotRegular => Err(StoreError::Unavailable(format!(
+            "{what} is not a regular file"
+        ))),
     }
 }
 

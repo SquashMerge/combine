@@ -12,6 +12,7 @@ use crate::adapters::fs::data_dir::DataDir;
 use crate::adapters::fs::file_store::FsFileStore;
 use crate::adapters::fs::git_probe::FsGitProbe;
 use crate::adapters::fs::host_id;
+use crate::adapters::fs::project_dirs::FsProjectDirs;
 use crate::core::{Core, CoreConfig, Driver, LayoutTiming, TerminalList};
 use crate::ports::{FileStore, TerminalBackend};
 use crate::rpc::socket::{self, BindError};
@@ -192,6 +193,7 @@ pub fn server_parts_with(
         clock: MonotonicClock::new(),
         file_store,
         layout_timing,
+        project_dirs: Box::new(FsProjectDirs),
     })
 }
 
