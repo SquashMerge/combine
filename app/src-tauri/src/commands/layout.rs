@@ -188,6 +188,38 @@ pub enum IpcLayoutEvent {
 /// Publishes layout traffic to the webview as `layout-changed` events.
 pub struct TauriLayoutSink(pub AppHandle);
 
+fn snapshot_event(
+    host_id: &HostId,
+    request: Option<RequestId>,
+    snapshot: LayoutSnapshot,
+) -> IpcLayoutEvent {
+    IpcLayoutEvent::Snapshot {
+        host_id: host_id.0.clone(),
+        request: request.map(Into::into),
+        snapshot: snapshot.into(),
+    }
+}
+
+fn error_event(
+    host_id: &HostId,
+    request: RequestId,
+    code: ErrorCode,
+    message: String,
+) -> IpcLayoutEvent {
+    IpcLayoutEvent::Error {
+        host_id: host_id.0.clone(),
+        request: request.into(),
+        code,
+        message,
+    }
+}
+
+fn disconnected_event(host_id: &HostId) -> IpcLayoutEvent {
+    IpcLayoutEvent::Disconnected {
+        host_id: host_id.0.clone(),
+    }
+}
+
 impl TauriLayoutSink {
     fn emit(&self, event: IpcLayoutEvent) {
         if let Err(err) = self.0.emit(LAYOUT_EVENT, event) {
@@ -198,26 +230,15 @@ impl TauriLayoutSink {
 
 impl LayoutSink for TauriLayoutSink {
     fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
-        self.emit(IpcLayoutEvent::Snapshot {
-            host_id: host_id.0.clone(),
-            request: request.map(Into::into),
-            snapshot: snapshot.into(),
-        });
+        self.emit(snapshot_event(host_id, request, snapshot));
     }
 
     fn layout_error(&self, host_id: &HostId, request: RequestId, code: ErrorCode, message: String) {
-        self.emit(IpcLayoutEvent::Error {
-            host_id: host_id.0.clone(),
-            request: request.into(),
-            code,
-            message,
-        });
+        self.emit(error_event(host_id, request, code, message));
     }
 
     fn layout_disconnected(&self, host_id: &HostId) {
-        self.emit(IpcLayoutEvent::Disconnected {
-            host_id: host_id.0.clone(),
-        });
+        self.emit(disconnected_event(host_id));
     }
 }
 
@@ -336,27 +357,24 @@ mod tests {
         );
     }
 
-    fn sample_snapshot() -> IpcLayoutSnapshot {
-        IpcLayoutSnapshot {
+    fn sample_snapshot() -> LayoutSnapshot {
+        let tile = |id: &str, panels: &[&str], active: Option<&str>| LayoutNode::Tile {
+            id: id.to_string(),
+            panels: panels.iter().map(|p| p.to_string()).collect(),
+            active: active.map(str::to_string),
+        };
+        LayoutSnapshot {
             space: "/work".to_string(),
-            layout_revision: DecimalU64(9_007_199_254_740_993),
-            root: IpcLayoutNode::Split {
+            layout_revision: 9_007_199_254_740_993,
+            root: LayoutNode::Split {
                 dir: SplitDirection::H,
-                ratio: 0.25,
-                a: Box::new(IpcLayoutNode::Tile {
-                    id: "t1".to_string(),
-                    panels: vec!["p1".to_string(), "p2".to_string()],
-                    active: Some("p2".to_string()),
-                }),
-                b: Box::new(IpcLayoutNode::Tile {
-                    id: "t2".to_string(),
-                    panels: Vec::new(),
-                    active: None,
-                }),
+                ratio: Ratio::new(0.25).expect("finite"),
+                a: Box::new(tile("t1", &["p1", "p2"], Some("p2"))),
+                b: Box::new(tile("t2", &[], None)),
             },
             read_only: true,
             error: Some("layout.json is invalid".to_string()),
-            dropped: Some(IpcDroppedNotice {
+            dropped: Some(DroppedNotice {
                 op_count: 2,
                 message: "dropped".to_string(),
             }),
@@ -366,35 +384,85 @@ mod tests {
     #[test]
     fn layout_event_shapes_match_fixture() {
         let fixture = fixture("layout-event.json");
-        let snapshot = IpcLayoutEvent::Snapshot {
-            host_id: "host-1".to_string(),
-            request: Some(DecimalU64(7)),
-            snapshot: sample_snapshot(),
-        };
-        let push = IpcLayoutEvent::Snapshot {
-            host_id: "host-1".to_string(),
-            request: None,
-            snapshot: sample_snapshot(),
-        };
-        let error = IpcLayoutEvent::Error {
-            host_id: "host-1".to_string(),
-            request: DecimalU64(8),
-            code: ErrorCode::StaleLayout,
-            message: "stale".to_string(),
-        };
-        let disconnected = IpcLayoutEvent::Disconnected {
-            host_id: "host-1".to_string(),
-        };
+        let host = HostId("host-1".to_string());
+        let events = [
+            (
+                "snapshot",
+                snapshot_event(&host, Some(RequestId(7)), sample_snapshot()),
+            ),
+            ("push", snapshot_event(&host, None, sample_snapshot())),
+            (
+                "error",
+                error_event(
+                    &host,
+                    RequestId(8),
+                    ErrorCode::StaleLayout,
+                    "stale".to_string(),
+                ),
+            ),
+            ("disconnected", disconnected_event(&host)),
+        ];
+        for (name, event) in events {
+            assert_eq!(
+                serde_json::to_value(event).expect("json"),
+                fixture[name],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn op_shapes_match_fixture() {
+        let fixture = fixture("layout-event.json");
+        let ops = fixture["ops"].as_array().expect("ops array");
+        assert_eq!(ops.len(), 5);
+        let wire: Vec<LayoutOp> = ops
+            .iter()
+            .map(|op| {
+                let op: IpcLayoutOp = serde_json::from_value(op.clone()).expect("op decodes");
+                LayoutOp::try_from(op).expect("converts")
+            })
+            .collect();
         assert_eq!(
-            serde_json::to_value(snapshot).expect("json"),
-            fixture["snapshot"]
+            wire,
+            vec![
+                LayoutOp::SetActive {
+                    tile: "t1".to_string(),
+                    panel: "p2".to_string()
+                },
+                LayoutOp::SetRatio {
+                    leaves: vec!["t1".to_string(), "t2".to_string()],
+                    ratio: Ratio::new(0.4).expect("finite")
+                },
+                LayoutOp::MovePanel {
+                    panel: "p1".to_string(),
+                    to_tile: "t2".to_string(),
+                    index: 1
+                },
+                LayoutOp::SplitTile {
+                    tile: "t1".to_string(),
+                    dir: SplitDirection::V,
+                    new_tile: "t3".to_string(),
+                    ratio: Ratio::new(0.5).expect("finite"),
+                    panel: Some("p1".to_string())
+                },
+                LayoutOp::CloseTile {
+                    tile: "t3".to_string()
+                },
+            ]
         );
-        assert_eq!(serde_json::to_value(push).expect("json"), fixture["push"]);
-        assert_eq!(serde_json::to_value(error).expect("json"), fixture["error"]);
-        assert_eq!(
-            serde_json::to_value(disconnected).expect("json"),
-            fixture["disconnected"]
+    }
+
+    #[test]
+    fn malformed_ops_and_revisions_are_refused() {
+        assert!(
+            serde_json::from_value::<IpcLayoutOp>(json!({"op": "explode", "tile": "t1"})).is_err()
         );
+        assert!(serde_json::from_value::<IpcLayoutOp>(
+            json!({"op": "move_panel", "panel": "p1", "to_tile": "t2", "index": 1})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<DecimalU64>(json!(5)).is_err());
     }
 
     #[test]

@@ -435,6 +435,47 @@ mod tests {
     }
 
     #[test]
+    fn unrouted_errors_do_not_reach_layout_error() {
+        let (mut rig, received) = layout_rig();
+        let host = host_id(HOST_A);
+        let watch = rig
+            .outbound
+            .send(&host, RequestKind::Layout, |request| {
+                ClientMessage::WatchLayout(WatchLayout {
+                    request,
+                    space: "/work".to_string(),
+                })
+            })
+            .expect("registered");
+        read_client(&mut rig.daemon);
+        write_message(
+            &mut rig.daemon,
+            &error_for(RequestId(99), ErrorCode::UnknownSpace, "never sent"),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &DaemonMessage::Error(ErrorMessage {
+                code: ErrorCode::Internal,
+                message: "no request".to_string(),
+                request: None,
+                attachment: None,
+            }),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &error_for(watch, ErrorCode::StaleLayout, "sentinel"),
+        )
+        .expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::Error(host, watch, ErrorCode::StaleLayout, "sentinel".to_string())
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
     fn session_end_reports_layout_disconnected() {
         let (rig, received) = layout_rig();
         assert!(received.try_recv().is_err());

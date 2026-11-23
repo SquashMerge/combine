@@ -414,6 +414,60 @@ mod tests {
     }
 
     #[test]
+    fn layout_events_reach_the_layout_sink() {
+        use super::super::testing::LayoutEvent;
+        use combine_protocol::{LayoutNode, LayoutSnapshot};
+
+        let dir = ShortTempDir::new();
+        let (sink, snapshots) = RecordingSink::new();
+        let (layout_sink, received) = RecordingLayoutSink::new();
+        let service = HostsService::start(dir.path(), ServiceDeps::system(layout_sink), sink);
+        drop(snapshots);
+        let events: &dyn HostEvents = &*service.inner;
+        let host = host_id(HOST_A);
+        let snapshot = LayoutSnapshot {
+            space: "/work".to_string(),
+            layout_revision: 2,
+            root: LayoutNode::Tile {
+                id: "t1".to_string(),
+                panels: Vec::new(),
+                active: None,
+            },
+            read_only: false,
+            error: None,
+            dropped: None,
+        };
+        events.layout(&host, Some(RequestId(4)), snapshot.clone());
+        events.layout_error(
+            &host,
+            RequestId(5),
+            ErrorCode::StaleLayout,
+            "stale".to_string(),
+        );
+        events.layout_disconnected(&host);
+        let recv = |rx: &Receiver<LayoutEvent>| rx.recv_timeout(super::super::testing::WAIT);
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::Layout(
+                host.clone(),
+                Some(RequestId(4)),
+                snapshot
+            ))
+        );
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::Error(
+                host.clone(),
+                RequestId(5),
+                ErrorCode::StaleLayout,
+                "stale".to_string()
+            ))
+        );
+        assert_eq!(recv(&received), Ok(LayoutEvent::Disconnected(host)));
+        service.stop();
+    }
+
+    #[test]
     fn hosts_start_connecting_in_file_order() {
         let contents = file(&[
             r#"{"name":"zeta","ssh":"example@zeta"}"#,
