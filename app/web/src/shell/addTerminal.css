@@ -1,0 +1,10 @@
+.add-terminal {
+  position: relative;
+  display: inline-block;
+}
+
+.add-terminal .command {
+  font-family: monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
