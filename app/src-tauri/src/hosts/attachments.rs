@@ -85,6 +85,8 @@ struct HostState {
     connected: bool,
     pending: BTreeMap<u64, Target>,
     routes: BTreeMap<u64, Route>,
+    /// Counts the sessions started for this host, so a session's end can tell it was replaced.
+    session: u64,
 }
 
 #[derive(Debug, Default)]
@@ -107,14 +109,26 @@ impl RouterState {
             for target in state.pending.values_mut().filter(|t| owned(t)) {
                 *target = Target::Orphan;
             }
+            let mut finished = Vec::new();
             for (attachment, route) in state.routes.iter_mut().filter(|(_, r)| owned(&r.target)) {
                 route.target = Target::Orphan;
-                if !route.detached {
+                if route.detached {
+                    continue;
+                }
+                if let Some(cursor) = route.final_event {
+                    // The final event was delivered but never acked. The ack finishes the
+                    // attachment on the daemon, and a detach would not.
+                    let _ = outbound.send_untracked(&host_id, ClientMessage::Ack(Ack { cursor }));
+                    finished.push(*attachment);
+                } else {
                     let detach = ClientMessage::Detach(Detach {
                         attachment: AttachmentId(*attachment),
                     });
                     route.detached = outbound.send_untracked(&host_id, detach).is_ok();
                 }
+            }
+            for attachment in finished {
+                state.routes.remove(&attachment);
             }
         }
     }
@@ -281,19 +295,33 @@ impl Attachments {
         Ok(())
     }
 
-    /// A session for `host_id` is registered: nothing from an earlier session survives.
-    pub fn session_started(&self, host_id: &HostId) {
-        self.set_connected(host_id, true);
+    /// A session for `host_id` is registered: nothing from an earlier session survives. The
+    /// returned number names this session for [`Attachments::session_ended_by`].
+    pub fn session_started(&self, host_id: &HostId) -> u64 {
+        self.set_connected(host_id, true, None).unwrap_or_default()
     }
 
     /// The session for `host_id` is gone, and so are its pending requests and attachments.
     pub fn session_ended(&self, host_id: &HostId) {
-        self.set_connected(host_id, false);
+        self.set_connected(host_id, false, None);
     }
 
-    fn set_connected(&self, host_id: &HostId, connected: bool) {
+    /// Ends the session that `session_started` numbered `session`, unless a newer session for
+    /// the host has started since: that session's state is not this one's to clear.
+    pub fn session_ended_by(&self, host_id: &HostId, session: u64) {
+        self.set_connected(host_id, false, Some(session));
+    }
+
+    fn set_connected(&self, host_id: &HostId, connected: bool, only: Option<u64>) -> Option<u64> {
         let mut state = self.state();
         let host = state.host(host_id);
+        if only.is_some_and(|session| session != host.session) {
+            return None;
+        }
+        if connected {
+            host.session += 1;
+        }
+        let session = host.session;
         host.connected = connected;
         host.pending.clear();
         host.routes.clear();
@@ -301,6 +329,7 @@ impl Attachments {
             self.sink
                 .deliver(*stream, StreamDelivery::Connection { connected });
         }
+        Some(session)
     }
 
     /// Routes a daemon message. `None` means the router consumed it. Anything that is not an
@@ -1083,5 +1112,25 @@ mod tests {
             ),
             Err(ForwardError::UnknownAttachment)
         );
+    }
+
+    #[test]
+    fn closing_a_stream_after_the_final_event_sends_the_final_ack_and_no_detach() {
+        for final_event in [closed(10, 3), lost(10, 3)] {
+            let rig = Rig::with_streams();
+            rig.attached(S1, 10);
+            assert!(rig.route(final_event).is_none());
+            rig.seen();
+            rig.router.close_stream(&rig.outbound, S1);
+            assert_eq!(
+                rig.sent(),
+                [ClientMessage::Ack(Ack {
+                    cursor: cursor(10, 3)
+                })]
+            );
+            assert!(rig.route(data(10, 4)).is_none());
+            assert!(rig.sent().is_empty());
+            assert!(rig.router.state().host(&rig.host).routes.is_empty());
+        }
     }
 }
