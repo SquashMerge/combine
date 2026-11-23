@@ -8,3 +8,6 @@ export const LAYOUT_EVENT = 'layout-changed';
 export const WATCH_LAYOUT_COMMAND = 'watch_layout';
 export const UNWATCH_LAYOUT_COMMAND = 'unwatch_layout';
 export const MUTATE_LAYOUT_COMMAND = 'mutate_layout';
+export const SPAWN_EVENT = 'spawn-reply';
+export const LIST_TEMPLATES_COMMAND = 'list_templates';
+export const SPAWN_TERMINAL_COMMAND = 'spawn_terminal';
