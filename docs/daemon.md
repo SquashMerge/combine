@@ -77,7 +77,7 @@ The daemon owns each space's layout. Clients watch a space and change it with `m
 - **Writes:** a change is written 500 ms after the latest one and at most 2 s after the first. A space switch, an unwatch, a client disconnect and a clean shutdown write at once, unless the file is invalid. A crash or SIGKILL loses a change still waiting.
 - **Outside edits:** edit `layout.json` by hand or with `git` while the daemon runs and it reloads the file. If you edit a field the daemon has an unsaved change to, your edit wins and the daemon drops its change, and the client shows a notice.
 - **Read-only projects:** if `.workspace/` can't be written, the layout is kept in `<daemon data>/spaces/<sha256 of the space's folder path>/layout.json` and the client marks the space read-only. That file then takes priority: delete it to go back to the project's `layout.json`. While it exists, edits to the project's file are ignored.
-- **Symlinks:** the daemon refuses a symlink at `.workspace`, under it, or at `layout.json`.
+- **Symlinks:** the daemon refuses a symlink at `.workspace`, under it, or at `layout.json` or a `panel.json`; a template's `cwd` follows symlinks but must stay inside the project (SPEC.md, Terminal templates).
 
 ## Shutdown
 
@@ -85,14 +85,14 @@ SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout chang
 
 ## Check the bridge over ssh
 
-Until #23 lands this needs the interim `test-support` build and a daemon on `"backend": "fake"`, started by that build's `combined serve`. Keep its `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`, and use the build's absolute path below. With Remote Login on, this sends a `hello` for protocol version 3 through `combined connect` and prints the reply:
+Until #23 lands this needs the interim `test-support` build and a daemon on `"backend": "fake"`, started by that build's `combined serve`. Keep its `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`, and use the build's absolute path below. With Remote Login on, this sends a `hello` for protocol version 4 through `combined connect` and prints the reply:
 
 ```sh
-printf '\000\000\000\046\001{"type":"hello","protocol_version":3}' \
+printf '\000\000\000\046\001{"type":"hello","protocol_version":4}' \
   | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
 ```
 
-Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":3}`. The reply is a control frame holding `{"type":"welcome","protocol_version":3,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":4}`. The reply is a control frame holding `{"type":"welcome","protocol_version":4,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Check that no network port is open
 
