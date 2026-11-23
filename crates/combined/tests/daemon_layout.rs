@@ -325,6 +325,7 @@ fn unwritable_workspace_marks_read_only_and_writes_daemon_data() {
     let fallback = scratch.path().join("spaces");
     let work = daemon_support::work_dir(&scratch);
     fs::create_dir_all(work.join(".git")).unwrap();
+    refuse_default_herdr_core(&fallback, &scratch);
     let _restore = Restore(work.clone());
     fs::set_permissions(&work, fs::Permissions::from_mode(0o555)).unwrap();
     if fs::write(work.join("probe"), b"x").is_ok() {
@@ -339,6 +340,7 @@ fn unwritable_workspace_marks_read_only_and_writes_daemon_data() {
         PROMPT,
         |_, backend| seed_project_terminal(backend, &scratch),
     );
+    refuse_default_herdr_core(&server.socket, &scratch);
     let space = server.work.to_str().unwrap().to_string();
     let mut client = WireClient::open(&server.socket).0;
     assert!(!watch_space(&mut client, &space, 1).read_only);
@@ -358,9 +360,11 @@ fn daemon_restart_restores_identical_layout() {
     let scratch = ShortTempDir::new();
     let fallback = scratch.path().join("spaces");
     let store = || -> Arc<FsFileStore> { Arc::new(FsFileStore::with_fallback(&fallback)) };
+    refuse_default_herdr_core(&fallback, &scratch);
     let seed = |_: &_, backend: &_| seed_project_terminal(backend, &scratch);
 
     let mut first = layout_server(&scratch, "a", store(), HOUR, seed);
+    refuse_default_herdr_core(&first.socket, &scratch);
     let space = first.work.to_str().unwrap().to_string();
     let mut client = WireClient::open(&first.socket).0;
     watch_space(&mut client, &space, 1);
@@ -508,5 +512,38 @@ fn thirty_three_ops_is_invalid_request_end_to_end() {
         env.mutate(&mut client, 4, 1, vec![set_ratio(0.4)])
             .layout_revision,
         2
+    );
+}
+
+#[test]
+fn client_that_never_reads_layout_replies_is_disconnected() {
+    let env = Env::new(HOUR);
+    let mut client = env.client();
+    env.watch(&mut client, 1);
+    let stats = env.server.server.stats();
+    assert_eq!(stats.connections(), 1);
+
+    let mut frame = Vec::new();
+    combine_protocol::write_message(
+        &mut frame,
+        &ClientMessage::MutateLayout(MutateLayout {
+            request: RequestId(2),
+            space: env.name(),
+            base_layout_revision: 0,
+            ops: Vec::new(),
+        }),
+    )
+    .unwrap();
+    let burst = frame.repeat(1_000);
+    // Each frame is answered with an error the client never reads. A write failing means the
+    // daemon has already closed the connection.
+    for _ in 0..200 {
+        if client.try_send_bytes(&burst).is_err() {
+            break;
+        }
+    }
+    assert!(
+        wait_until(WAIT, || stats.connections() == 0),
+        "the daemon kept a client that never reads its layout replies"
     );
 }

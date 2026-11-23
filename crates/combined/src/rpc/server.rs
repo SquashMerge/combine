@@ -458,13 +458,31 @@ impl Server {
         message: String,
         request: RequestId,
     ) {
-        if let Some(state) = self.conns.get_mut(&conn) {
-            state.layout_out.push_back(LayoutOut::Error(ErrorMessage {
+        self.queue_layout_out(
+            conn,
+            LayoutOut::Error(ErrorMessage {
                 code,
                 message,
                 request: Some(request),
                 attachment: None,
-            }));
+            }),
+        );
+    }
+
+    /// Queues a layout reply or error for `conn`, and disconnects it when it has left more than
+    /// `watch_answer_limit` of them unread, as for `watch_terminals` answers.
+    fn queue_layout_out(&mut self, conn: ConnectionId, item: LayoutOut) {
+        let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) else {
+            return;
+        };
+        state.layout_out.push_back(item);
+        if state.layout_out.len() > self.options.watch_answer_limit {
+            eprintln!(
+                "combined: connection {} left more than {} layout replies unread; disconnecting",
+                conn.0, self.options.watch_answer_limit
+            );
+            self.driver.core_mut().disconnect(conn, self.clock.now());
+            self.remove(conn);
         }
     }
 
@@ -540,15 +558,10 @@ impl Server {
     /// Queues what the layouts owe their watchers.
     fn queue_layouts(&mut self) {
         for reply in self.layouts.take_replies() {
-            if let Some(state) = self
-                .conns
-                .get_mut(&reply.conn)
-                .filter(|state| !state.closing)
-            {
-                state
-                    .layout_out
-                    .push_back(LayoutOut::Answer(RequestId(reply.request), reply.space));
-            }
+            self.queue_layout_out(
+                reply.conn,
+                LayoutOut::Answer(RequestId(reply.request), reply.space),
+            );
         }
         for space in self.layouts.take_changed() {
             for conn in self.layouts.subscribers(&space) {
