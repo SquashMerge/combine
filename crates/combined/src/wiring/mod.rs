@@ -2,7 +2,9 @@
 
 use std::ffi::OsString;
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -197,6 +199,46 @@ pub fn server_parts_with(
     })
 }
 
+/// How [`serve_after_build`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// Shutdown completed before the socket was bound, so nothing was served and no socket or
+    /// `<socket>.lock` was made.
+    Cancelled,
+    /// The server ran until shutdown completed.
+    Stopped,
+}
+
+/// Watches and lists the backend, binds `socket_path` and serves it until `shutdown` completes.
+///
+/// The backend steps race `shutdown`, and the socket is bound last, so a start that is
+/// cancelled or fails earlier leaves no socket behind.
+pub async fn serve_after_build<S: Future<Output = ()>>(
+    parts: ServerParts,
+    socket_path: &Path,
+    mut shutdown: Pin<&mut S>,
+    stats: Arc<ServerStats>,
+) -> Result<Served, StartError> {
+    let backend = Arc::clone(parts.driver.backend());
+    let Some(watched) = rpc::until_shutdown(shutdown.as_mut(), rpc::watch_backend(&*backend)).await
+    else {
+        return Ok(Served::Cancelled);
+    };
+    let watched = watched.map_err(StartError::from)?;
+    let bound = socket::bind(socket_path)?;
+    rpc::serve_watched(
+        bound,
+        parts,
+        watched,
+        ServeOptions::default(),
+        shutdown,
+        stats,
+    )
+    .await
+    .map_err(StartError::from)?;
+    Ok(Served::Stopped)
+}
+
 /// Runs the daemon until it fails or gets SIGTERM or SIGINT, which write every pending layout
 /// before it returns.
 fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
@@ -236,32 +278,36 @@ fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
         };
         let mut terminate = signals(SignalKind::terminate())?;
         let mut interrupt = signals(SignalKind::interrupt())?;
-        let backend = backend::build(&resolved.backend).await?;
+        let mut shutdown = std::pin::pin!(async {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = interrupt.recv() => {}
+            }
+        });
+        let Some(backend) =
+            rpc::until_shutdown(shutdown.as_mut(), backend::build(&resolved.backend)).await
+        else {
+            return Ok(Served::Cancelled);
+        };
         let parts = server_parts_with(
-            backend,
+            backend?,
             id_base,
             host_id,
             ids,
             Arc::new(FsFileStore::with_fallback(layouts_dir)),
             LayoutTiming::default(),
         )?;
-        // Last, so a start that fails earlier leaves no socket behind.
-        let bound = socket::bind(&resolved.socket)?;
-        rpc::serve(
-            bound,
+        serve_after_build(
             parts,
-            ServeOptions::default(),
-            async {
-                tokio::select! {
-                    _ = terminate.recv() => {}
-                    _ = interrupt.recv() => {}
-                }
-            },
+            &resolved.socket,
+            shutdown.as_mut(),
             Arc::new(ServerStats::new()),
         )
         .await
-        .map_err(StartError::from)
     });
     drop(data_dir);
-    served
+    if let Ok(Served::Cancelled) = served {
+        eprintln!("combined: stopped by a signal during start-up");
+    }
+    served.map(|_| ())
 }
