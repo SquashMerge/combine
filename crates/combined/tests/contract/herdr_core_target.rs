@@ -254,6 +254,11 @@ impl HerdrCoreTarget {
         &self.control
     }
 
+    /// The lane core's socket, for a daemon that is to use the same core.
+    pub fn lane_socket(&self) -> &Path {
+        &self.lane.socket
+    }
+
     pub fn probe(&self) -> &CoreProbe {
         &self.probe
     }
