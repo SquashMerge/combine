@@ -74,7 +74,7 @@ A stop that isn't SIGTERM or SIGINT (SIGKILL, a crash, power loss) is handled li
 The daemon owns each space's layout. Clients watch a space and change it with `mutate_layout` (`SPEC.md`, "Wire protocol" and "Persistence").
 
 - **File:** `<project>/.workspace/layout.json`, where `<project>` is the space's folder. The first write creates `.workspace/`, 500 ms to 2 s after the first accepted change, and a write that falls back never creates it. The daemon never overwrites a `layout.json` it can't parse; an invalid file shows an error in the client and the last good layout stays on screen.
-- **Writes:** a change is written 500 ms after the latest one and at most 2 s after the first. A space switch, an unwatch, a client disconnect and a clean shutdown write at once. A crash or SIGKILL loses a change still waiting.
+- **Writes:** a change is written 500 ms after the latest one and at most 2 s after the first. A space switch, an unwatch, a client disconnect and a clean shutdown write at once, unless the file is invalid. A crash or SIGKILL loses a change still waiting.
 - **Outside edits:** edit `layout.json` by hand or with `git` while the daemon runs and it reloads the file. If you edit a field the daemon has an unsaved change to, your edit wins and the daemon drops its change, and the client shows a notice.
 - **Read-only projects:** if `.workspace/` can't be written, the layout is kept in `<daemon data>/spaces/<sha256 of the space's folder path>/layout.json` and the client marks the space read-only. That file then takes priority: delete it to go back to the project's `layout.json`. While it exists, edits to the project's file are ignored.
 - **Symlinks:** the daemon refuses a symlink at `.workspace`, under it, or at `layout.json`.
