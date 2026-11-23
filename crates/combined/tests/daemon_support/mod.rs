@@ -2,6 +2,7 @@
 //! Scratch paths and safety checks shared by the daemon's test crates. Every test passes
 //! explicit paths under its own scratch directory and never touches a default location.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::net::Shutdown;
@@ -20,13 +21,15 @@ use combine_protocol::{
     HostId, Welcome,
 };
 use combined::adapters::fs::data_dir::DataDir;
-use combined::ports::TerminalBackend;
+use combined::core::LayoutTiming;
+use combined::model::SpawnSpec;
+use combined::ports::{FileStore, TerminalBackend};
 use combined::rpc::socket::MAX_SOCKET_PATH;
 use combined::rpc::{self, ServeOptions, ServerHandle};
-use combined::testing::FakeBackend;
+use combined::testing::{FakeBackend, FakeConfig, FakeControl};
 use combined::wiring::config::{self, DaemonEnv};
 use combined::wiring::ids::IdReservation;
-use combined::wiring::server_parts;
+use combined::wiring::{server_parts, server_parts_with};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -330,6 +333,20 @@ pub fn fake_server(
     host: &str,
     options: ServeOptions,
 ) -> ServerHandle {
+    start_server(scratch, name, backend, host, options, None)
+}
+
+/// A store and timing for [`start_server`] to use instead of the defaults.
+type Layouts = (Arc<dyn FileStore>, LayoutTiming);
+
+fn start_server(
+    scratch: &ShortTempDir,
+    name: &str,
+    backend: Arc<FakeBackend>,
+    host: &str,
+    options: ServeOptions,
+    layouts: Option<Layouts>,
+) -> ServerHandle {
     let paths = DaemonPaths::in_scratch(scratch, name);
     let work = work_dir(scratch);
     for path in [
@@ -352,11 +369,69 @@ pub fn fake_server(
             let backend: Arc<dyn TerminalBackend> = backend;
             // Each test serves its own data dir, so no other writer needs the lock.
             drop(data_dir);
-            server_parts(backend, id_base, host_id, ids).unwrap()
+            match layouts {
+                None => server_parts(backend, id_base, host_id, ids).unwrap(),
+                Some((store, timing)) => {
+                    server_parts_with(backend, id_base, host_id, ids, store, timing).unwrap()
+                }
+            }
         },
         options,
     )
     .unwrap()
+}
+
+/// What [`layout_server`] started.
+pub struct LayoutServer {
+    pub server: ServerHandle,
+    pub backend: Arc<FakeBackend>,
+    pub control: FakeControl,
+    pub socket: PathBuf,
+    pub work: PathBuf,
+}
+
+/// Starts a server on a new fake backend with the given file store and layout timing. `seed`
+/// runs before the server starts, with the backend's control handle and the backend, so the
+/// terminals it spawns are listed from the start. `<scratch>/work` is where they should run.
+pub fn layout_server(
+    scratch: &ShortTempDir,
+    name: &str,
+    store: Arc<dyn FileStore>,
+    timing: LayoutTiming,
+    seed: impl FnOnce(&FakeControl, &Arc<FakeBackend>),
+) -> LayoutServer {
+    let (backend, control) = FakeBackend::new(FakeConfig::default());
+    fs::create_dir_all(work_dir(scratch).join(".git")).unwrap();
+    seed(&control, &backend);
+    let server = start_server(
+        scratch,
+        name,
+        Arc::clone(&backend),
+        "host-a",
+        ServeOptions::default(),
+        Some((store, timing)),
+    );
+    LayoutServer {
+        server,
+        backend,
+        control,
+        socket: DaemonPaths::in_scratch(scratch, name).socket,
+        work: work_dir(scratch),
+    }
+}
+
+/// Spawns a terminal on `backend` whose cwd is the scratch project, which makes the project a
+/// space.
+pub fn seed_project_terminal(backend: &Arc<FakeBackend>, scratch: &ShortTempDir) {
+    let spec = SpawnSpec {
+        argv: vec!["sh".to_string()],
+        cwd: work_dir(scratch).to_str().unwrap().to_string(),
+        env: BTreeMap::new(),
+        labels: BTreeMap::new(),
+        cols: 80,
+        rows: 24,
+    };
+    futures::executor::block_on(TerminalBackend::spawn(&**backend, spec)).unwrap();
 }
 
 /// `combined` with a cleared environment: only `HOME=<scratch>/home`, so nothing inherits

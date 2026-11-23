@@ -21,7 +21,8 @@ pub use layout::{
 };
 pub use layout_sync::{
     layout_snapshot, ops_from_wire, DroppedBatch, LayoutEffect, LayoutRead, LayoutReply,
-    LayoutTiming, LayoutWritten, Layouts, MutateError, SpaceLayoutStatus, WatchError, MAX_WIRE_OPS,
+    LayoutTiming, LayoutWritten, Layouts, MutateError, SpaceLayoutStatus, WatchError, LAYOUT_FILE,
+    MAX_WIRE_OPS,
 };
 pub use log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats, ResumeError};
 pub use machine::{Core, OwnershipState};

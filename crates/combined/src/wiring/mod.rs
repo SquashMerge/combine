@@ -12,8 +12,8 @@ use crate::adapters::fs::data_dir::DataDir;
 use crate::adapters::fs::file_store::FsFileStore;
 use crate::adapters::fs::git_probe::FsGitProbe;
 use crate::adapters::fs::host_id;
-use crate::core::{Core, CoreConfig, Driver, TerminalList};
-use crate::ports::TerminalBackend;
+use crate::core::{Core, CoreConfig, Driver, LayoutTiming, TerminalList};
+use crate::ports::{FileStore, TerminalBackend};
 use crate::rpc::socket::{self, BindError};
 use crate::rpc::{self, ServeError, ServeOptions, ServerParts, ServerStats};
 use cli::Command;
@@ -21,6 +21,7 @@ use clock::MonotonicClock;
 use combine_protocol::HostId;
 use config::{DaemonConfigError, DaemonEnv};
 use ids::IdReservation;
+use tokio::signal::unix::{signal, SignalKind};
 
 pub mod backend;
 pub mod cli;
@@ -148,13 +149,32 @@ fn run_connect(
     Ok(rpc::connect::run(&socket))
 }
 
-/// Builds what the server runs on from a backend. `run_serve` and the in-process test servers
-/// both come through here, so a test exercises the wiring the daemon ships.
+/// [`server_parts_with`] over a store without a fallback and the default layout timing.
 pub fn server_parts(
     backend: Arc<dyn TerminalBackend>,
     id_base: u64,
     host_id: HostId,
     ids: IdReservation,
+) -> Result<ServerParts, StartError> {
+    server_parts_with(
+        backend,
+        id_base,
+        host_id,
+        ids,
+        Arc::new(FsFileStore::new()),
+        LayoutTiming::default(),
+    )
+}
+
+/// Builds what the server runs on from a backend. `run_serve` and the in-process test servers
+/// both come through here, so a test exercises the wiring the daemon ships.
+pub fn server_parts_with(
+    backend: Arc<dyn TerminalBackend>,
+    id_base: u64,
+    host_id: HostId,
+    ids: IdReservation,
+    file_store: Arc<dyn FileStore>,
+    layout_timing: LayoutTiming,
 ) -> Result<ServerParts, StartError> {
     let core = Core::new(
         CoreConfig {
@@ -170,11 +190,13 @@ pub fn server_parts(
         host_id,
         ids,
         clock: MonotonicClock::new(),
-        file_store: Arc::new(FsFileStore::new()),
+        file_store,
+        layout_timing,
     })
 }
 
-/// Runs the daemon until it fails: it has no other way to stop.
+/// Runs the daemon until it fails or gets SIGTERM or SIGINT, which write every pending layout
+/// before it returns.
 fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
     let env = DaemonEnv::from_process();
     let file = load_config(config_flag, &env)?;
@@ -204,16 +226,35 @@ fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
         .build()
         .map_err(|error| StartError::Runtime(format!("cannot start the runtime: {error}")))?;
 
+    let layouts_dir = data_dir.path().join("spaces");
     let served = runtime.block_on(async {
+        let signals = |kind| {
+            signal(kind)
+                .map_err(|error| StartError::Runtime(format!("cannot listen for signals: {error}")))
+        };
+        let mut terminate = signals(SignalKind::terminate())?;
+        let mut interrupt = signals(SignalKind::interrupt())?;
         let backend = backend::build(&resolved.backend).await?;
-        let parts = server_parts(backend, id_base, host_id, ids)?;
+        let parts = server_parts_with(
+            backend,
+            id_base,
+            host_id,
+            ids,
+            Arc::new(FsFileStore::with_fallback(layouts_dir)),
+            LayoutTiming::default(),
+        )?;
         // Last, so a start that fails earlier leaves no socket behind.
         let bound = socket::bind(&resolved.socket)?;
         rpc::serve(
             bound,
             parts,
             ServeOptions::default(),
-            std::future::pending(),
+            async {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = interrupt.recv() => {}
+                }
+            },
             Arc::new(ServerStats::new()),
         )
         .await

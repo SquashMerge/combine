@@ -1,5 +1,6 @@
 //! The server loop: one task owns the driver and every connection's state, and waits on the
-//! listener, the connections' inbox, the backend, the terminal watch and two timers.
+//! listener, the connections' inbox, the backend, the terminal watch, the file store's changes
+//! and three timers.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -11,7 +12,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use combine_protocol::{ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, HostId, RequestId};
+use combine_protocol::{
+    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, HostId, Layout, RequestId,
+};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -22,8 +25,12 @@ use super::connection::{self, ConnEvent, WriterCmd};
 use super::flush::{FlushAt, FlushSchedule};
 use super::socket::BoundSocket;
 use super::{ServeOptions, ServerParts, ServerStats};
-use crate::core::{ConnectionId, Driver, TerminalList};
-use crate::model::{Millis, TermEvent};
+use crate::core::{
+    layout_snapshot, ops_from_wire, ConnectionId, Driver, LayoutEffect, LayoutRead, LayoutWritten,
+    Layouts, MutateError, TerminalList, WatchError, LAYOUT_FILE,
+};
+use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent};
+use crate::ports::{FileChange, FileStore};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
@@ -72,9 +79,19 @@ struct ConnState {
     watching: bool,
     answers: VecDeque<RequestId>,
     stale: bool,
+    /// Layout replies and errors owed to the connection, in the order they arose.
+    layout_out: VecDeque<LayoutOut>,
+    /// The space the connection watches changed since its last layout message.
+    layout_stale: bool,
     /// The connection's last message is queued and its input is ignored. It still counts
     /// toward `max_connections` until its writer reports the socket closed.
     closing: bool,
+}
+
+enum LayoutOut {
+    /// The watched space's layout, answering `request`.
+    Answer(RequestId, SpaceId),
+    Error(ErrorMessage),
 }
 
 enum Wake {
@@ -83,11 +100,14 @@ enum Wake {
     Inbox(ConnEvent),
     Driver,
     Watch(Option<TermEvent>),
+    File(Option<FileChange>),
     Flush,
+    Layout,
     Housekeeping,
 }
 
 type Watch = BoxStream<'static, TermEvent>;
+type Changes = BoxStream<'static, FileChange>;
 
 struct Server {
     driver: Driver,
@@ -103,8 +123,13 @@ struct Server {
     inbox: mpsc::Receiver<ConnEvent>,
     listener: UnixListener,
     watch: Option<Watch>,
+    layouts: Layouts,
+    store: Arc<dyn FileStore>,
+    changes: Option<Changes>,
     flush_timer: Pin<Box<Sleep>>,
     flush_armed: bool,
+    layout_timer: Pin<Box<Sleep>>,
+    layout_armed: bool,
     housekeeping: Interval,
 }
 
@@ -129,7 +154,8 @@ pub async fn serve(
         host_id,
         ids,
         clock,
-        file_store: _,
+        file_store,
+        layout_timing,
     } = parts;
     let backend = Arc::clone(driver.backend());
     let watch = backend
@@ -160,17 +186,24 @@ pub async fn serve(
         inbox,
         listener,
         watch: Some(watch),
+        layouts: Layouts::new(layout_timing),
+        changes: Some(file_store.changes()),
+        store: file_store,
         flush_timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
         flush_armed: false,
+        layout_timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
+        layout_armed: false,
         housekeeping,
     };
     let result = server.run(shutdown).await;
+    server.layouts.flush_all(server.clock.now());
+    server.run_layout_effects().await;
     server.close_all();
     drop(lock);
     result
 }
 
-async fn next_terminal_event(watch: &mut Option<Watch>) -> Option<TermEvent> {
+async fn next_item<T>(watch: &mut Option<BoxStream<'static, T>>) -> Option<T> {
     match watch {
         Some(stream) => stream.next().await,
         None => std::future::pending().await,
@@ -187,8 +220,10 @@ impl Server {
                 accepted = self.listener.accept() => Wake::Accept(accepted.map(|(stream, _)| stream)),
                 Some(event) = self.inbox.recv() => Wake::Inbox(event),
                 () = std::future::poll_fn(|cx| self.driver.poll_event(cx, clock.now())) => Wake::Driver,
-                item = next_terminal_event(&mut self.watch), if self.watch.is_some() => Wake::Watch(item),
+                item = next_item(&mut self.watch), if self.watch.is_some() => Wake::Watch(item),
+                item = next_item(&mut self.changes), if self.changes.is_some() => Wake::File(item),
                 () = &mut self.flush_timer, if self.flush_armed => Wake::Flush,
+                () = &mut self.layout_timer, if self.layout_armed => Wake::Layout,
                 _ = self.housekeeping.tick() => Wake::Housekeeping,
             };
             match wake {
@@ -210,6 +245,16 @@ impl Server {
                 }
                 Wake::Watch(None) => {
                     return Err(ServeError::Backend("terminal watch ended".to_string()))
+                }
+                Wake::File(Some(change)) => {
+                    if change.path == LAYOUT_FILE {
+                        self.layouts.apply_change(&change.space);
+                    }
+                }
+                Wake::File(None) => self.changes = None,
+                Wake::Layout => {
+                    self.layout_armed = false;
+                    self.layouts.tick(self.clock.now());
                 }
                 Wake::Flush => {
                     self.flush_armed = false;
@@ -265,6 +310,8 @@ impl Server {
                 watching: false,
                 answers: VecDeque::new(),
                 stale: false,
+                layout_out: VecDeque::new(),
+                layout_stale: false,
                 closing: false,
             },
         );
@@ -289,11 +336,17 @@ impl Server {
                     ClientMessage::WatchTerminals(watch) => {
                         self.watch_terminals(conn, watch.request)
                     }
+                    ClientMessage::WatchLayout(watch) => {
+                        self.watch_layout(conn, watch.request, watch.space, now)
+                    }
+                    ClientMessage::UnwatchLayout(_) => self.layouts.unwatch(conn, now),
+                    ClientMessage::MutateLayout(mutate) => self.mutate_layout(conn, mutate, now),
                     message => self.driver.core_mut().client_message(conn, message, now),
                 }
             }
             ConnEvent::Malformed(conn, text) => {
                 self.driver.core_mut().disconnect(conn, now);
+                self.layouts.unwatch(conn, now);
                 let Some(state) = self.conns.get_mut(&conn) else {
                     return;
                 };
@@ -304,6 +357,8 @@ impl Server {
                 state.watching = false;
                 state.answers.clear();
                 state.stale = false;
+                state.layout_out.clear();
+                state.layout_stale = false;
                 let error = DaemonMessage::Error(ErrorMessage {
                     code: ErrorCode::Malformed,
                     message: format!("malformed frame: {text}"),
@@ -343,9 +398,98 @@ impl Server {
         }
     }
 
+    fn watch_layout(&mut self, conn: ConnectionId, request: RequestId, space: String, now: Millis) {
+        let space = SpaceId(space);
+        let known = self
+            .terminals
+            .snapshot(None)
+            .spaces
+            .iter()
+            .any(|listed| listed.id == space.0);
+        match self.layouts.watch(conn, space, request.0, known, now) {
+            Ok(()) => {}
+            Err(WatchError::UnknownSpace) => self.layout_error(
+                conn,
+                ErrorCode::UnknownSpace,
+                "the host lists no such space".to_string(),
+                request,
+            ),
+        }
+    }
+
+    fn mutate_layout(
+        &mut self,
+        conn: ConnectionId,
+        mutate: combine_protocol::MutateLayout,
+        now: Millis,
+    ) {
+        let request = mutate.request;
+        let ops = match ops_from_wire(mutate.ops) {
+            Ok(ops) => ops,
+            Err(text) => return self.layout_error(conn, ErrorCode::InvalidRequest, text, request),
+        };
+        let base = LayoutRevision(mutate.base_layout_revision);
+        let space = SpaceId(mutate.space);
+        if let Err(error) = self.layouts.mutate(conn, &space, request.0, base, ops, now) {
+            let (code, text) = match error {
+                MutateError::UnknownSpace => (
+                    ErrorCode::UnknownSpace,
+                    "the host lists no such space".to_string(),
+                ),
+                MutateError::NotWatched => (
+                    ErrorCode::InvalidRequest,
+                    "the connection isn't watching that space".to_string(),
+                ),
+                MutateError::Stale => (
+                    ErrorCode::StaleLayout,
+                    "the layout changed since the revision this change was made against"
+                        .to_string(),
+                ),
+                MutateError::Invalid(text) => (ErrorCode::InvalidRequest, text),
+            };
+            self.layout_error(conn, code, text, request);
+        }
+    }
+
+    fn layout_error(
+        &mut self,
+        conn: ConnectionId,
+        code: ErrorCode,
+        message: String,
+        request: RequestId,
+    ) {
+        self.queue_layout_out(
+            conn,
+            LayoutOut::Error(ErrorMessage {
+                code,
+                message,
+                request: Some(request),
+                attachment: None,
+            }),
+        );
+    }
+
+    /// Queues a layout reply or error for `conn`, and disconnects it when it has left more than
+    /// `watch_answer_limit` of them unread, as for `watch_terminals` answers.
+    fn queue_layout_out(&mut self, conn: ConnectionId, item: LayoutOut) {
+        let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) else {
+            return;
+        };
+        state.layout_out.push_back(item);
+        if state.layout_out.len() > self.options.watch_answer_limit {
+            eprintln!(
+                "combined: connection {} left more than {} layout replies unread; disconnecting",
+                conn.0, self.options.watch_answer_limit
+            );
+            self.driver.core_mut().disconnect(conn, self.clock.now());
+            self.remove(conn);
+        }
+    }
+
     /// Forgets the connection and closes its socket, which ends both its threads. It does
     /// nothing for a connection already removed.
     fn remove(&mut self, conn: ConnectionId) {
+        self.layouts.unwatch(conn, self.clock.now());
         if let Some(state) = self.conns.remove(&conn) {
             self.stats.removed();
             let _ = state.socket.shutdown(Shutdown::Both);
@@ -367,9 +511,77 @@ impl Server {
 
     fn has_pending(&self) -> bool {
         let core = self.driver.core();
-        self.conns
-            .iter()
-            .any(|(conn, state)| core.has_output(*conn) || !state.answers.is_empty() || state.stale)
+        self.conns.iter().any(|(conn, state)| {
+            core.has_output(*conn)
+                || !state.answers.is_empty()
+                || state.stale
+                || !state.layout_out.is_empty()
+                || state.layout_stale
+        })
+    }
+
+    /// Runs the file store work the layouts asked for. Each outcome is reported before the next
+    /// effect runs and before the change stream is polled again, so the hash of the daemon's
+    /// own write is known by the time its echo arrives.
+    async fn run_layout_effects(&mut self) {
+        loop {
+            let effects = self.layouts.take_effects();
+            if effects.is_empty() {
+                return;
+            }
+            for effect in effects {
+                match effect {
+                    LayoutEffect::Watch { space } => {
+                        if let Err(error) = self.store.watch(&space).await {
+                            eprintln!("combined: cannot watch {}: {error}", space.0);
+                        }
+                    }
+                    LayoutEffect::Read { space } => {
+                        let read = match self.store.read(&space, LAYOUT_FILE).await {
+                            Ok(file) => LayoutRead::from(file),
+                            Err(error) => LayoutRead::from(error),
+                        };
+                        self.layouts.apply_read(&space, read, self.clock.now());
+                    }
+                    LayoutEffect::Write { space, bytes, .. } => {
+                        let written = match self.store.write(&space, LAYOUT_FILE, bytes).await {
+                            Ok(outcome) => LayoutWritten::from(outcome),
+                            Err(error) => LayoutWritten::from(error),
+                        };
+                        self.layouts.apply_write(&space, written, self.clock.now());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Queues what the layouts owe their watchers.
+    fn queue_layouts(&mut self) {
+        for reply in self.layouts.take_replies() {
+            self.queue_layout_out(
+                reply.conn,
+                LayoutOut::Answer(RequestId(reply.request), reply.space),
+            );
+        }
+        for space in self.layouts.take_changed() {
+            for conn in self.layouts.subscribers(&space) {
+                if let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) {
+                    state.layout_stale = true;
+                }
+            }
+        }
+    }
+
+    /// Arms the layout timer for the earliest write due.
+    fn arm_layouts(&mut self) {
+        match self.layouts.next_deadline() {
+            Some(at) => {
+                let deadline = Instant::from_std(self.clock.instant_at(at));
+                self.layout_timer.as_mut().reset(deadline);
+                self.layout_armed = true;
+            }
+            None => self.layout_armed = false,
+        }
     }
 
     /// Runs core's effects, drops what it disconnected, keeps the ID reservation ahead, and
@@ -377,6 +589,9 @@ impl Server {
     async fn settle(&mut self) -> Result<(), ServeError> {
         loop {
             self.driver.run_effects(self.clock.now()).await;
+            self.run_layout_effects().await;
+            self.queue_layouts();
+            self.arm_layouts();
             for conn in self.driver.take_disconnects() {
                 self.remove(conn);
             }
@@ -427,6 +642,26 @@ impl Server {
             }
             state.answers.clear();
             state.stale = false;
+            let mut answered = false;
+            for item in state.layout_out.drain(..) {
+                match item {
+                    LayoutOut::Answer(request, space) => {
+                        if let Some(message) = layout_message(&self.layouts, &space, Some(request))
+                        {
+                            answered = true;
+                            batch.push(message);
+                        }
+                    }
+                    LayoutOut::Error(error) => batch.push(DaemonMessage::Error(error)),
+                }
+            }
+            if std::mem::take(&mut state.layout_stale) && !answered {
+                let push = self
+                    .layouts
+                    .watched(conn)
+                    .and_then(|space| layout_message(&self.layouts, space, None));
+                batch.extend(push);
+            }
             batch.extend(self.driver.core_mut().pull(conn, max_bytes, now));
             if batch.is_empty() {
                 continue;
@@ -436,4 +671,23 @@ impl Server {
             }
         }
     }
+}
+
+/// The space's layout as a message, answering `request` or pushed when it is `None`. Nothing
+/// before the space's first read.
+fn layout_message(
+    layouts: &Layouts,
+    space: &SpaceId,
+    request: Option<RequestId>,
+) -> Option<DaemonMessage> {
+    let status = layouts.status(space)?;
+    Some(match layout_snapshot(space, &status) {
+        Ok(layout) => DaemonMessage::Layout(Layout { request, layout }),
+        Err(error) => DaemonMessage::Error(ErrorMessage {
+            code: ErrorCode::Internal,
+            message: format!("cannot send the layout: {error}"),
+            request,
+            attachment: None,
+        }),
+    })
 }

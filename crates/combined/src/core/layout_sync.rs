@@ -177,29 +177,36 @@ pub struct SpaceLayoutStatus {
 /// The most ops one `mutate_layout` may carry.
 pub const MAX_WIRE_OPS: usize = 32;
 
+/// The file a space's layout lives in, relative to `<space>/.workspace/`.
+pub const LAYOUT_FILE: &str = "layout.json";
+
 /// The wire form of a space's layout for its clients. The wire tree has no `groups` or unknown
-/// keys.
-pub fn layout_snapshot(space: &SpaceId, status: &SpaceLayoutStatus) -> wire::LayoutSnapshot {
-    wire::LayoutSnapshot {
+/// keys. It fails only on a ratio the wire can't carry, which a validated layout never holds.
+pub fn layout_snapshot(
+    space: &SpaceId,
+    status: &SpaceLayoutStatus,
+) -> Result<wire::LayoutSnapshot, LayoutError> {
+    Ok(wire::LayoutSnapshot {
         space: space.0.clone(),
         layout_revision: status.layout_revision.0,
-        root: wire_node(&status.layout.root),
+        root: wire_node(&status.layout.root)?,
         read_only: status.read_only,
         error: status.error.clone(),
         dropped: status.dropped.as_ref().map(dropped_notice),
-    }
+    })
 }
 
-fn wire_node(node: &SplitNode) -> wire::LayoutNode {
-    match node {
+fn wire_node(node: &SplitNode) -> Result<wire::LayoutNode, LayoutError> {
+    Ok(match node {
         SplitNode::Split(split) => wire::LayoutNode::Split {
             dir: match split.dir {
                 SplitDir::H => wire::SplitDirection::H,
                 SplitDir::V => wire::SplitDirection::V,
             },
-            ratio: wire::Ratio::new(split.ratio).unwrap_or(wire::Ratio::HALF),
-            a: Box::new(wire_node(&split.a)),
-            b: Box::new(wire_node(&split.b)),
+            ratio: wire::Ratio::new(split.ratio)
+                .ok_or(LayoutError::RatioOutOfRange(split.ratio))?,
+            a: Box::new(wire_node(&split.a)?),
+            b: Box::new(wire_node(&split.b)?),
         },
         SplitNode::Tile(tile) => wire::LayoutNode::Tile {
             id: tile.id.as_str().to_string(),
@@ -210,7 +217,7 @@ fn wire_node(node: &SplitNode) -> wire::LayoutNode {
                 .collect(),
             active: tile.active.as_ref().map(|panel| panel.as_str().to_string()),
         },
-    }
+    })
 }
 
 fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
@@ -893,6 +900,11 @@ impl Layouts {
             .filter(|(_, watched)| *watched == space)
             .map(|(conn, _)| *conn)
             .collect()
+    }
+
+    /// The space `conn` is watching.
+    pub fn watched(&self, conn: ConnectionId) -> Option<&SpaceId> {
+        self.watching.get(&conn)
     }
 
     /// The space's layout and state, once it has been read.

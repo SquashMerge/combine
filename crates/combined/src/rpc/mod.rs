@@ -9,7 +9,7 @@ use std::time::Duration;
 use combine_protocol::HostId;
 use tokio::sync::oneshot;
 
-use crate::core::{Driver, TerminalList};
+use crate::core::{Driver, LayoutTiming, TerminalList};
 use crate::model::Millis;
 use crate::ports::FileStore;
 use crate::wiring::clock::MonotonicClock;
@@ -63,8 +63,9 @@ pub struct ServerParts {
     pub host_id: HostId,
     pub ids: IdReservation,
     pub clock: MonotonicClock,
-    /// Held for the layouts slice: core has no consumer for it yet.
+    /// Where spaces' `layout.json` files are read and written.
     pub file_store: Arc<dyn FileStore>,
+    pub layout_timing: LayoutTiming,
 }
 
 /// Counters the server keeps for whoever started it.
