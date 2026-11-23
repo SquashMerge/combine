@@ -17,7 +17,8 @@ use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{parse_layout, LayoutTiming, LAYOUT_FILE};
 use combined::model::SplitNode;
 use daemon_support::{
-    layout_server, refuse_default_herdr_core, seed_project_terminal, ShortTempDir, WireClient,
+    layout_server, refuse_default_herdr_core, seed_project_terminal, wait_until, ShortTempDir,
+    WireClient,
 };
 
 const HOUR: LayoutTiming = LayoutTiming {
@@ -26,8 +27,17 @@ const HOUR: LayoutTiming = LayoutTiming {
     retry_ms: 3_600_000,
 };
 
+/// FSEvents can be slow, so a push caused by an outside edit gets the bound `fs_watcher.rs` uses.
+const PUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn layout_reply(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
-    match client.recv() {
+    let message = match request {
+        Some(_) => client.recv(),
+        None => client
+            .recv_within(PUSH_WAIT)
+            .unwrap_or_else(|| panic!("no push within {PUSH_WAIT:?}")),
+    };
+    match message {
         DaemonMessage::Layout(layout) => {
             assert_eq!(layout.request, request.map(RequestId));
             layout.layout
@@ -206,4 +216,38 @@ fn outside_edit_to_same_field_wins_and_reports_dropped_change() {
 
     assert!(p.server.server.shutdown().is_none());
     assert_eq!(stored_ratio(&p.server.work), 0.7, "nothing was re-applied");
+}
+
+/// AC2 "a quit flushes immediately", on the path a normal client quit takes: the socket closes,
+/// the server sees `Closed`, and removing the connection unwatches its space (which flushes).
+#[test]
+fn normal_connection_close_flushes_pending_layout() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let server = layout_server(&scratch, "q", store, HOUR, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let layout_path = server.work.join(".workspace").join(LAYOUT_FILE);
+    let mut client = WireClient::open(&server.socket).0;
+    watch(&mut client, &space, 1);
+    let split = vec![LayoutOp::SplitTile {
+        tile: "main".to_string(),
+        dir: SplitDirection::H,
+        new_tile: "side".to_string(),
+        ratio: Ratio::new(0.5).unwrap(),
+        panel: None,
+    }];
+    assert_eq!(mutate(&mut client, &space, 2, 0, split).layout_revision, 1);
+    assert!(!layout_path.exists(), "nothing is written before the close");
+
+    drop(client);
+
+    assert!(
+        wait_until(std::time::Duration::from_secs(10), || layout_path.exists()),
+        "closing the connection did not flush the pending layout"
+    );
+    assert_eq!(stored_ratio(&server.work), 0.5);
 }
