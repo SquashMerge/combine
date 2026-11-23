@@ -162,8 +162,8 @@ export class TerminalController {
   }
 
   /**
-   * `attached`, `resumed`, `gap{request}` and `error{request}` answer one numbered attach or
-   * resume. Only the outstanding request's answer counts; a late one is ignored.
+   * `attached`, `resumed`, `gap{request}` and `error{request}` answer an attach or resume. The
+   * transport owns request ids, so the panel only checks that one is outstanding.
    */
   private answersOutstandingRequest(event: TerminalStreamEvent): boolean {
     if (
@@ -174,7 +174,7 @@ export class TerminalController {
     ) {
       return true;
     }
-    if (event.request !== String(this.pendingSeq)) return false;
+    if (this.pendingSeq === null) return false;
     this.pendingSeq = null;
     return true;
   }

@@ -628,18 +628,49 @@ describe('terminalController resume', () => {
     expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true, status: null });
   });
 
-  it('a late answer to an earlier resume is ignored', async () => {
+  it('a reply with nothing outstanding is ignored', async () => {
     const t = rig();
-    await resumeAfterDrop(t);
+    await t.goLive();
+    t.stream().emit(resumedEvent(5, 7, null));
+    t.stream().emit(gapEvent(7, 6));
+    t.stream().emit(errorEvent({ code: 'unknown_attachment', request: 7 }));
+    expect(t.controller.getView()).toMatchObject({ phase: 'live', hasInstance: true });
+    expect(t.stream().commands('attach')).toHaveLength(1);
     t.port.setConnected(HOST_ID, false);
     t.port.setConnected(HOST_ID, true);
-    expect(t.stream().commands('resume')).toHaveLength(2);
-    t.stream().emit(gapEvent(7, 2));
-    t.stream().emit(resumedEvent(2, 7, null));
-    expect(t.controller.getView().phase).toBe('resuming');
-    expect(t.stream().commands('attach')).toHaveLength(1);
-    t.stream().emit(resumedEvent(3, 7, null));
+    t.stream().emit(resumedEvent(8, 7, null));
+    t.stream().emit(gapEvent(7, 9));
     expect(t.controller.getView().phase).toBe('live');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('request ids that differ from the panel count still answer the outstanding request', async () => {
+    const t = rig();
+    await t.open();
+    t.controller.setVisible(true);
+    t.stream().emit(attachedEvent(17, 7));
+    t.stream().emit(startedEvent(cursor(7, 1, 0)));
+    await Promise.resolve();
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'one'));
+    t.fake.instances[0]?.completeAll();
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    expect(t.controller.getView().phase).toBe('resuming');
+    t.stream().emit(resumedEvent(42, 7, null));
+    expect(t.controller.getView().phase).toBe('live');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('a resume rejected for another reason attaches fresh', async () => {
+    const t = rig();
+    await t.goLive();
+    t.port.setConnected(HOST_ID, false);
+    t.stream().rejectNext('resume', 'boom');
+    t.port.setConnected(HOST_ID, true);
+    await flush();
+    expect(t.stream().commands('resume')).toHaveLength(1);
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true, hasInstance: true });
   });
 
   it('hide while resuming detaches once resumed names the attachment', async () => {
@@ -732,6 +763,18 @@ describe('terminalController end states', () => {
     expect(t.stream().commands('attach')).toHaveLength(1);
     expect(t.stream().commands('resume')).toEqual([]);
     expect(t.controller.getView().phase).toBe('ended');
+  });
+
+  it('reattach does nothing after exited or closed', async () => {
+    for (const reason of ['exited', 'detached'] as const) {
+      const t = rig();
+      await t.goLive();
+      t.stream().emit(closedEvent(cursor(7, 1, 1), reason));
+      const before = t.controller.getView();
+      t.controller.reattach();
+      expect(t.controller.getView()).toBe(before);
+      expect(t.stream().commands('attach')).toHaveLength(1);
+    }
   });
 
   it('reattach after lost attaches fresh with the old screen dimmed', async () => {
