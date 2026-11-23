@@ -8,6 +8,8 @@ import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
 import { MemorySpawnPort } from '../support/memorySpawnPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
+import { fakeXtermFactory } from '../support/fakeXterm';
 import { HOST_A, host, snapshot, space, terminal } from '../support/snapshots';
 
 const connected = { kind: 'connected' } as const;
@@ -65,6 +67,8 @@ function mount(state: ClientState = stored(null)) {
       clientStatePort={clientStatePort}
       layoutPort={new MemoryLayoutPort()}
       spawnPort={spawn}
+      terminalPort={new MemoryTerminalPort()}
+      createAdapter={fakeXtermFactory().factory}
       now={() => 7}
     />,
   );
@@ -131,6 +135,8 @@ describe('App auto-open', () => {
         clientStatePort={clientStatePort}
         layoutPort={new MemoryLayoutPort()}
         spawnPort={spawn}
+        terminalPort={new MemoryTerminalPort()}
+        createAdapter={fakeXtermFactory().factory}
         now={() => 7}
       />,
     );
