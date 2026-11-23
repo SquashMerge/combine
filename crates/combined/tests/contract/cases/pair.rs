@@ -3,7 +3,7 @@
 
 use combine_protocol::{DaemonMessage, Epoch, ErrorCode, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
-use combined::testing::Half;
+use combined::testing::{Half, LATE_DATA, LATE_RESIZED};
 use futures::FutureExt;
 
 use crate::common::{display, request_options};
@@ -14,13 +14,21 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
     vec![
         Case {
             name: "input_half_failure_starts_one_new_epoch",
-            needs: &[Fault::HalfFailure, Fault::LateOldGenerationEvents],
+            needs: &[
+                Fault::HalfFailure,
+                Fault::LateOldGenerationEvents,
+                Fault::Observation,
+            ],
             heavy: false,
             run: |t| input_half_failure_starts_one_new_epoch(t).boxed_local(),
         },
         Case {
             name: "display_half_failure_starts_one_new_epoch",
-            needs: &[Fault::HalfFailure, Fault::LateOldGenerationEvents],
+            needs: &[
+                Fault::HalfFailure,
+                Fault::LateOldGenerationEvents,
+                Fault::Observation,
+            ],
             heavy: false,
             run: |t| display_half_failure_starts_one_new_epoch(t).boxed_local(),
         },
@@ -30,6 +38,7 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
                 Fault::HalfFailure,
                 Fault::OpenFailure,
                 Fault::LateOldGenerationEvents,
+                Fault::Observation,
             ],
             heavy: false,
             run: |t| reopen_failing_halfway_starts_one_new_epoch(t).boxed_local(),
@@ -130,7 +139,7 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
     );
     let late = messages.iter().any(|message| {
         matches!(message, DaemonMessage::Data(data)
-            if data.bytes.windows(6).any(|window| window == b"<late>"))
+            if data.bytes.windows(LATE_DATA.len()).any(|window| window == LATE_DATA))
     });
     ensure!(
         "late-output",
@@ -140,8 +149,23 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
     let sizes = resized_sizes(&messages);
     ensure!(
         "late-resized",
-        sizes.len() <= 1 && sizes.iter().all(|size| *size == (80, 24)),
-        "the only Resized the new epoch may have is the owner's reapplied 80x24; got {sizes:?}"
+        !sizes.contains(&LATE_RESIZED),
+        "the old generation's late Resized {LATE_RESIZED:?} reached the client; got {sizes:?}"
+    );
+    // After the late checks, so a late event that leaked is reported as a failure first.
+    h.target.late_events_delivered()?;
+    let pty = h.target.pty_size(&term)?;
+    ensure!(
+        "reapplied-size",
+        view.size == (80, 24) && pty == (80, 24),
+        "the owner's 80x24 should survive the rebuild; the client has {:?}, the PTY {pty:?}",
+        view.size
+    );
+    let halves = h.target.open_halves(&term)?;
+    ensure!(
+        "open-halves",
+        halves == 2,
+        "the rebuilt pair should have 2 open halves; the backend has {halves}"
     );
     ensure!(
         "owner",

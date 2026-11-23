@@ -22,6 +22,11 @@ pub use file_store::MemoryFileStore;
 
 /// Opens every paint.
 pub const FAKE_PAINT_START: &[u8] = b"\x18\x1b[!p";
+/// What a late event from an old generation carries, after `Started` for the new one.
+pub const LATE_DATA: &[u8] = b"<late>";
+/// The size a late `Resized` from an old generation names. No contract case asks for 77x21, so
+/// a client that applies it shows.
+pub const LATE_RESIZED: (u16, u16) = (77, 21);
 /// Closes every paint.
 pub const FAKE_PAINT_END: &[u8] = b"\x1b[?9001l";
 

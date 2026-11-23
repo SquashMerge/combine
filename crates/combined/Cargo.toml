@@ -18,4 +18,8 @@ notify = "=8.2.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.153"
 sha2 = "=0.10.9"
-tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+sha2 = "=0.10.9"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread"] }

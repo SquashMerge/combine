@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 pub mod adapters {
     pub mod fs;
+    pub mod herdr_core;
 }
 pub mod core;
 pub mod model;
