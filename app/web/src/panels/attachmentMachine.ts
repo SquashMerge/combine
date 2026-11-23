@@ -3,6 +3,7 @@ import {
   cursorAfter,
   sameCursor,
   sameDisplay,
+  sameSize,
   type AttachRequestOptions,
   type Display,
   type Fidelity,
@@ -134,6 +135,14 @@ interface Ownership {
   owner: DecimalU64 | null;
 }
 
+interface SentResize {
+  size: TerminalSize;
+  generation: DecimalU64;
+}
+
+/** Codes of `error{attachment}` that are not failures: the owner re-sends after the next ownership. */
+const IGNORED_ATTACHMENT_ERRORS = new Set(['stale_generation', 'unknown_attachment']);
+
 export class AttachmentMachine {
   private visible = false;
   private connected = false;
@@ -156,6 +165,8 @@ export class AttachmentMachine {
   private status: PanelStatus | null = null;
   private container: { width: number; height: number } | null = null;
   private cell: CellSize = DEFAULT_CELL;
+  private sentDisplay: Display | null = null;
+  private sentResize: SentResize | null = null;
   private effects: MachineEffect[] = [];
 
   constructor(private readonly terminal: TermId) {}
@@ -219,6 +230,42 @@ export class AttachmentMachine {
     return displayFrom(TERMINAL_THEME, this.cell);
   }
 
+  /** The attachment is named, connected and past the attach: display facts may be sent. */
+  private canSendDisplay(): boolean {
+    return (
+      this.attachment !== null &&
+      this.connected &&
+      (this.phase === 'live' || this.phase === 'attaching')
+    );
+  }
+
+  private displayChanged(): boolean {
+    return this.sentDisplay === null || !sameDisplay(this.display(), this.sentDisplay);
+  }
+
+  private checkDisplay(): void {
+    if (this.canSendDisplay() && this.displayChanged()) {
+      this.effects.push({ kind: 'startTimer', timer: 'display', ms: DISPLAY_DEBOUNCE_MS });
+    }
+  }
+
+  private startResizeTimer(): void {
+    if (this.phase === 'live' && this.isOwner()) {
+      this.effects.push({ kind: 'startTimer', timer: 'resize', ms: RESIZE_DEBOUNCE_MS });
+    }
+  }
+
+  /** True when bytes from xterm may leave: a live, connected attachment with a usable screen. */
+  private canSendBytes(): boolean {
+    return (
+      this.phase === 'live' &&
+      this.connected &&
+      this.attachment !== null &&
+      this.instance !== null &&
+      !this.stale
+    );
+  }
+
   private step(input: MachineInput): void {
     switch (input.kind) {
       case 'show':
@@ -233,22 +280,114 @@ export class AttachmentMachine {
         return this.onSendFailed(input.op, input.notConnected);
       case 'containerSize':
         this.container = { width: input.width, height: input.height };
+        this.startResizeTimer();
         return;
       case 'cellSize':
         this.cell = input.cell;
+        this.checkDisplay();
+        this.startResizeTimer();
         return;
       case 'timer':
-        if (input.timer === 'ack') this.onAckTimer();
+        switch (input.timer) {
+          case 'ack':
+            return this.onAckTimer();
+          case 'resize':
+            return this.onResizeTimer();
+          case 'display':
+            return this.onDisplayTimer();
+        }
         return;
       case 'reattach':
         return this.reattach();
       case 'userInput':
+        return this.onUserInput(input.bytes);
       case 'automaticReply':
+        return this.onAutomaticReply(input.bytes);
       case 'focusReport':
+        return this.onFocusReport(input.bytes);
       case 'domFocus':
+        return this.onDomFocus();
       case 'takeInput':
-        return;
+        return this.onTakeInput();
     }
+  }
+
+  private onUserInput(bytes: Uint8Array): void {
+    if (this.canSendBytes() && this.attachment !== null) {
+      this.effects.push({ kind: 'input', attachment: this.attachment, bytes });
+    }
+  }
+
+  private onFocusReport(bytes: Uint8Array): void {
+    if (this.isOwner()) this.onUserInput(bytes);
+  }
+
+  private onAutomaticReply(bytes: Uint8Array): void {
+    const applying = this.applying;
+    if (
+      this.phase !== 'live' ||
+      !this.connected ||
+      this.attachment === null ||
+      this.ownership === null ||
+      applying === null ||
+      applying.type !== 'data' ||
+      this.isReplay(applying.cursor) ||
+      !this.isOwner()
+    ) {
+      return;
+    }
+    this.effects.push({
+      kind: 'automaticReply',
+      attachment: this.attachment,
+      epoch: applying.cursor.epoch,
+      ownershipGeneration: this.ownership.generation,
+      bytes,
+    });
+  }
+
+  private onDomFocus(): void {
+    if (this.phase === 'live' && this.connected && this.attachment !== null) {
+      this.effects.push({ kind: 'focus', attachment: this.attachment });
+    }
+  }
+
+  private onTakeInput(): void {
+    if (this.phase === 'live' && this.connected && this.attachment !== null && !this.isOwner()) {
+      this.effects.push({ kind: 'requestOwnership', attachment: this.attachment });
+    }
+  }
+
+  private onResizeTimer(): void {
+    if (
+      this.phase !== 'live' ||
+      !this.connected ||
+      this.attachment === null ||
+      this.ownership === null ||
+      !this.isOwner() ||
+      this.instance === null ||
+      this.container === null
+    ) {
+      return;
+    }
+    const fit = fitGrid(this.container, this.cell);
+    if (fit === null || sameSize(fit, this.instance.size)) return;
+    const generation = this.ownership.generation;
+    const sent = this.sentResize;
+    if (sent !== null && sent.generation === generation && sameSize(sent.size, fit)) return;
+    this.sentResize = { size: fit, generation };
+    this.effects.push({
+      kind: 'resize',
+      attachment: this.attachment,
+      size: fit,
+      ownershipGeneration: generation,
+    });
+  }
+
+  private onDisplayTimer(): void {
+    if (this.attachment === null || !this.canSendDisplay() || !this.displayChanged()) return;
+    const display = this.display();
+    this.sentDisplay = display;
+    this.effects.push({ kind: 'setDisplay', attachment: this.attachment, display });
   }
 
   private show(): void {
@@ -317,11 +456,12 @@ export class AttachmentMachine {
         return;
       case 'error':
         if (event.request !== null) this.onRequestAnswerFailed(event.code);
+        else if (event.attachment !== null) this.onAttachmentError(event.attachment, event.code);
         return;
       case 'resumed':
         return this.onResumed(event.attachment, event.replay_through);
       case 'ownership':
-        return;
+        return this.onOwnership(event.attachment, event.ownership_generation, event.owner);
       default:
         this.onStreamEvent(event);
     }
@@ -369,13 +509,34 @@ export class AttachmentMachine {
       this.startDetach(attachment);
     } else if (this.phase === 'attaching' && this.attachment === null) {
       this.attachment = attachment;
+      this.checkDisplay();
     }
+  }
+
+  private onOwnership(
+    attachment: DecimalU64,
+    generation: DecimalU64,
+    owner: DecimalU64 | null,
+  ): void {
+    if (attachment !== this.attachment) return;
+    if (this.phase !== 'attaching' && this.phase !== 'live') return;
+    this.ownership = { generation, owner };
+    if (this.status?.kind === 'error') this.status = null;
+    this.startResizeTimer();
+  }
+
+  private onAttachmentError(attachment: DecimalU64, code: string): void {
+    if (this.attachment === null || attachment !== this.attachment) return;
+    if (this.phase !== 'attaching' && this.phase !== 'live') return;
+    if (IGNORED_ATTACHMENT_ERRORS.has(code)) return;
+    this.status = { kind: 'error', code };
   }
 
   private onResumed(attachment: DecimalU64, replayThrough: Cursor | null): void {
     if (this.phase === 'resuming' && attachment === this.attachment) {
       this.phase = 'live';
       this.replayThrough = replayThrough;
+      this.checkDisplay();
     } else if (this.phase === 'detaching' && this.detachWhenNamed) {
       this.startDetach(attachment);
     }
@@ -441,6 +602,7 @@ export class AttachmentMachine {
   }
 
   private markApplied(cursor: Cursor): void {
+    const wasStarted = this.applying?.type === 'started';
     this.applying = null;
     this.applied = cursor;
     if (this.replayThrough !== null && !cursorAfter(this.replayThrough, cursor)) {
@@ -450,6 +612,7 @@ export class AttachmentMachine {
       this.effects.push({ kind: 'startTimer', timer: 'ack', ms: ACK_INTERVAL_MS });
       this.ackScheduled = true;
     }
+    if (wasStarted) this.startResizeTimer();
   }
 
   private onAckTimer(): void {
@@ -567,6 +730,7 @@ export class AttachmentMachine {
         history: TERMINAL_HISTORY_LINES,
       },
     });
+    this.sentDisplay = display;
     this.phase = 'attaching';
     this.attachment = null;
     this.detachWhenNamed = false;
@@ -617,6 +781,7 @@ export class AttachmentMachine {
     this.replayThrough = null;
     this.acked = null;
     this.ownership = null;
+    this.sentResize = null;
     this.queue.clear();
     this.applying = null;
   }

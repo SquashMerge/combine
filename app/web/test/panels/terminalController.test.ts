@@ -16,6 +16,7 @@ import {
   errorEvent,
   gapEvent,
   lostEvent,
+  ownershipEvent,
   resizedEvent,
   resumedEvent,
   resyncedEvent,
@@ -795,5 +796,335 @@ describe('terminalController end states', () => {
     await Promise.resolve();
     expect(t.controller.getView()).toMatchObject({ phase: 'live', stale: false });
     expect(t.fake.instances[0]?.disposed).toBe(true);
+  });
+});
+
+const decoder = new TextDecoder();
+
+/** Goes live and makes attachment `owner` the owner at `generation`. */
+async function goLiveWithOwner(
+  t: Rig,
+  owner: number | null,
+  generation = 1,
+  started?: StartedOptions,
+): Promise<void> {
+  await t.goLive(started);
+  t.stream().emit(ownershipEvent(7, generation, owner));
+}
+
+describe('terminalController ownership and resize', () => {
+  it('the owner sends a debounced resize of floor(container / cell) with its generation', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 3);
+    t.controller.setContainerSize(400, 200);
+    vi.advanceTimersByTime(50);
+    t.controller.setContainerSize(805, 349);
+    vi.advanceTimersByTime(99);
+    expect(t.stream().commands('resize')).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '3' },
+    ]);
+    expect(t.fake.instances[0]?.resizes).toEqual([]);
+  });
+
+  it('the owner sends no resize when the fit equals the PTY size', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 1, { cols: 100, rows: 20 });
+    t.controller.setContainerSize(800, 340);
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toEqual([]);
+  });
+
+  it('a non-owner never sends resize and its view is letterboxed', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 8);
+    t.controller.setContainerSize(800, 340);
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toEqual([]);
+    expect(t.controller.getView()).toMatchObject({ ownership: 'other', letterboxed: true });
+    t.stream().emit(ownershipEvent(7, 2, null));
+    t.controller.setContainerSize(900, 340);
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toEqual([]);
+    expect(t.controller.getView()).toMatchObject({ ownership: 'none', letterboxed: true });
+  });
+
+  it('show sends nothing about ownership', async () => {
+    const t = rig();
+    await t.goLive();
+    vi.advanceTimersByTime(500);
+    expect(t.ops().filter((op) => op !== 'attach' && op !== 'ack')).toEqual([]);
+    expect(t.controller.getView().ownership).toBe('unknown');
+  });
+
+  it('dom focus sends focus for the owner and for a non-owner', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7);
+    t.fake.instances[0]?.emitFocus();
+    expect(t.stream().commands('focus')).toHaveLength(1);
+    t.stream().emit(ownershipEvent(7, 2, 8));
+    t.fake.instances[0]?.emitFocus();
+    expect(t.stream().commands('focus')).toEqual([
+      { op: 'focus', attachment: '7' },
+      { op: 'focus', attachment: '7' },
+    ]);
+  });
+
+  it('non-owner typing sends input and never request_ownership', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 8);
+    t.fake.instances[0]?.emitInput('ls');
+    const inputs = t.stream().commands('input');
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({ op: 'input', attachment: '7' });
+    expect(inputs[0]?.op === 'input' && decoder.decode(inputs[0].bytes)).toBe('ls');
+    expect(t.stream().commands('requestOwnership')).toEqual([]);
+  });
+
+  it('the owner forwards focus reports as input', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7);
+    t.fake.instances[0]?.emitFocusReport('\x1b[I');
+    const inputs = t.stream().commands('input');
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]?.op === 'input' && decoder.decode(inputs[0].bytes)).toBe('\x1b[I');
+  });
+
+  it('a non-owner drops focus reports', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 8);
+    t.fake.instances[0]?.emitFocusReport('\x1b[I');
+    t.fake.instances[0]?.emitFocusReport('\x1b[O');
+    expect(t.stream().commands('input')).toEqual([]);
+    expect(t.stream().commands('requestOwnership')).toEqual([]);
+  });
+
+  it('take input sends request_ownership', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 8);
+    expect(t.controller.getView().canTakeInput).toBe(true);
+    t.controller.takeInput();
+    expect(t.stream().commands('requestOwnership')).toEqual([
+      { op: 'requestOwnership', attachment: '7' },
+    ]);
+    t.stream().emit(ownershipEvent(7, 2, 7));
+    expect(t.controller.getView().canTakeInput).toBe(false);
+    t.controller.takeInput();
+    expect(t.stream().commands('requestOwnership')).toHaveLength(1);
+  });
+
+  it("the owner mark follows the daemon's ownership events", async () => {
+    const t = rig();
+    await t.goLive();
+    expect(t.controller.getView()).toMatchObject({ ownership: 'unknown', letterboxed: true });
+    t.stream().emit(ownershipEvent(7, 1, null));
+    expect(t.controller.getView().ownership).toBe('none');
+    t.stream().emit(ownershipEvent(7, 2, 8));
+    expect(t.controller.getView().ownership).toBe('other');
+    t.stream().emit(ownershipEvent(7, 3, 7));
+    expect(t.controller.getView()).toMatchObject({ ownership: 'self', letterboxed: false });
+    t.stream().emit(ownershipEvent(9, 4, null));
+    expect(t.controller.getView().ownership).toBe('self');
+    t.port.setConnected(HOST_ID, false);
+    expect(t.controller.getView()).toMatchObject({ ownership: 'unknown', letterboxed: true });
+  });
+
+  it('stale_generation is not a failure; the owner re-sends after the next ownership', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 1);
+    t.controller.setContainerSize(805, 349);
+    vi.advanceTimersByTime(100);
+    expect(t.stream().commands('resize')).toHaveLength(1);
+    t.stream().emit(errorEvent({ code: 'stale_generation', attachment: 7 }));
+    t.stream().emit(errorEvent({ code: 'unknown_attachment', attachment: 7 }));
+    expect(t.controller.getView().status).toBeNull();
+    vi.advanceTimersByTime(500);
+    expect(t.stream().commands('resize')).toHaveLength(1);
+    t.stream().emit(ownershipEvent(7, 2, 7));
+    vi.advanceTimersByTime(100);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '2' },
+    ]);
+  });
+
+  it('another attachment error sets a status that the next ownership clears', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 8);
+    t.stream().emit(errorEvent({ code: 'bad_input', attachment: 9 }));
+    expect(t.controller.getView().status).toBeNull();
+    t.stream().emit(errorEvent({ code: 'bad_input', attachment: 7 }));
+    expect(t.controller.getView().status).toEqual({ kind: 'error', code: 'bad_input' });
+    t.stream().emit(ownershipEvent(7, 2, 8));
+    expect(t.controller.getView().status).toBeNull();
+  });
+
+  it('an applied started starts the owner resize timer', () => {
+    const machine = new AttachmentMachine(TERM);
+    const timerStarts = (effects: ReturnType<AttachmentMachine['handle']>): number =>
+      effects.filter((effect) => effect.kind === 'startTimer' && effect.timer === 'resize').length;
+    machine.handle({ kind: 'show' });
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: attachedEvent(1, 7) });
+    expect(timerStarts(machine.handle({ kind: 'event', event: ownershipEvent(7, 1, 7) }))).toBe(0);
+    machine.handle({ kind: 'event', event: startedEvent(cursor(7, 1, 0)) });
+    expect(machine.view().phase).toBe('live');
+    expect(timerStarts(machine.handle({ kind: 'applied', cursor: cursor(7, 1, 0) }))).toBe(1);
+  });
+});
+
+describe('terminalController display facts', () => {
+  const cellOf = (width: number, height: number) => displayFrom(TERMINAL_THEME, { width, height });
+
+  it('attach options carry the display from the theme and measured cell', () => {
+    const machine = new AttachmentMachine(TERM);
+    machine.handle({ kind: 'cellSize', cell: { width: 9.4, height: 18.2 } });
+    machine.handle({ kind: 'containerSize', width: 940, height: 364 });
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    const effects = machine.handle({ kind: 'show' });
+    expect(effects).toContainEqual({
+      kind: 'attach',
+      terminal: TERM,
+      options: {
+        cols: 100,
+        rows: 20,
+        display: cellOf(9, 18),
+        observe: false,
+        history: TERMINAL_HISTORY_LINES,
+      },
+    });
+  });
+
+  it('a cell size change sends one debounced set_display', async () => {
+    const t = rig();
+    await t.goLive();
+    const adapter = t.fake.instances[0];
+    adapter?.emitCellSize({ width: 9, height: 18 });
+    vi.advanceTimersByTime(100);
+    adapter?.emitCellSize({ width: 10, height: 18 });
+    vi.advanceTimersByTime(249);
+    expect(t.stream().commands('setDisplay')).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(t.stream().commands('setDisplay')).toEqual([
+      { op: 'setDisplay', attachment: '7', display: cellOf(10, 18) },
+    ]);
+    vi.advanceTimersByTime(1000);
+    expect(t.stream().commands('setDisplay')).toHaveLength(1);
+  });
+
+  it('set_display is never sent while not attached', async () => {
+    const machine = new AttachmentMachine(TERM);
+    const sentDisplay = (effects: ReturnType<AttachmentMachine['handle']>): boolean =>
+      effects.some((effect) => effect.kind === 'setDisplay');
+    machine.handle({ kind: 'show' });
+    machine.handle({ kind: 'cellSize', cell: { width: 9, height: 18 } });
+    expect(machine.view().phase).toBe('waiting');
+    expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    expect(machine.view().phase).toBe('attaching');
+    machine.handle({ kind: 'cellSize', cell: { width: 10, height: 18 } });
+    expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);
+    const named = machine.handle({ kind: 'event', event: attachedEvent(1, 7) });
+    expect(named).toContainEqual({ kind: 'startTimer', timer: 'display', ms: 250 });
+    expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(true);
+
+    const t = rig();
+    await t.goLive();
+    t.fake.instances[0]?.emitCellSize({ width: 9, height: 18 });
+    t.port.setConnected(HOST_ID, false);
+    vi.advanceTimersByTime(1000);
+    expect(t.stream().commands('setDisplay')).toEqual([]);
+    t.controller.setVisible(false);
+    vi.advanceTimersByTime(1000);
+    expect(t.stream().commands('setDisplay')).toEqual([]);
+  });
+
+  it('an unchanged display is not re-sent', async () => {
+    const t = rig();
+    await t.goLive();
+    const adapter = t.fake.instances[0];
+    adapter?.emitCellSize({ width: 8, height: 17 });
+    adapter?.emitCellSize({ width: 8.2, height: 16.8 });
+    vi.advanceTimersByTime(1000);
+    expect(t.stream().commands('setDisplay')).toEqual([]);
+    adapter?.emitCellSize({ width: 9, height: 17 });
+    vi.advanceTimersByTime(250);
+    adapter?.emitCellSize({ width: 9.2, height: 17 });
+    vi.advanceTimersByTime(1000);
+    expect(t.stream().commands('setDisplay')).toHaveLength(1);
+  });
+
+  it('a display that changed while disconnected is sent once resumed', async () => {
+    const t = rig();
+    await t.goLive();
+    t.fake.instances[0]?.emitCellSize({ width: 9, height: 18 });
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    t.stream().emit(resumedEvent(2, 7, null));
+    vi.advanceTimersByTime(250);
+    expect(t.stream().commands('setDisplay')).toEqual([
+      { op: 'setDisplay', attachment: '7', display: cellOf(9, 18) },
+    ]);
+  });
+});
+
+describe('terminalController automatic replies', () => {
+  const REPLY = '\x1b[1;1R';
+
+  async function liveOwnerWithWrite(t: Rig, owner: number): Promise<void> {
+    await goLiveWithOwner(t, owner, 4);
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'query'));
+  }
+
+  it('the owner forwards a DECXCPR reply with its epoch and generation', async () => {
+    const t = rig();
+    await liveOwnerWithWrite(t, 7);
+    t.fake.instances[0]?.emitAutomaticReply(REPLY);
+    const replies = t.stream().commands('automaticReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      op: 'automaticReply',
+      attachment: '7',
+      epoch: '1',
+      ownershipGeneration: '4',
+    });
+    expect(replies[0]?.op === 'automaticReply' && decoder.decode(replies[0].bytes)).toBe(REPLY);
+    expect(t.stream().commands('input')).toEqual([]);
+  });
+
+  it('a non-owner drops DECXCPR replies', async () => {
+    const t = rig();
+    await liveOwnerWithWrite(t, 8);
+    t.fake.instances[0]?.emitAutomaticReply(REPLY);
+    expect(t.stream().commands('automaticReply')).toEqual([]);
+    expect(t.stream().commands('input')).toEqual([]);
+  });
+
+  it('replies produced while applying replayed events are dropped', async () => {
+    const t = rig();
+    await resumeAfterDrop(t, 1);
+    t.stream().emit(resumedEvent(2, 7, cursor(7, 1, 3)));
+    t.stream().emit(ownershipEvent(7, 4, 7));
+    t.stream().emit(dataEvent(cursor(7, 1, 2), 'two'));
+    t.stream().emit(dataEvent(cursor(7, 1, 3), 'three'));
+    t.fake.instances[0]?.emitAutomaticReply(REPLY);
+    t.fake.instances[0]?.completeWrite();
+    t.fake.instances[0]?.emitAutomaticReply(REPLY);
+    expect(t.stream().commands('automaticReply')).toEqual([]);
+  });
+
+  it('replies after replay_through are forwarded', async () => {
+    const t = rig();
+    await resumeAfterDrop(t, 1);
+    t.stream().emit(resumedEvent(2, 7, cursor(7, 1, 2)));
+    t.stream().emit(ownershipEvent(7, 4, 7));
+    t.stream().emit(dataEvent(cursor(7, 1, 2), 'two'));
+    t.fake.instances[0]?.completeAll();
+    t.stream().emit(dataEvent(cursor(7, 1, 3), 'live'));
+    t.fake.instances[0]?.emitAutomaticReply(REPLY);
+    expect(t.stream().commands('automaticReply')).toMatchObject([
+      { op: 'automaticReply', attachment: '7', epoch: '1', ownershipGeneration: '4' },
+    ]);
   });
 });
