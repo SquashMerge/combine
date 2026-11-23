@@ -88,11 +88,11 @@ SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout chang
 Until #23 lands this needs the interim `test-support` build and a daemon on `"backend": "fake"`, started by that build's `combined serve`. Keep its `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`, and use the build's absolute path below. With Remote Login on, this sends a `hello` for protocol version 3 through `combined connect` and prints the reply:
 
 ```sh
-printf '\000\000\000\046\001{"type":"hello","protocol_version":3}' \
+printf '\000\000\000\046\001{"type":"hello","protocol_version":4}' \
   | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
 ```
 
-Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":3}`. The reply is a control frame holding `{"type":"welcome","protocol_version":3,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":4}`. The reply is a control frame holding `{"type":"welcome","protocol_version":4,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Check that no network port is open
 
