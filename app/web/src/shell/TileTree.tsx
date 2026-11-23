@@ -1,5 +1,15 @@
 import { type Dict, dictGet } from '../model/dict';
+import type { HostId, TermId } from '../model/ids';
 import type { LayoutNode, LayoutSnapshot, SplitDirection } from '../model/layout';
+import type { TerminalPort } from '../ipc/terminalPort';
+import { TerminalPanel } from '../panels/TerminalPanel';
+import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
+
+export interface TerminalMount {
+  hostId: HostId;
+  termId: TermId;
+  label: { name: string; host: string; state: string };
+}
 
 interface TileTreeProps {
   layout: LayoutSnapshot;
@@ -11,6 +21,9 @@ interface TileTreeProps {
   onSelectTab: (tile: string, panel: string) => void;
   onSplit: (tile: string, dir: SplitDirection) => void;
   onClose: (tile: string) => void;
+  terminalPort: TerminalPort;
+  terminal: TerminalMount | null;
+  createAdapter?: XtermAdapterFactory;
 }
 
 type NodeProps = Omit<TileTreeProps, 'layout' | 'notice' | 'error'> & {
@@ -31,7 +44,8 @@ function Node({ node, closable, ...rest }: NodeProps) {
       </div>
     );
   }
-  const { focusedTile, activeTabs, onFocus, onSelectTab, onSplit, onClose } = rest;
+  const { focusedTile, activeTabs, onFocus, onSelectTab, onSplit, onClose, terminalPort, terminal, createAdapter } =
+    rest;
   const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
   const focused = focusedTile === node.id;
   return (
@@ -68,6 +82,18 @@ function Node({ node, closable, ...rest }: NodeProps) {
       </div>
       <div className="tile-body" role="tabpanel">
         {active ?? 'No panels'}
+        {focused && terminal !== null && (
+          // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
+          <TerminalPanel
+            key={`${terminal.hostId}/${terminal.termId}`}
+            port={terminalPort}
+            hostId={terminal.hostId}
+            termId={terminal.termId}
+            visible
+            label={terminal.label}
+            {...(createAdapter === undefined ? {} : { createAdapter })}
+          />
+        )}
       </div>
     </div>
   );

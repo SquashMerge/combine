@@ -4,6 +4,7 @@ import { dictWith, emptyDict } from '../../src/model/dict';
 import { type LayoutSnapshot, parseLayoutEvent } from '../../src/model/layout';
 import { TileTree } from '../../src/shell/TileTree';
 import { loadLayoutEventFixture } from '../support/memoryLayoutPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
 
 function fixtureLayout(overrides: Partial<LayoutSnapshot> = {}): LayoutSnapshot {
   const event = parseLayoutEvent(loadLayoutEventFixture().snapshot);
@@ -17,6 +18,8 @@ function mount(layout: LayoutSnapshot, notice: string | null = null) {
     onSelectTab: vi.fn(),
     onSplit: vi.fn(),
     onClose: vi.fn(),
+    terminalPort: new MemoryTerminalPort(),
+    terminal: null,
   };
   render(
     <TileTree
@@ -81,7 +84,14 @@ describe('TileTree', () => {
 });
 
 describe('TileTree with tile IDs that name inherited properties', () => {
-  const handlers = () => ({ onFocus: vi.fn(), onSelectTab: vi.fn(), onSplit: vi.fn(), onClose: vi.fn() });
+  const handlers = () => ({
+    onFocus: vi.fn(),
+    onSelectTab: vi.fn(),
+    onSplit: vi.fn(),
+    onClose: vi.fn(),
+    terminalPort: new MemoryTerminalPort(),
+    terminal: null,
+  });
 
   it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
     'renders tile %s with no active panel when no tab is set',

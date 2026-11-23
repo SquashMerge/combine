@@ -5,11 +5,12 @@ import { App } from '../../src/shell/App';
 import { SpaceRail } from '../../src/shell/SpaceRail';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, loadFixtureSnapshot, snapshot, space } from '../support/snapshots';
 
 async function mount(port: MemoryHostsPort) {
-  const view = render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+  const view = render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
   return view;
 }
