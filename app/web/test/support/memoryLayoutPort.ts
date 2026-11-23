@@ -22,12 +22,17 @@ export class MemoryLayoutPort implements LayoutPort {
   readonly calls: LayoutCall[] = [];
   unwatchError: string | null = null;
   watchGate: Promise<void> | null = null;
+  /** When set, `onLayoutEvent` registers its listener only once this resolves, as Tauri's async `listen` does. */
+  listenGate: Promise<void> | null = null;
+  /** Called inside `watchLayout`, before it returns, so a test can reply to the watch at once. */
+  onWatch: ((hostId: HostId, space: string, request: DecimalU64) => void) | null = null;
   private readonly listeners = new Set<Listener>();
   private nextRequest = 1n;
 
   watchLayout(hostId: HostId, space: string): Promise<DecimalU64> {
     this.calls.push({ kind: 'watch', hostId, space });
     const request = this.request();
+    this.onWatch?.(hostId, space, request);
     return this.watchGate === null ? Promise.resolve(request) : this.watchGate.then(() => request);
   }
 
@@ -49,10 +54,13 @@ export class MemoryLayoutPort implements LayoutPort {
   }
 
   onLayoutEvent(listener: Listener): Promise<Unsubscribe> {
-    this.listeners.add(listener);
-    return Promise.resolve(() => {
-      this.listeners.delete(listener);
-    });
+    const register = (): Unsubscribe => {
+      this.listeners.add(listener);
+      return () => {
+        this.listeners.delete(listener);
+      };
+    };
+    return this.listenGate === null ? Promise.resolve(register()) : this.listenGate.then(register);
   }
 
   emit(event: LayoutEvent): void {

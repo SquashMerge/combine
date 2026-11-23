@@ -42,10 +42,14 @@ function mount(port: MemoryLayoutPort, initialHosts = hosts(), initial: SpaceKey
   );
 }
 
+/** Lets the hook's asynchronous listener registration finish, so its first watch goes out. */
+const settle = () => act(() => Promise.resolve());
+
 describe('useSpaceLayout', () => {
   it("switching to another host's space unwatches the previous host", async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await settle();
     view.rerender({ hosts: hosts(), selected: key(HOST_B, '/src/three') });
     await waitFor(() => expect(port.calls).toHaveLength(3));
     expect(port.calls).toEqual([
@@ -55,9 +59,10 @@ describe('useSpaceLayout', () => {
     ]);
   });
 
-  it('same-host switch sends only watch_layout', () => {
+  it('same-host switch sends only watch_layout', async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await settle();
     view.rerender({ hosts: hosts(), selected: key(HOST_A, '/src/two') });
     expect(port.calls).toEqual([
       { kind: 'watch', hostId: HOST_A, space: '/src/one' },
@@ -65,9 +70,10 @@ describe('useSpaceLayout', () => {
     ]);
   });
 
-  it('clearing selection unwatches the previous host', () => {
+  it('clearing selection unwatches the previous host', async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await settle();
     view.rerender({ hosts: hosts(), selected: null });
     expect(port.calls).toEqual([
       { kind: 'watch', hostId: HOST_A, space: '/src/one' },
@@ -75,11 +81,12 @@ describe('useSpaceLayout', () => {
     ]);
   });
 
-  it('rewatches selected space after reconnect', () => {
+  it('rewatches selected space after reconnect', async () => {
     const port = new MemoryLayoutPort();
     port.unwatchError = 'not connected';
     const selected = key(HOST_A, '/src/one');
     const view = mount(port, hosts(), selected);
+    await settle();
     view.rerender({ hosts: hosts('down'), selected });
     view.rerender({ hosts: hosts('up'), selected });
     expect(port.calls).toEqual([
@@ -102,16 +109,17 @@ describe('useSpaceLayout', () => {
     await waitFor(() => expect(view.result.current.error).toBe('boom'));
   });
 
-  it('does not watch a space on a host that is not connected', () => {
+  it('does not watch a space on a host that is not connected', async () => {
     const port = new MemoryLayoutPort();
     mount(port, hosts('down'), key(HOST_A, '/src/one'));
+    await settle();
     expect(port.calls).toEqual([]);
   });
 
   it('unwatches and unsubscribes on unmount', async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
-    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
     view.unmount();
     expect(port.listenerCount()).toBe(0);
     expect(port.calls.at(-1)).toEqual({ kind: 'unwatch', hostId: HOST_A });
@@ -120,7 +128,7 @@ describe('useSpaceLayout', () => {
   it('keeps snapshots for the watched space and marks it read-only', async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
-    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
     act(() => port.push(HOST_A, layout('/src/two', '9')));
     expect(view.result.current.snapshot).toBeNull();
     act(() => port.push(HOST_B, layout('/src/one', '9')));
@@ -138,7 +146,7 @@ describe('useSpaceLayout', () => {
   it('sends a split through the queue against the held revision', async () => {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
-    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
     act(() => port.push(HOST_A, layout('/src/one', '5')));
     act(() => view.result.current.split('t1', 'h'));
     await waitFor(() => expect(port.calls.at(-1)?.kind).toBe('mutate'));
@@ -150,7 +158,7 @@ describe('useSpaceLayout', () => {
   async function watching() {
     const port = new MemoryLayoutPort();
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
-    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
     act(() => port.push(HOST_A, layout('/src/one', '5'), '1' as DecimalU64));
     const mutates = () => port.calls.filter((call) => call.kind === 'mutate');
     return { port, view, mutates };
@@ -216,9 +224,64 @@ describe('useSpaceLayout', () => {
       open = resolve;
     });
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
-    await waitFor(() => expect(port.listenerCount()).toBe(1));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
     act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '1' as DecimalU64, code: 'unknown_space', message: 'no such space' }));
     expect(view.result.current.error).toBe('no such space');
     open();
+  });
+
+  function gateListener(port: MemoryLayoutPort): () => Promise<void> {
+    let release = () => undefined as void;
+    port.listenGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return () => act(async () => release());
+  }
+
+  it('waits for the event listener before the first watch, so an immediate reply is held', async () => {
+    const port = new MemoryLayoutPort();
+    const release = gateListener(port);
+    port.onWatch = (hostId, space, request) => port.push(hostId, layout(space, '3'), request);
+    const view = mount(port, hosts(), null);
+    view.rerender({ hosts: hosts(), selected: key(HOST_A, '/src/one') });
+    await settle();
+    await release();
+    await waitFor(() => expect(view.result.current.snapshot?.layoutRevision).toBe('3'));
+    expect(port.calls).toEqual([{ kind: 'watch', hostId: HOST_A, space: '/src/one' }]);
+    act(() => view.result.current.split('t1', 'h'));
+    await waitFor(() => expect(port.calls.at(-1)?.kind).toBe('mutate'));
+    const call = port.calls.at(-1);
+    expect(call?.kind === 'mutate' && call.baseLayoutRevision).toBe('3');
+  });
+
+  it('sends only the latest selection once a pending listener registers', async () => {
+    const port = new MemoryLayoutPort();
+    const release = gateListener(port);
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    view.rerender({ hosts: hosts(), selected: key(HOST_A, '/src/two') });
+    view.rerender({ hosts: hosts(), selected: key(HOST_B, '/src/three') });
+    await settle();
+    expect(port.calls).toEqual([]);
+    await release();
+    expect(port.calls).toEqual([{ kind: 'watch', hostId: HOST_B, space: '/src/three' }]);
+  });
+
+  it('sends no watch when selection is cleared before a pending listener registers', async () => {
+    const port = new MemoryLayoutPort();
+    const release = gateListener(port);
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    view.rerender({ hosts: hosts(), selected: null });
+    await release();
+    expect(port.calls).toEqual([]);
+  });
+
+  it('sends no watch and drops the listener when unmounted before it registers', async () => {
+    const port = new MemoryLayoutPort();
+    const release = gateListener(port);
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    view.unmount();
+    await release();
+    expect(port.calls).toEqual([]);
+    expect(port.listenerCount()).toBe(0);
   });
 });

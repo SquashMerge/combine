@@ -34,7 +34,8 @@ function isConnected(hosts: HostsSnapshot | null, hostId: HostId): boolean {
 
 /**
  * Keeps one layout watch on the selected space while its host is connected, and routes the
- * host's layout events to the snapshot and to that space's mutation queue.
+ * host's layout events to the snapshot and to that space's mutation queue. The watch is sent only
+ * after the layout-event listener is registered, as `useHostsSnapshot` subscribes before it fetches.
  */
 export function useSpaceLayout(
   port: LayoutPort,
@@ -46,12 +47,19 @@ export function useSpaceLayout(
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [readOnly, setReadOnly] = useState<ReadonlySet<string>>(new Set());
+  // The port whose layout-event listener is registered. No watch is sent before then: a quick
+  // reply to it would arrive with no listener and be lost.
+  const [listening, setListening] = useState<LayoutPort | null>(null);
   const watched = useRef<SpaceKey | null>(null);
   const watchRequest = useRef<DecimalU64 | null>(null);
+  // Bumped whenever the watch is replaced, dropped or unmounted, so a late watch reply from an
+  // older watch is ignored.
+  const watchGeneration = useRef(0);
   const queue = useRef<LayoutQueue | null>(null);
 
+  const ready = listening === port;
   const watchHost =
-    selected !== null && isConnected(hosts, selected.hostId) ? selected.hostId : null;
+    ready && selected !== null && isConnected(hosts, selected.hostId) ? selected.hostId : null;
   const watchPath = watchHost === null ? null : (selected?.path ?? null);
 
   useEffect(() => {
@@ -62,6 +70,8 @@ export function useSpaceLayout(
         if (errorText(cause) !== NOT_CONNECTED) setError(errorText(cause));
       });
     }
+    // Set before the watch goes out, so a reply that comes back at once is routed to it.
+    watched.current = next;
     if (next !== null && (prev === null || prev.hostId !== next.hostId || prev.path !== next.path)) {
       queue.current?.onDisconnected();
       queue.current = new LayoutQueue({
@@ -73,25 +83,30 @@ export function useSpaceLayout(
       setHeld(null);
       setNotice(null);
       setError(null);
+      watchGeneration.current += 1;
+      const generation = watchGeneration.current;
       port.watchLayout(next.hostId, next.path).then(
         (request) => {
-          watchRequest.current = request;
+          if (watchGeneration.current === generation) watchRequest.current = request;
         },
-        (cause: unknown) => setError(errorText(cause)),
+        (cause: unknown) => {
+          if (watchGeneration.current === generation) setError(errorText(cause));
+        },
       );
     }
     if (next === null) {
+      watchGeneration.current += 1;
       queue.current?.onDisconnected();
       queue.current = null;
       setHeld(null);
     }
-    watched.current = next;
   }, [port, watchHost, watchPath, newTileId]);
 
   useEffect(
     () => () => {
       const prev = watched.current;
       watched.current = null;
+      watchGeneration.current += 1;
       if (prev !== null) port.unwatchLayout(prev.hostId).catch(() => undefined);
     },
     [port],
@@ -146,8 +161,12 @@ export function useSpaceLayout(
 
     port.onLayoutEvent(handle).then(
       (stop) => {
-        if (active) unsubscribe = stop;
-        else stop();
+        if (!active) {
+          stop();
+          return;
+        }
+        unsubscribe = stop;
+        setListening(port);
       },
       (cause: unknown) => {
         if (active) setError(errorText(cause));
