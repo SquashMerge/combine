@@ -152,12 +152,31 @@ export class TerminalController {
     this.draining = true;
     try {
       for (let next = this.inputs.shift(); next !== undefined; next = this.inputs.shift()) {
+        if (next.kind === 'event' && !this.answersOutstandingRequest(next.event)) continue;
         for (const effect of this.machine.handle(next)) this.run(effect);
         this.refresh();
       }
     } finally {
       this.draining = false;
     }
+  }
+
+  /**
+   * `attached`, `resumed`, `gap{request}` and `error{request}` answer an attach or resume. The
+   * transport owns request ids, so the panel only checks that one is outstanding.
+   */
+  private answersOutstandingRequest(event: TerminalStreamEvent): boolean {
+    if (
+      event.type !== 'attached' &&
+      event.type !== 'resumed' &&
+      (event.type !== 'gap' || event.request === null) &&
+      (event.type !== 'error' || event.request === null)
+    ) {
+      return true;
+    }
+    if (this.pendingSeq === null) return false;
+    this.pendingSeq = null;
+    return true;
   }
 
   private refresh(): void {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TermId } from '../../src/model/ids';
 import { parseTermId } from '../../src/model/ids';
+import { AttachmentMachine } from '../../src/panels/attachmentMachine';
 import { TerminalController } from '../../src/panels/terminalController';
 import { displayFrom } from '../../src/renderers/terminal/geometry';
 import { TERMINAL_HISTORY_LINES, TERMINAL_THEME } from '../../src/renderers/terminal/settings';
@@ -14,7 +15,9 @@ import {
   dataEvent,
   errorEvent,
   gapEvent,
+  lostEvent,
   resizedEvent,
+  resumedEvent,
   resyncedEvent,
   startedEvent,
   type MemoryTerminalStream,
@@ -527,5 +530,270 @@ describe('terminalController status and lifetime', () => {
     t.controller.setVisible(true);
     expect(listener).toHaveBeenCalled();
     expect(t.controller.getView()).not.toBe(before);
+  });
+});
+
+/** Goes live, applies data up to `seq`, drops the connection and brings it back, which resumes. */
+async function resumeAfterDrop(t: Rig, seq = 1): Promise<void> {
+  await t.goLive();
+  for (let n = 1; n <= seq; n++) t.stream().emit(dataEvent(cursor(7, 1, n), `d${n}`));
+  t.fake.instances[0]?.completeAll();
+  t.port.setConnected(HOST_ID, false);
+  t.port.setConnected(HOST_ID, true);
+}
+
+describe('terminalController resume', () => {
+  it('resumes from the last applied cursor after a drop', async () => {
+    const t = rig();
+    await resumeAfterDrop(t, 2);
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.stream().commands('attach')).toHaveLength(1);
+    expect(t.controller.getView()).toMatchObject({ phase: 'resuming', hasInstance: true, stale: false });
+    t.stream().emit(resumedEvent(2, 7, null));
+    expect(t.controller.getView().phase).toBe('live');
+    expect(t.fake.instances).toHaveLength(1);
+  });
+
+  it('resume waits until the apply queue drains', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'one'));
+    t.stream().emit(dataEvent(cursor(7, 1, 2), 'two'));
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    expect(t.stream().commands('resume')).toEqual([]);
+    expect(t.controller.getView().phase).toBe('waiting');
+    t.fake.instances[0]?.completeWrite();
+    expect(t.stream().commands('resume')).toEqual([]);
+    t.fake.instances[0]?.completeWrite();
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.controller.getView().phase).toBe('resuming');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('acks replayed events once applied', async () => {
+    const t = rig();
+    await resumeAfterDrop(t, 1);
+    t.stream().emit(resumedEvent(2, 7, cursor(7, 1, 3)));
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'dup'));
+    t.stream().emit(dataEvent(cursor(7, 1, 2), 'two'));
+    t.stream().emit(dataEvent(cursor(7, 1, 3), 'three'));
+    vi.advanceTimersByTime(100);
+    expect(t.acks()).toEqual(['1:0']);
+    t.fake.instances[0]?.completeAll();
+    vi.advanceTimersByTime(16);
+    expect(t.acks()).toEqual(['1:0', '1:3']);
+    expect(t.fake.instances[0]?.writes.map((write) => new TextDecoder().decode(write.bytes))).toEqual([
+      'd1',
+      'two',
+      'three',
+    ]);
+  });
+
+  it('a rejected resume waits for the next connection and resumes again', async () => {
+    const t = rig();
+    await t.goLive();
+    t.port.setConnected(HOST_ID, false);
+    t.stream().rejectNext('resume', 'not connected');
+    t.port.setConnected(HOST_ID, true);
+    await flush();
+    expect(t.stream().commands('resume')).toHaveLength(1);
+    expect(t.controller.getView()).toMatchObject({ phase: 'waiting', connected: false });
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    expect(t.stream().commands('resume')).toHaveLength(2);
+    expect(t.controller.getView().phase).toBe('resuming');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('a resume answered with gap attaches fresh', async () => {
+    const t = rig();
+    await resumeAfterDrop(t);
+    t.stream().emit(gapEvent(7, 2));
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true, hasInstance: true });
+    expect(t.fake.instances[0]?.disposed).toBe(false);
+    t.stream().emit(attachedEvent(3, 8));
+    t.stream().emit(startedEvent(cursor(8, 1, 0)));
+    await Promise.resolve();
+    expect(t.controller.getView()).toMatchObject({ phase: 'live', stale: false });
+    expect(t.fake.instances[0]?.disposed).toBe(true);
+  });
+
+  it('a resume answered with an error attaches fresh', async () => {
+    const t = rig();
+    await resumeAfterDrop(t);
+    t.stream().emit(errorEvent({ code: 'unknown_attachment', request: 2 }));
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true, status: null });
+  });
+
+  it('a reply with nothing outstanding is ignored', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(resumedEvent(5, 7, null));
+    t.stream().emit(gapEvent(7, 6));
+    t.stream().emit(errorEvent({ code: 'unknown_attachment', request: 7 }));
+    expect(t.controller.getView()).toMatchObject({ phase: 'live', hasInstance: true });
+    expect(t.stream().commands('attach')).toHaveLength(1);
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    t.stream().emit(resumedEvent(8, 7, null));
+    t.stream().emit(gapEvent(7, 9));
+    expect(t.controller.getView().phase).toBe('live');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('request ids that differ from the panel count still answer the outstanding request', async () => {
+    const t = rig();
+    await t.open();
+    t.controller.setVisible(true);
+    t.stream().emit(attachedEvent(17, 7));
+    t.stream().emit(startedEvent(cursor(7, 1, 0)));
+    await Promise.resolve();
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'one'));
+    t.fake.instances[0]?.completeAll();
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    expect(t.controller.getView().phase).toBe('resuming');
+    t.stream().emit(resumedEvent(42, 7, null));
+    expect(t.controller.getView().phase).toBe('live');
+    expect(t.stream().commands('attach')).toHaveLength(1);
+  });
+
+  it('a resume rejected for another reason attaches fresh', async () => {
+    const t = rig();
+    await t.goLive();
+    t.port.setConnected(HOST_ID, false);
+    t.stream().rejectNext('resume', 'boom');
+    t.port.setConnected(HOST_ID, true);
+    await flush();
+    expect(t.stream().commands('resume')).toHaveLength(1);
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true, hasInstance: true });
+  });
+
+  it('hide while resuming detaches once resumed names the attachment', async () => {
+    const t = rig();
+    await resumeAfterDrop(t);
+    t.controller.setVisible(false);
+    expect(t.stream().commands('detach')).toEqual([]);
+    expect(t.controller.getView()).toMatchObject({ phase: 'detaching', hasInstance: false });
+    expect(t.fake.instances[0]?.disposed).toBe(true);
+    t.stream().emit(resumedEvent(2, 7, null));
+    expect(t.stream().commands('detach')).toEqual([{ op: 'detach', attachment: '7' }]);
+  });
+
+  it('hide while resuming finishes on gap{request} without detaching, and a later show attaches', async () => {
+    const t = rig();
+    await resumeAfterDrop(t);
+    t.controller.setVisible(false);
+    t.stream().emit(gapEvent(7, 2));
+    expect(t.controller.getView().phase).toBe('hidden');
+    expect(t.stream().commands('detach')).toEqual([]);
+    t.controller.setVisible(true);
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView().phase).toBe('attaching');
+  });
+
+  it('isReplay holds through replay_through and clears once it is applied', () => {
+    const machine = new AttachmentMachine(TERM);
+    const events = [attachedEvent(1, 7), startedEvent(cursor(7, 1, 0))];
+    machine.handle({ kind: 'show' });
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    for (const event of events) machine.handle({ kind: 'event', event });
+    machine.handle({ kind: 'applied', cursor: cursor(7, 1, 0) });
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: false } });
+    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    expect(machine.view().phase).toBe('resuming');
+    expect(machine.isReplay(cursor(7, 1, 1))).toBe(false);
+    machine.handle({ kind: 'event', event: resumedEvent(2, 7, cursor(7, 1, 2)) });
+    expect(machine.isReplay(cursor(7, 1, 2))).toBe(true);
+    expect(machine.isReplay(cursor(7, 1, 3))).toBe(false);
+    for (const seq of [1, 2]) {
+      machine.handle({ kind: 'event', event: dataEvent(cursor(7, 1, seq), 'x') });
+      machine.handle({ kind: 'applied', cursor: cursor(7, 1, seq) });
+    }
+    expect(machine.isReplay(cursor(7, 1, 2))).toBe(false);
+  });
+});
+
+describe('terminalController end states', () => {
+  it('closed exited shows exited and keeps the screen', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(dataEvent(cursor(7, 1, 1), 'one'));
+    t.fake.instances[0]?.completeAll();
+    t.stream().emit(closedEvent(cursor(7, 1, 2), 'exited'));
+    expect(t.acks()).toEqual(['1:0', '1:2']);
+    vi.advanceTimersByTime(100);
+    expect(t.acks()).toEqual(['1:0', '1:2']);
+    expect(t.controller.getView()).toMatchObject({
+      phase: 'ended',
+      status: { kind: 'exited' },
+      hasInstance: true,
+      canReattach: false,
+    });
+    expect(t.fake.instances[0]?.disposed).toBe(false);
+  });
+
+  it('closed detached outside detaching ends with closed status and is acked', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(closedEvent(cursor(7, 1, 1), 'detached'));
+    expect(t.acks()).toEqual(['1:0', '1:1']);
+    expect(t.controller.getView()).toMatchObject({ phase: 'ended', status: { kind: 'closed' } });
+    expect(t.stream().commands('detach')).toEqual([]);
+  });
+
+  it('lost shows lost with reattach and never retries on its own', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(lostEvent(cursor(7, 1, 1)));
+    expect(t.acks()).toEqual(['1:0', '1:1']);
+    expect(t.controller.getView()).toMatchObject({
+      phase: 'ended',
+      status: { kind: 'lost' },
+      canReattach: true,
+    });
+    vi.advanceTimersByTime(10_000);
+    t.port.setConnected(HOST_ID, false);
+    t.port.setConnected(HOST_ID, true);
+    await flush();
+    expect(t.stream().commands('attach')).toHaveLength(1);
+    expect(t.stream().commands('resume')).toEqual([]);
+    expect(t.controller.getView().phase).toBe('ended');
+  });
+
+  it('reattach does nothing after exited or closed', async () => {
+    for (const reason of ['exited', 'detached'] as const) {
+      const t = rig();
+      await t.goLive();
+      t.stream().emit(closedEvent(cursor(7, 1, 1), reason));
+      const before = t.controller.getView();
+      t.controller.reattach();
+      expect(t.controller.getView()).toBe(before);
+      expect(t.stream().commands('attach')).toHaveLength(1);
+    }
+  });
+
+  it('reattach after lost attaches fresh with the old screen dimmed', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(lostEvent(cursor(7, 1, 1)));
+    t.controller.reattach();
+    expect(t.stream().commands('attach')).toHaveLength(2);
+    expect(t.controller.getView()).toMatchObject({
+      phase: 'attaching',
+      stale: true,
+      hasInstance: true,
+      status: null,
+    });
+    expect(t.fake.instances[0]?.disposed).toBe(false);
+    t.stream().emit(attachedEvent(2, 8));
+    t.stream().emit(startedEvent(cursor(8, 1, 0)));
+    await Promise.resolve();
+    expect(t.controller.getView()).toMatchObject({ phase: 'live', stale: false });
+    expect(t.fake.instances[0]?.disposed).toBe(true);
   });
 });
