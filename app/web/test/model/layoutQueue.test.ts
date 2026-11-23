@@ -27,6 +27,8 @@ function snap(revision: string, tiles: string[] = ['t1', 't2']): LayoutSnapshot 
 }
 
 const rid = (n: number) => String(n) as DecimalU64;
+/** Valid opaque tile IDs that name properties every plain object inherits. */
+const INHERITED = ['__proto__', 'constructor', 'toString', 'hasOwnProperty'];
 const setActive = (tile: string): LayoutOp[] => [{ op: 'set_active', tile, panel: 'p' }];
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -266,5 +268,29 @@ describe('LayoutQueue', () => {
     await flush();
     expect(sent[0]?.ops[0]).toEqual(split);
     expect(sent[1]?.ops[0]).toEqual(close);
+  });
+
+  it.each(INHERITED)('sends a split of tile %s', async (id) => {
+    const { queue, sent, notices } = setup(() => 't-new');
+    queue.onSnapshot(null, snap('5', [id, 't2']));
+    queue.split(id, 'v');
+    await flush();
+    expect(notices).toEqual([]);
+    expect(sent).toEqual([
+      {
+        base: '5',
+        request: rid(1),
+        ops: [{ op: 'split_tile', tile: id, dir: 'v', newTile: 't-new', ratio: 0.5, panel: null }],
+      },
+    ]);
+  });
+
+  it.each(INHERITED)('drops an intent for tile %s when the layout has no such tile', async (id) => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.close(id);
+    await flush();
+    expect(sent).toEqual([]);
+    expect(notices).toEqual([STALE_NOTICE]);
   });
 });

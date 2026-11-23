@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { dictWith, emptyDict } from '../../src/model/dict';
 import { type LayoutSnapshot, parseLayoutEvent } from '../../src/model/layout';
 import { TileTree } from '../../src/shell/TileTree';
 import { loadLayoutEventFixture } from '../support/memoryLayoutPort';
@@ -76,5 +77,50 @@ describe('TileTree', () => {
   it('cannot close the only tile', () => {
     mount(fixtureLayout({ root: { type: 'tile', id: 't1', panels: [], active: null }, error: null }));
     expect((screen.getByRole('button', { name: 'Close tile' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('TileTree with tile IDs that name inherited properties', () => {
+  const handlers = () => ({ onFocus: vi.fn(), onSelectTab: vi.fn(), onSplit: vi.fn(), onClose: vi.fn() });
+
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    'renders tile %s with no active panel when no tab is set',
+    (id) => {
+      const props = handlers();
+      render(
+        <TileTree
+          layout={fixtureLayout({ root: { type: 'tile', id, panels: [], active: null }, error: null, dropped: null })}
+          notice={null}
+          error={null}
+          focusedTile={id}
+          activeTabs={{}}
+          {...props}
+        />,
+      );
+      expect(tile(id).getByRole('tabpanel').textContent).toBe('No panels');
+      expect(tile(id).queryAllByRole('tab')).toEqual([]);
+      expect(document.querySelector(`[data-tile-id="${id}"]`)?.getAttribute('aria-current')).toBe('true');
+      fireEvent.click(tile(id).getByRole('button', { name: 'Split right' }));
+      expect(props.onSplit).toHaveBeenCalledWith(id, 'h');
+    },
+  );
+
+  it('uses an own active tab stored under __proto__', () => {
+    render(
+      <TileTree
+        layout={fixtureLayout({
+          root: { type: 'tile', id: '__proto__', panels: ['p1', 'p2'], active: 'p1' },
+          error: null,
+          dropped: null,
+        })}
+        notice={null}
+        error={null}
+        focusedTile={null}
+        activeTabs={dictWith(emptyDict<string>(), '__proto__', 'p2')}
+        {...handlers()}
+      />,
+    );
+    expect(tile('__proto__').getByRole('tab', { name: 'p2' }).getAttribute('aria-selected')).toBe('true');
+    expect(tile('__proto__').getByRole('tabpanel').textContent).toBe('p2');
   });
 });

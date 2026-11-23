@@ -1,5 +1,5 @@
 import { type DecimalU64, ModelError, parseDecimalU64 } from './ids';
-import type { LayoutTiles } from './clientState';
+import type { LayoutTile, LayoutTiles } from './clientState';
 
 export type SplitDirection = 'h' | 'v';
 
@@ -156,10 +156,10 @@ export function parseLayoutEvent(value: unknown): LayoutEvent {
 }
 
 export function layoutTiles(root: LayoutNode): LayoutTiles {
-  const tiles: Record<string, { panels: readonly string[]; active: string | null }> = {};
+  const tiles = new Map<string, LayoutTile>();
   const visit = (node: LayoutNode): void => {
     if (node.type === 'tile') {
-      tiles[node.id] = { panels: node.panels, active: node.active };
+      tiles.set(node.id, { panels: node.panels, active: node.active });
       return;
     }
     visit(node.a);

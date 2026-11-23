@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { type ClientState, defaultClientState } from '../../src/model/clientState';
+import { type ClientState, defaultClientState, parseClientState } from '../../src/model/clientState';
 import type { DecimalU64, HostId } from '../../src/model/ids';
 import type { LayoutSnapshot } from '../../src/model/layout';
 import { App } from '../../src/shell/App';
@@ -157,5 +157,64 @@ describe('App with a layout', () => {
     );
     expect((await screen.findByRole('alert')).textContent).toBe('no such space');
     expect(document.querySelector('[data-tile-id]')).toBeNull();
+  });
+});
+
+describe('App with tile IDs that name inherited properties', () => {
+  // A client-state file as the backend sends it. An object literal's `__proto__:` sets its
+  // prototype instead of a key, so the text is written out by hand.
+  const stored = parseClientState(
+    JSON.parse(
+      `{"version":1,"lastSpace":{"spaceId":"${PATH}","selectedAtMs":"5"},"error":null,` +
+        `"spaces":{"${PATH}":{"spaceId":"${PATH}","focusedTile":"__proto__","activeTerminal":null,` +
+        '"activeTabs":{"constructor":"p2"},"groupState":{}}}}',
+    ),
+  );
+
+  function inherited(): LayoutSnapshot {
+    return {
+      ...layout(),
+      root: {
+        type: 'split',
+        dir: 'h',
+        ratio: 0.5,
+        a: { type: 'tile', id: '__proto__', panels: [], active: null },
+        b: {
+          type: 'split',
+          dir: 'v',
+          ratio: 0.5,
+          a: { type: 'tile', id: 'constructor', panels: ['p1', 'p2'], active: 'p1' },
+          b: { type: 'tile', id: 'toString', panels: [], active: null },
+        },
+      },
+    };
+  }
+
+  const tileOf = (id: string) =>
+    within(document.querySelector(`[data-tile-id="${id}"]`) as HTMLElement);
+
+  it('restores, renders, splits and saves them', async () => {
+    const { layoutPort, clientStatePort } = await mount(stored);
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, inherited()));
+    await waitFor(() => expect(focused()).toEqual(['__proto__']));
+    expect(tileOf('__proto__').getByRole('tabpanel').textContent).toBe('No panels');
+    expect(tileOf('toString').getByRole('tabpanel').textContent).toBe('No panels');
+    expect(selectedTab('constructor')).toBe('p2');
+
+    const mutates = () => layoutPort.calls.filter((call) => call.kind === 'mutate');
+    fireEvent.click(tileOf('__proto__').getByRole('button', { name: 'Split down' }));
+    await waitFor(() => expect(mutates()).toHaveLength(1));
+    expect(mutates()[0]).toMatchObject({
+      baseLayoutRevision: '3',
+      ops: [{ op: 'split_tile', tile: '__proto__', dir: 'v', newTile: 't-new', ratio: 0.5, panel: null }],
+    });
+
+    fireEvent.click(tileOf('constructor').getByRole('tab', { name: 'p1' }));
+    await waitFor(() => expect(selectedTab('constructor')).toBe('p1'));
+    const write = clientStatePort.writes.filter((w) => w.kind === 'space').at(-1);
+    if (write?.kind !== 'space') throw new Error('expected a space write');
+    expect(write.path).toBe(PATH);
+    expect(JSON.parse(JSON.stringify(write.state.activeTabs))).toEqual({ constructor: 'p1' });
   });
 });

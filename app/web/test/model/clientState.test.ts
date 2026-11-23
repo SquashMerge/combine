@@ -3,16 +3,20 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   type ClientSpaceState,
+  type LayoutTiles,
+  defaultClientState,
   newestLastSpace,
   parseClientState,
   restoreSpaceState,
+  storedSpaceState,
 } from '../../src/model/clientState';
+import { dictGet } from '../../src/model/dict';
 import type { DecimalU64, TermId } from '../../src/model/ids';
 
-const layout = {
-  t1: { panels: ['p1', 'p2'], active: 'p1' },
-  t2: { panels: ['p3'], active: null },
-};
+const layout: LayoutTiles = new Map([
+  ['t1', { panels: ['p1', 'p2'], active: 'p1' }],
+  ['t2', { panels: ['p3'], active: null }],
+]);
 
 function stored(overrides: Partial<ClientSpaceState> = {}): ClientSpaceState {
   return {
@@ -105,5 +109,47 @@ describe('restoreSpaceState', () => {
     const copy = structuredClone(before);
     restoreSpaceState(before, layout, terminals);
     expect(before).toEqual(copy);
+  });
+});
+
+describe('client state keyed by IDs that name inherited properties', () => {
+  const ids = ['__proto__', 'constructor', 'toString'];
+  // An object literal's `__proto__:` sets its prototype instead of a key, so the wire text is
+  // written out by hand.
+  const text =
+    '{"version":1,"lastSpace":null,"error":null,"spaces":{"__proto__":{"spaceId":"__proto__",' +
+    '"focusedTile":"__proto__","activeTerminal":null,' +
+    '"activeTabs":{"__proto__":"p2","constructor":"p2","toString":"p2"},"groupState":{}}}}';
+  const tiles: LayoutTiles = new Map(ids.map((id) => [id, { panels: ['p1', 'p2'], active: 'p1' }]));
+
+  it('parses spaces and active tabs under those keys as own entries', () => {
+    const state = parseClientState(JSON.parse(text));
+    const space = storedSpaceState(state, '__proto__');
+    expect(space?.focusedTile).toBe('__proto__');
+    expect(Object.keys(space?.activeTabs ?? {})).toEqual(ids);
+    for (const id of ids) expect(dictGet(space?.activeTabs ?? {}, id)).toBe('p2');
+    expect(storedSpaceState(state, 'constructor')).toBeUndefined();
+  });
+
+  it('restore keeps the focused tile and active tabs under those keys', () => {
+    const state = parseClientState(JSON.parse(text));
+    const restored = restoreSpaceState(storedSpaceState(state, '__proto__'), tiles, terminals);
+    expect(restored.focusedTile).toBe('__proto__');
+    expect(Object.keys(restored.activeTabs)).toEqual(ids);
+    for (const id of ids) expect(dictGet(restored.activeTabs, id)).toBe('p2');
+    expect(JSON.parse(JSON.stringify(restored.activeTabs))).toEqual(
+      JSON.parse('{"__proto__":"p2","constructor":"p2","toString":"p2"}'),
+    );
+  });
+
+  it('restore without stored state takes the tiles own active panels', () => {
+    const restored = restoreSpaceState(undefined, tiles, terminals);
+    for (const id of ids) expect(dictGet(restored.activeTabs, id)).toBe('p1');
+  });
+
+  it('finds nothing stored for an inherited name', () => {
+    for (const id of ids) expect(storedSpaceState(defaultClientState(), id)).toBeUndefined();
+    const restored = restoreSpaceState(undefined, new Map([['t1', { panels: [], active: null }]]), terminals);
+    for (const id of ids) expect(dictGet(restored.activeTabs, id)).toBeUndefined();
   });
 });

@@ -3,10 +3,13 @@ import {
   type ClientSpaceState,
   type ClientState,
   defaultClientState,
+  type LayoutTiles,
   emptySpaceState,
   newestLastSpace,
   restoreSpaceState,
+  storedSpaceState,
 } from '../model/clientState';
+import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
@@ -28,9 +31,9 @@ interface AppProps {
   now?: () => number;
 }
 
-type ClientStates = Readonly<Record<string, ClientState>>;
+type ClientStates = ReadonlyMap<HostId, ClientState>;
 
-const NO_LAYOUT = {};
+const NO_LAYOUT: LayoutTiles = new Map();
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -50,10 +53,10 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   const { snapshot, error } = useHostsSnapshot(port);
   const [selected, setSelected] = useState<SpaceKey | null>(null);
   const [allSpaces, setAllSpaces] = useState(false);
-  const [states, setStates] = useState<ClientStates>({});
+  const [states, setStates] = useState<ClientStates>(new Map());
   const [unsettled, setUnsettled] = useState<ReadonlyMap<string, TermId>>(new Map());
-  const [writeErrors, setWriteErrors] = useState<Readonly<Record<string, string>>>({});
-  const statesRef = useRef<ClientStates>({});
+  const [writeErrors, setWriteErrors] = useState<ReadonlyMap<HostId, string>>(new Map());
+  const statesRef = useRef<ClientStates>(new Map());
   const snapshotRef = useRef<HostsSnapshot | null>(null);
   const requested = useRef(new Set<HostId>());
   const pending = useRef(new Map<HostId, PendingSelection[]>());
@@ -78,15 +81,19 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
     write.then(
       () => {
         if (!mounted.current) return;
-        setWriteErrors(({ [hostId]: _cleared, ...rest }) => rest);
+        setWriteErrors((current) => {
+          if (!current.has(hostId)) return current;
+          const next = new Map(current);
+          next.delete(hostId);
+          return next;
+        });
       },
       (cause: unknown) => {
         if (!mounted.current) return;
         const name = findHostName(snapshotRef.current, hostId);
-        setWriteErrors((current) => ({
-          ...current,
-          [hostId]: `Cannot save client state for ${name}: ${errorText(cause)}`,
-        }));
+        setWriteErrors((current) =>
+          new Map(current).set(hostId, `Cannot save client state for ${name}: ${errorText(cause)}`),
+        );
       },
     );
   }, []);
@@ -94,17 +101,16 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   const applySelection = useCallback(
     ({ space, terminalId, selectedAtMs }: PendingSelection) => {
       const { hostId, path } = space;
-      const current = statesRef.current[hostId] ?? defaultClientState();
-      const spaceState = current.spaces[path] ?? emptySpaceState(path);
+      const current = statesRef.current.get(hostId) ?? defaultClientState();
+      const spaceState = dictGet(current.spaces, path) ?? emptySpaceState(path);
       const nextSpace = terminalId === null ? spaceState : { ...spaceState, activeTerminal: terminalId };
-      updateStates((all) => ({
-        ...all,
-        [hostId]: {
+      updateStates((all) =>
+        new Map(all).set(hostId, {
           ...current,
           lastSpace: { spaceId: path, selectedAtMs },
-          spaces: terminalId === null ? current.spaces : { ...current.spaces, [path]: nextSpace },
-        },
-      }));
+          spaces: terminalId === null ? current.spaces : dictWith(current.spaces, path, nextSpace),
+        }),
+      );
       if (current.error !== null) return;
       if (terminalId !== null) persist(clientStatePort.setSpaceState(hostId, path, nextSpace), hostId);
       persist(clientStatePort.setLastSpace(hostId, path, selectedAtMs), hostId);
@@ -115,7 +121,7 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   const settle = useCallback(
     (hostId: HostId, loaded: ClientState) => {
       if (!mounted.current) return;
-      updateStates((current) => ({ ...current, [hostId]: loaded }));
+      updateStates((current) => new Map(current).set(hostId, loaded));
       const replay = pending.current.get(hostId) ?? [];
       pending.current.delete(hostId);
       if (replay.length === 0) return;
@@ -144,10 +150,10 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   useEffect(() => {
     if (restored.current || snapshot === null) return;
     const hostIds = snapshot.hosts.flatMap((host) => (host.hostId === null ? [] : [host.hostId]));
-    if (!hostIds.every((hostId) => states[hostId] !== undefined)) return;
+    if (!hostIds.every((hostId) => states.has(hostId))) return;
     const candidates = snapshot.hosts.flatMap((host) => {
       const hostId = host.hostId;
-      const lastSpace = hostId === null ? null : (states[hostId]?.lastSpace ?? null);
+      const lastSpace = hostId === null ? null : (states.get(hostId)?.lastSpace ?? null);
       if (hostId === null || lastSpace === null) return [];
       const space = host.spaces.find((candidate) => candidate.key.path === lastSpace.spaceId);
       return space === undefined ? [] : [{ lastSpace, key: space.key }];
@@ -162,10 +168,14 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
     const active = new Map<string, TermId>();
     for (const host of snapshot?.hosts ?? []) {
       if (host.hostId === null) continue;
-      const stored = states[host.hostId]?.spaces;
+      const stored = states.get(host.hostId);
       for (const space of host.spaces) {
         const terminalIds = new Set<string>(space.terminals.map((terminal) => terminal.id));
-        const { activeTerminal } = restoreSpaceState(stored?.[space.key.path], NO_LAYOUT, terminalIds);
+        const { activeTerminal } = restoreSpaceState(
+          storedSpaceState(stored, space.key.path),
+          NO_LAYOUT,
+          terminalIds,
+        );
         const id = spaceKeyId(space.key);
         const local = unsettled.get(id);
         if (local !== undefined) active.set(id, local);
@@ -185,7 +195,7 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
         selectedAtMs: decimalU64FromBigInt(BigInt(Math.trunc(now()))),
       };
       const { hostId } = space;
-      if (statesRef.current[hostId] !== undefined) {
+      if (statesRef.current.has(hostId)) {
         applySelection(selection);
         return;
       }
@@ -215,7 +225,7 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
     const terminalIds = new Set<string>(space?.terminals.map((terminal) => terminal.id) ?? []);
     const { root } = layout.snapshot;
     const result = restoreSpaceState(
-      states[selected.hostId]?.spaces[selected.path],
+      storedSpaceState(states.get(selected.hostId), selected.path),
       layoutTiles(root),
       terminalIds,
     );
@@ -225,13 +235,12 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   const changeSpaceState = useCallback(
     (space: SpaceKey, change: (state: ClientSpaceState) => ClientSpaceState) => {
       const { hostId, path } = space;
-      const current = statesRef.current[hostId];
+      const current = statesRef.current.get(hostId);
       if (current === undefined) return;
-      const next = change(current.spaces[path] ?? emptySpaceState(path));
-      updateStates((all) => ({
-        ...all,
-        [hostId]: { ...current, spaces: { ...current.spaces, [path]: next } },
-      }));
+      const next = change(dictGet(current.spaces, path) ?? emptySpaceState(path));
+      updateStates((all) =>
+        new Map(all).set(hostId, { ...current, spaces: dictWith(current.spaces, path, next) }),
+      );
       if (current.error === null) persist(clientStatePort.setSpaceState(hostId, path, next), hostId);
     },
     [clientStatePort, persist, updateStates],
@@ -252,7 +261,7 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
       if (selected === null) return;
       changeSpaceState(selected, (state) => ({
         ...state,
-        activeTabs: { ...state.activeTabs, [tile]: panel },
+        activeTabs: dictWith(state.activeTabs, tile, panel),
       }));
     },
     [changeSpaceState, selected],
@@ -264,10 +273,10 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   if (snapshot === null) return null;
 
   const stateErrors = snapshot.hosts.flatMap((host) => {
-    const message = host.hostId === null ? null : (states[host.hostId]?.error ?? null);
+    const message = host.hostId === null ? null : (states.get(host.hostId)?.error ?? null);
     return message === null ? [] : [`Client state for ${host.name}: ${message}`];
   });
-  stateErrors.push(...Object.values(writeErrors));
+  stateErrors.push(...writeErrors.values());
 
   return (
     <div className="shell">

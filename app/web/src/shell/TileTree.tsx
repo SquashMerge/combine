@@ -1,3 +1,4 @@
+import { type Dict, dictGet } from '../model/dict';
 import type { LayoutNode, LayoutSnapshot, SplitDirection } from '../model/layout';
 
 interface TileTreeProps {
@@ -5,7 +6,7 @@ interface TileTreeProps {
   notice: string | null;
   error: string | null;
   focusedTile: string | null;
-  activeTabs: Readonly<Record<string, string>>;
+  activeTabs: Readonly<Dict<string>>;
   onFocus: (tile: string) => void;
   onSelectTab: (tile: string, panel: string) => void;
   onSplit: (tile: string, dir: SplitDirection) => void;
@@ -31,7 +32,7 @@ function Node({ node, closable, ...rest }: NodeProps) {
     );
   }
   const { focusedTile, activeTabs, onFocus, onSelectTab, onSplit, onClose } = rest;
-  const active = activeTabs[node.id] ?? node.active ?? node.panels[0] ?? null;
+  const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
   const focused = focusedTile === node.id;
   return (
     <div

@@ -147,7 +147,7 @@ export class LayoutQueue {
     const { held } = this;
     if (held === null) return;
     const tiles = layoutTiles(held.root);
-    if (!intent.ops.every((op) => opTiles(op).every((tile) => Object.hasOwn(tiles, tile)))) {
+    if (!intent.ops.every((op) => opTiles(op).every((tile) => tiles.has(tile)))) {
       this.onNotice(STALE_NOTICE);
       return;
     }

@@ -1,3 +1,4 @@
+import { type Dict, dictGet, emptyDict } from './dict';
 import {
   type DecimalU64,
   ModelError,
@@ -15,14 +16,14 @@ export interface ClientSpaceState {
   spaceId: string;
   focusedTile: string | null;
   activeTerminal: TermId | null;
-  activeTabs: Record<string, string>;
+  activeTabs: Dict<string>;
   groupState: unknown;
 }
 
 export interface ClientState {
   version: number;
   lastSpace: LastSpace | null;
-  spaces: Record<string, ClientSpaceState>;
+  spaces: Dict<ClientSpaceState>;
   error: string | null;
 }
 
@@ -31,12 +32,12 @@ export interface LayoutTile {
   active: string | null;
 }
 
-export type LayoutTiles = Readonly<Record<string, LayoutTile>>;
+export type LayoutTiles = ReadonlyMap<string, LayoutTile>;
 
 export interface RestoredSpaceState {
   focusedTile: string | null;
   activeTerminal: TermId | null;
-  activeTabs: Record<string, string>;
+  activeTabs: Dict<string>;
 }
 
 function record(value: unknown, what: string): Record<string, unknown> {
@@ -56,17 +57,17 @@ function nullableStr(value: unknown, what: string): string | null {
 }
 
 export function emptySpaceState(spaceId: string): ClientSpaceState {
-  return { spaceId, focusedTile: null, activeTerminal: null, activeTabs: {}, groupState: {} };
+  return { spaceId, focusedTile: null, activeTerminal: null, activeTabs: emptyDict(), groupState: {} };
 }
 
 export function defaultClientState(error: string | null = null): ClientState {
-  return { version: 1, lastSpace: null, spaces: {}, error };
+  return { version: 1, lastSpace: null, spaces: emptyDict(), error };
 }
 
 function parseSpaceState(value: unknown, what: string): ClientSpaceState {
   const r = record(value, what);
   const tabs = record(r['activeTabs'], `${what}.activeTabs`);
-  const activeTabs: Record<string, string> = {};
+  const activeTabs = emptyDict<string>();
   for (const [tile, panel] of Object.entries(tabs)) {
     activeTabs[tile] = str(panel, `${what}.activeTabs.${tile}`);
   }
@@ -84,7 +85,7 @@ export function parseClientState(json: unknown): ClientState {
   const r = record(json, 'client state');
   const last = r['lastSpace'];
   const lastRecord = last === null ? null : record(last, 'client state.lastSpace');
-  const spaces: Record<string, ClientSpaceState> = {};
+  const spaces = emptyDict<ClientSpaceState>();
   for (const [path, state] of Object.entries(record(r['spaces'], 'client state.spaces'))) {
     spaces[path] = parseSpaceState(state, `client state.spaces.${path}`);
   }
@@ -123,16 +124,20 @@ export function newestLastSpace<T extends { lastSpace: LastSpace | null }>(
   return best;
 }
 
-export function pruneActiveTabs(
-  tabs: Readonly<Record<string, string>>,
-  layout: LayoutTiles,
-): Record<string, string> {
-  const kept: Record<string, string> = {};
+export function pruneActiveTabs(tabs: Readonly<Dict<string>>, layout: LayoutTiles): Dict<string> {
+  const kept = emptyDict<string>();
   for (const [tile, panel] of Object.entries(tabs)) {
-    const found = Object.hasOwn(layout, tile) ? layout[tile] : undefined;
-    if (found?.panels.includes(panel)) kept[tile] = panel;
+    if (layout.get(tile)?.panels.includes(panel)) kept[tile] = panel;
   }
   return kept;
+}
+
+/** The stored state of the space at `path`, if there is one. */
+export function storedSpaceState(
+  state: ClientState | undefined,
+  path: string,
+): ClientSpaceState | undefined {
+  return state === undefined ? undefined : dictGet(state.spaces, path);
 }
 
 /**
@@ -144,17 +149,17 @@ export function restoreSpaceState(
   layout: LayoutTiles,
   terminalIds: ReadonlySet<string>,
 ): RestoredSpaceState {
-  const activeTabs: Record<string, string> = {};
-  for (const [tile, { active }] of Object.entries(layout)) {
+  const activeTabs = emptyDict<string>();
+  for (const [tile, { active }] of layout) {
     if (active !== null) activeTabs[tile] = active;
   }
   if (state === undefined) return { focusedTile: null, activeTerminal: null, activeTabs };
-  Object.assign(activeTabs, pruneActiveTabs(state.activeTabs, layout));
+  for (const [tile, panel] of Object.entries(pruneActiveTabs(state.activeTabs, layout))) {
+    activeTabs[tile] = panel;
+  }
   return {
     focusedTile:
-      state.focusedTile !== null && Object.hasOwn(layout, state.focusedTile)
-        ? state.focusedTile
-        : null,
+      state.focusedTile !== null && layout.has(state.focusedTile) ? state.focusedTile : null,
     activeTerminal:
       state.activeTerminal !== null && terminalIds.has(state.activeTerminal)
         ? state.activeTerminal
