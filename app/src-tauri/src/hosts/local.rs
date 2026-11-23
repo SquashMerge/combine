@@ -1,4 +1,9 @@
 //! The local daemon socket, and the refusal to ever connect to a herdr-core socket.
+//!
+//! The refusal guard spells the default session's socket (`DEFAULT_SOCKET_SUFFIX`) again; the
+//! daemon's resolver spells the same path in `crates/combined/src/wiring/config.rs`
+//! (`herdr_core_socket`). SPEC's layering keeps the two crates apart, so a change to herdr-core's
+//! layout changes both.
 
 use std::env;
 use std::fs;
