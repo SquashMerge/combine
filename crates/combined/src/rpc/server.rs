@@ -25,14 +25,14 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 use super::connection::{self, ConnEvent, WriterCmd};
 use super::flush::{FlushAt, FlushSchedule};
 use super::socket::BoundSocket;
-use super::{ServeOptions, ServerParts, ServerStats};
+use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
     layout_snapshot, ops_from_wire, ConnectionId, Driver, LayoutEffect, LayoutRead, LayoutWritten,
     Layouts, MutateError, PanelRead, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError,
     LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
-use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent};
-use crate::ports::{BackendResult, FileChange, FileStore};
+use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
+use crate::ports::{BackendResult, FileChange, FileStore, TerminalBackend};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
@@ -141,13 +141,50 @@ struct Server {
     housekeeping: Interval,
 }
 
+/// What the backend reported when the server started watching it.
+pub struct Watched {
+    watch: Watch,
+    list: Vec<TermInfo>,
+}
+
+/// Watches the backend's terminals and then lists them, so no change between the two is lost.
+pub async fn watch_backend(backend: &dyn TerminalBackend) -> Result<Watched, ServeError> {
+    let watch = backend
+        .watch()
+        .await
+        .map_err(|error| ServeError::Backend(format!("cannot watch terminals: {error}")))?;
+    let list = backend
+        .list()
+        .await
+        .map_err(|error| ServeError::Backend(format!("cannot list terminals: {error}")))?;
+    Ok(Watched { watch, list })
+}
+
 /// Serves `socket` until `shutdown` completes or something fails.
 ///
-/// The server first watches the backend's terminals and then lists them, so no change between
-/// the two is lost.
+/// The initial watch and list race `shutdown`, so a backend that never answers can't keep the
+/// server from stopping.
 pub async fn serve(
     socket: BoundSocket,
     parts: ServerParts,
+    options: ServeOptions,
+    shutdown: impl Future<Output = ()>,
+    stats: Arc<ServerStats>,
+) -> Result<(), ServeError> {
+    let mut shutdown = std::pin::pin!(shutdown);
+    let backend = Arc::clone(parts.driver.backend());
+    match until_shutdown(shutdown.as_mut(), watch_backend(&*backend)).await {
+        None => Ok(()),
+        Some(watched) => serve_watched(socket, parts, watched?, options, shutdown, stats).await,
+    }
+}
+
+/// Serves `socket` from a backend that is already watched and listed, until `shutdown`
+/// completes or something fails.
+pub async fn serve_watched(
+    socket: BoundSocket,
+    parts: ServerParts,
+    watched: Watched,
     options: ServeOptions,
     shutdown: impl Future<Output = ()>,
     stats: Arc<ServerStats>,
@@ -166,15 +203,7 @@ pub async fn serve(
         layout_timing,
         project_dirs,
     } = parts;
-    let backend = Arc::clone(driver.backend());
-    let watch = backend
-        .watch()
-        .await
-        .map_err(|error| ServeError::Backend(format!("cannot watch terminals: {error}")))?;
-    let list = backend
-        .list()
-        .await
-        .map_err(|error| ServeError::Backend(format!("cannot list terminals: {error}")))?;
+    let Watched { watch, list } = watched;
     terminals.apply_list(&list);
     terminals.take_changed();
 
