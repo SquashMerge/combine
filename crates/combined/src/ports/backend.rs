@@ -132,7 +132,9 @@ pub trait TerminalBackend: Send + Sync {
 ///
 /// - Generations of one attachment strictly increase.
 /// - Methods other than `attach` complete once the request is queued or applied locally. They
-///   never wait on a remote round trip. The driver awaits them in order.
+///   never wait on a remote round trip. The driver runs each attachment's calls in the order core
+///   issued them; one that doesn't complete at once holds back only that attachment's later
+///   calls (`core::driver`).
 /// - After `detach()` the stream ends. It may yield `Closed(Detached)` first; the daemon
 ///   ignores it.
 /// - `Facts(d)` follows a `set_display(d)` once applied, only with `display_queries`.
