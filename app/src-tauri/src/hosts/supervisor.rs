@@ -504,7 +504,7 @@ mod tests {
         );
         let ended = joins_within(handle, WAIT);
         stop.stop();
-        assert!(ended, "the supervisor did not stop within 5 s");
+        assert!(ended, "the supervisor did not stop within {WAIT:?}");
     }
 
     fn connection(event: Event) -> ConnectionState {
