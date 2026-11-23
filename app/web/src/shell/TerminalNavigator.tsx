@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { HostView, HostsSnapshot, SpaceView } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
@@ -12,6 +13,7 @@ interface TerminalNavigatorProps {
   onSelectTerminal: (space: SpaceKey, id: TermId) => void;
   allSpaces: boolean;
   onToggleAllSpaces: () => void;
+  actions?: ReactNode;
 }
 
 interface TerminalListProps {
@@ -101,12 +103,14 @@ export function TerminalNavigator({
   onSelectTerminal,
   allSpaces,
   onToggleAllSpaces,
+  actions,
 }: TerminalNavigatorProps) {
   return (
     <section aria-label="Terminals">
       <button type="button" aria-pressed={allSpaces} onClick={onToggleAllSpaces}>
         All spaces
       </button>
+      {actions}
       {allSpaces ? (
         <AllSpaces snapshot={snapshot} active={active} onSelectTerminal={onSelectTerminal} />
       ) : (

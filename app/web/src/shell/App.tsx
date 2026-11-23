@@ -12,14 +12,16 @@ import {
 import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
-import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
+import type { ClientStatePort, HostsPort, LayoutPort, SpawnPort } from '../ipc/port';
 import type { HostsSnapshot } from '../model/hosts';
 import { firstTileId, layoutTiles } from '../model/layout';
+import { AddTerminalMenu } from './AddTerminalMenu';
 import { CommandPalette } from './CommandPalette';
 import { SpaceRail } from './SpaceRail';
 import { TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
 import { useSpaceLayout } from './useSpaceLayout';
+import { useAutoOpenTerminal } from './useAutoOpenTerminal';
 import { useHostsSnapshot } from './useHostsSnapshot';
 import './shell.css';
 
@@ -27,6 +29,7 @@ interface AppProps {
   port: HostsPort;
   clientStatePort: ClientStatePort;
   layoutPort: LayoutPort;
+  spawnPort?: SpawnPort;
   newTileId?: () => string;
   now?: () => number;
 }
@@ -49,7 +52,14 @@ interface PendingSelection {
   selectedAtMs: DecimalU64;
 }
 
-export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.now }: AppProps) {
+export function App({
+  port,
+  clientStatePort,
+  layoutPort,
+  spawnPort,
+  newTileId,
+  now = Date.now,
+}: AppProps) {
   const { snapshot, error } = useHostsSnapshot(port);
   const [selected, setSelected] = useState<SpaceKey | null>(null);
   const [allSpaces, setAllSpaces] = useState(false);
@@ -246,6 +256,8 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
     [clientStatePort, persist, updateStates],
   );
 
+  const autoOpen = useAutoOpenTerminal(snapshot, selected, states, changeSpaceState);
+
   const focusTile = useCallback(
     (tile: string) => {
       if (selected === null) return;
@@ -294,6 +306,16 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
         onSelectTerminal={selectTerminal}
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
+        actions={
+          spawnPort === undefined ? undefined : (
+            <AddTerminalMenu
+              port={spawnPort}
+              snapshot={snapshot}
+              selected={selected}
+              onSpawned={autoOpen.activateWhenListed}
+            />
+          )
+        }
       />
       {layout.snapshot === null && layout.error !== null && (
         <p className="layout-error" role="alert">
