@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  type ClientSpaceState,
   type ClientState,
   defaultClientState,
   emptySpaceState,
@@ -8,17 +9,22 @@ import {
 } from '../model/clientState';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
-import type { ClientStatePort, HostsPort } from '../ipc/port';
+import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
 import type { HostsSnapshot } from '../model/hosts';
+import { firstTileId, layoutTiles } from '../model/layout';
 import { CommandPalette } from './CommandPalette';
 import { SpaceRail } from './SpaceRail';
+import { TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
+import { useSpaceLayout } from './useSpaceLayout';
 import { useHostsSnapshot } from './useHostsSnapshot';
 import './shell.css';
 
 interface AppProps {
   port: HostsPort;
   clientStatePort: ClientStatePort;
+  layoutPort: LayoutPort;
+  newTileId?: () => string;
   now?: () => number;
 }
 
@@ -40,7 +46,7 @@ interface PendingSelection {
   selectedAtMs: DecimalU64;
 }
 
-export function App({ port, clientStatePort, now = Date.now }: AppProps) {
+export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.now }: AppProps) {
   const { snapshot, error } = useHostsSnapshot(port);
   const [selected, setSelected] = useState<SpaceKey | null>(null);
   const [allSpaces, setAllSpaces] = useState(false);
@@ -199,6 +205,59 @@ export function App({ port, clientStatePort, now = Date.now }: AppProps) {
     (space: SpaceKey, id: TermId) => recordSelection(space, id),
     [recordSelection],
   );
+  const layout = useSpaceLayout(layoutPort, snapshot, selected, newTileId);
+
+  const restoredTiles = useMemo(() => {
+    if (layout.snapshot === null || selected === null) return null;
+    const space = snapshot?.hosts
+      .find((host) => host.hostId === selected.hostId)
+      ?.spaces.find((candidate) => candidate.key.path === selected.path);
+    const terminalIds = new Set<string>(space?.terminals.map((terminal) => terminal.id) ?? []);
+    const { root } = layout.snapshot;
+    const result = restoreSpaceState(
+      states[selected.hostId]?.spaces[selected.path],
+      layoutTiles(root),
+      terminalIds,
+    );
+    return { ...result, focusedTile: result.focusedTile ?? firstTileId(root) };
+  }, [layout.snapshot, selected, snapshot, states]);
+
+  const changeSpaceState = useCallback(
+    (space: SpaceKey, change: (state: ClientSpaceState) => ClientSpaceState) => {
+      const { hostId, path } = space;
+      const current = statesRef.current[hostId];
+      if (current === undefined) return;
+      const next = change(current.spaces[path] ?? emptySpaceState(path));
+      updateStates((all) => ({
+        ...all,
+        [hostId]: { ...current, spaces: { ...current.spaces, [path]: next } },
+      }));
+      if (current.error === null) persist(clientStatePort.setSpaceState(hostId, path, next), hostId);
+    },
+    [clientStatePort, persist, updateStates],
+  );
+
+  const focusTile = useCallback(
+    (tile: string) => {
+      if (selected === null) return;
+      changeSpaceState(selected, (state) =>
+        state.focusedTile === tile ? state : { ...state, focusedTile: tile },
+      );
+    },
+    [changeSpaceState, selected],
+  );
+
+  const selectTab = useCallback(
+    (tile: string, panel: string) => {
+      if (selected === null) return;
+      changeSpaceState(selected, (state) => ({
+        ...state,
+        activeTabs: { ...state.activeTabs, [tile]: panel },
+      }));
+    },
+    [changeSpaceState, selected],
+  );
+
   const retry = useCallback((name: string) => void port.retryHost(name), [port]);
 
   if (error !== null) return <p role="alert">Cannot reach the Combine backend: {error}</p>;
@@ -212,7 +271,13 @@ export function App({ port, clientStatePort, now = Date.now }: AppProps) {
 
   return (
     <div className="shell">
-      <SpaceRail snapshot={snapshot} selected={selected} port={port} onSelect={selectSpace} />
+      <SpaceRail
+        snapshot={snapshot}
+        selected={selected}
+        port={port}
+        readOnlySpaces={layout.readOnlySpaces}
+        onSelect={selectSpace}
+      />
       <TerminalNavigator
         snapshot={snapshot}
         selected={selected}
@@ -221,6 +286,24 @@ export function App({ port, clientStatePort, now = Date.now }: AppProps) {
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
       />
+      {layout.snapshot === null && layout.error !== null && (
+        <p className="layout-error" role="alert">
+          {layout.error}
+        </p>
+      )}
+      {layout.snapshot !== null && restoredTiles !== null && (
+        <TileTree
+          layout={layout.snapshot}
+          notice={layout.notice}
+          error={layout.error}
+          focusedTile={restoredTiles.focusedTile}
+          activeTabs={restoredTiles.activeTabs}
+          onFocus={focusTile}
+          onSelectTab={selectTab}
+          onSplit={layout.split}
+          onClose={layout.close}
+        />
+      )}
       <CommandPalette
         snapshot={snapshot}
         onSelectSpace={selectSpace}

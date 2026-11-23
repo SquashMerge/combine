@@ -36,6 +36,17 @@ describe('parseClientState', () => {
     expect(state.error).toBeNull();
   });
 
+  it('accepts an empty activeTerminal, as the state store does', () => {
+    const file = resolve(import.meta.dirname, '..', 'fixtures', 'client-state.json');
+    const json = JSON.parse(readFileSync(file, 'utf8')) as {
+      spaces: Record<string, { activeTerminal: unknown }>;
+    };
+    json.spaces['/work/a']!.activeTerminal = '';
+    expect(parseClientState(json).spaces['/work/a']?.activeTerminal).toBe('');
+    json.spaces['/work/a']!.activeTerminal = 7;
+    expect(() => parseClientState(json)).toThrow();
+  });
+
   it('rejects a timestamp that is not a decimal string', () => {
     expect(() =>
       parseClientState({ version: 1, lastSpace: { spaceId: 'a', selectedAtMs: 5 }, spaces: {}, error: null }),
@@ -83,6 +94,10 @@ describe('restoreSpaceState', () => {
     const restored = restoreSpaceState(stored({ activeTabs: { t1: 'p2' } }), layout, terminals);
     expect(restored.activeTabs['t1']).toBe('p2');
     expect(restoreSpaceState(undefined, layout, terminals).activeTabs).toEqual({ t1: 'p1' });
+  });
+
+  it('restores an empty stored terminal as none', () => {
+    expect(restoreSpaceState(stored({ activeTerminal: '' as TermId }), layout, terminals).activeTerminal).toBeNull();
   });
 
   it('writes nothing back to the stored state', () => {

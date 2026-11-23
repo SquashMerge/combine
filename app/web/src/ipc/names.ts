@@ -4,3 +4,7 @@ export const RETRY_HOST_COMMAND = 'retry_host';
 export const CLIENT_STATE_COMMAND = 'client_state';
 export const SET_CLIENT_SPACE_STATE_COMMAND = 'set_client_space_state';
 export const SET_LAST_SPACE_COMMAND = 'set_last_space';
+export const LAYOUT_EVENT = 'layout-changed';
+export const WATCH_LAYOUT_COMMAND = 'watch_layout';
+export const UNWATCH_LAYOUT_COMMAND = 'unwatch_layout';
+export const MUTATE_LAYOUT_COMMAND = 'mutate_layout';

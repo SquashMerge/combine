@@ -4,7 +4,6 @@ import {
   type TermId,
   compareDecimalU64,
   parseDecimalU64,
-  parseTermId,
 } from './ids';
 
 export interface LastSpace {
@@ -75,7 +74,7 @@ function parseSpaceState(value: unknown, what: string): ClientSpaceState {
   return {
     spaceId: str(r['spaceId'], `${what}.spaceId`),
     focusedTile: nullableStr(r['focusedTile'], `${what}.focusedTile`),
-    activeTerminal: terminal === null ? null : parseTermId(terminal),
+    activeTerminal: terminal === null ? null : (str(terminal, `${what}.activeTerminal`) as TermId),
     activeTabs,
     groupState: r['groupState'],
   };
