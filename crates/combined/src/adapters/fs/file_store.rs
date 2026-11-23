@@ -14,14 +14,22 @@
 //! for a symlink, a path outside `.workspace` or a relative space is not such a failure: it
 //! stays `Unavailable` and never reaches the fallback.
 //!
-//! This is not race-free. Std offers no descriptor-relative or `O_NOFOLLOW` open without
-//! `unsafe` or a new dependency, so a process that can modify the space's folder while a call
-//! runs can still swap a component for a symlink between the check and the open. The checks
-//! close the case of a symlink already present in the working tree, not a concurrent attacker.
+//! A read takes only a regular file. A FIFO, device, socket or directory at the file's path,
+//! in the project or as the fallback copy, is refused with "is not a regular file" and never
+//! read: the daemon reads on its one server loop, and a blocking open or read of a FIFO would
+//! stall every client. The file is opened with `O_NONBLOCK`, so even a FIFO swapped in after
+//! the type check doesn't block the open, and `O_NOFOLLOW`; its type is then checked again on
+//! the opened handle, before any byte is read.
+//!
+//! The directory checks are not race-free. Std offers no descriptor-relative open without
+//! `unsafe`, so a process that can modify the space's folder while a call runs can still swap
+//! a directory component for a symlink between the check and the open. The checks close the
+//! case of a symlink already present in the working tree, not a concurrent attacker.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, Read as _};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -267,13 +275,26 @@ enum Bounded {
     Bytes(Vec<u8>),
     /// More than the bound: the file's size, as far as is known.
     TooLarge(u64),
+    /// Not a regular file: nothing was read.
+    NotRegular,
 }
 
 /// Reads `path`, but never more than `max_bytes + 1` bytes of it, so a huge file, or one that
-/// grows during the read, costs at most that.
+/// grows during the read, costs at most that. Only a regular file is read, and neither the
+/// open nor the read waits on a FIFO: see the module note.
 fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
+    if !std::fs::symlink_metadata(path)?.file_type().is_file() {
+        return Ok(Bounded::NotRegular);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Ok(Bounded::NotRegular);
+    }
+    let len = meta.len();
     let cap = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -302,7 +323,10 @@ impl FileStore for FsFileStore {
         file_path(space, path)?;
         if let Some(copy) = self.fallback_file(space, path) {
             match read_bounded(&copy, max_bytes) {
-                Ok(found) => return found_file(found, revision, true).map(Some),
+                Ok(found) => {
+                    let what = format!("the fallback copy of {path}");
+                    return found_file(found, revision, true, &what).map(Some);
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(unavailable(error)),
             }
@@ -311,7 +335,9 @@ impl FileStore for FsFileStore {
             return Ok(None);
         };
         match read_bounded(&file, max_bytes) {
-            Ok(found) => found_file(found, revision, false).map(Some),
+            Ok(found) => {
+                found_file(found, revision, false, &format!(".workspace/{path}")).map(Some)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(unavailable(error)),
         }
@@ -420,14 +446,19 @@ impl FileStore for FsFileStore {
     }
 }
 
+/// `what` names the file in the refusal of one that isn't regular.
 fn found_file(
     found: Bounded,
     revision: StoreRevision,
     read_only: bool,
+    what: &str,
 ) -> Result<StoredFile, StoreError> {
     match found {
         Bounded::Bytes(bytes) => Ok(stored(bytes, revision, read_only)),
         Bounded::TooLarge(size) => Err(StoreError::TooLarge { size, read_only }),
+        Bounded::NotRegular => Err(StoreError::Unavailable(format!(
+            "{what} is not a regular file"
+        ))),
     }
 }
 

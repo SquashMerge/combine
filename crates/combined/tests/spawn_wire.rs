@@ -10,14 +10,21 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::sync::Arc;
 
-use combine_protocol::{DaemonMessage, ErrorCode, RequestId, SpawnSource};
+use std::time::Duration;
+
+use combine_protocol::{
+    ClientMessage, DaemonMessage, ErrorCode, ListTemplates, RequestId, SpawnSource, WatchTerminals,
+};
 use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{PANELS_DIR, PANEL_MAX_BYTES};
 use combined::model::SpawnSpec;
 use combined::testing::{FakeCall, FakeControl};
-use daemon_support::work_dir;
+use daemon_support::{make_fifo, release_fifo, work_dir};
 use serde_json::json;
 use spawn_support::*;
+
+/// Long enough for any reply from a daemon that isn't blocked.
+const PROMPTLY: Duration = Duration::from_secs(3);
 
 fn spawn_calls(control: &FakeControl) -> usize {
     control
@@ -455,5 +462,67 @@ fn template_source_without_hash_is_malformed() {
         other => panic!("expected the malformed error, got {other:?}"),
     }
     client.expect_closed();
+    assert_eq!(spawn_attempts(&rig.control), before);
+}
+
+/// A FIFO at a candidate's `panel.json` is skipped with a reason, never opened for a blocking
+/// read: the listing answers at once, and another client is served meanwhile.
+#[test]
+fn fifo_panel_file_is_skipped_without_blocking_the_daemon() {
+    let rig = Rig::new(Arc::new(FsFileStore::new()));
+    let work = work_dir(&rig.scratch);
+    write_panel_fs(&work, "good", &terminal_panel_json(&["sh"], None));
+    let fifo = work.join(".workspace/panels/agent/panel.json");
+    make_fifo(&fifo);
+
+    let mut lister = rig.client();
+    let mut other = rig.client();
+    lister.send(&ClientMessage::ListTemplates(ListTemplates {
+        request: RequestId(1),
+        space: rig.name(),
+    }));
+    let listed = lister.recv_within(PROMPTLY);
+    other.send(&ClientMessage::WatchTerminals(WatchTerminals {
+        request: RequestId(2),
+    }));
+    let watched = other.recv_within(PROMPTLY);
+    // Frees a daemon stuck on the FIFO, so a regression fails below instead of hanging.
+    release_fifo(&fifo, &terminal_panel_json(&["echo", "late"], None));
+
+    let Some(DaemonMessage::Templates(templates)) = listed else {
+        panic!("no templates reply while a FIFO sat at panel.json: {listed:?}");
+    };
+    assert_eq!(templates.request, RequestId(1));
+    let names: Vec<&str> = templates
+        .templates
+        .iter()
+        .map(|t| t.panel.as_str())
+        .collect();
+    assert_eq!(names, ["good"]);
+    assert_eq!(templates.skipped.len(), 1);
+    assert_eq!(templates.skipped[0].panel, "agent");
+    assert_eq!(
+        templates.skipped[0].reason,
+        "couldn't read panel.json (.workspace/panels/agent/panel.json is not a regular file)"
+    );
+    assert!(
+        matches!(watched, Some(DaemonMessage::Terminals(_))),
+        "the other client got no terminal list: {watched:?}"
+    );
+
+    // A spawn naming it is refused the same way, and starts nothing.
+    let before = spawn_attempts(&rig.control);
+    rig.spawn_template(&mut lister, 3, "agent", NO_HASH);
+    let error = lister.recv_within(PROMPTLY);
+    release_fifo(&fifo, b"");
+    let Some(DaemonMessage::Error(error)) = error else {
+        panic!("no reply to a spawn of the FIFO panel: {error:?}");
+    };
+    assert_eq!(error.code, ErrorCode::UnknownTemplate);
+    assert!(
+        error.message.ends_with("is not a regular file)"),
+        "{}",
+        error.message
+    );
     assert_eq!(spawn_attempts(&rig.control), before);
 }

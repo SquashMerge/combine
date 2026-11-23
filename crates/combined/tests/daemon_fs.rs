@@ -1090,51 +1090,131 @@ fn memory_store_bounds_reads_like_the_disk_store() {
     );
 }
 
-/// A file that doesn't end: a FIFO whose writer sends four times the bound and then holds its
-/// end open. An unbounded read waits for an end that doesn't come (holding at most what was
-/// sent); a bounded one stops after `limit + 1` bytes. This also covers a file growing during
-/// a read.
-#[test]
-fn store_contract_read_of_an_endless_file_stops_at_the_bound() {
-    let scratch = ShortTempDir::new();
-    let space = space(&scratch, "work");
-    let file = fs_layout(&space);
-    fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let made = std::process::Command::new("/usr/bin/mkfifo")
-        .arg(&file)
-        .status()
-        .unwrap();
-    assert!(made.success(), "mkfifo failed");
-
-    let fifo = file.clone();
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        use std::io::Write as _;
-        let mut writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
-        let chunk = vec![b' '; 64 * 1024];
-        for _ in 0..(4 * LIMIT / chunk.len()) {
-            // Fails once the reader closes its end (EPIPE; Rust ignores SIGPIPE).
-            if writer.write_all(&chunk).is_err() {
-                break;
-            }
-        }
-        let _ = done_rx.recv_timeout(BOUND * 3);
-    });
+/// Reads `space`'s `LAYOUT` on another thread, waiting at most [`BOUND`]. Then frees the
+/// FIFO at `fifo`, so a read stuck on it ends and the test fails instead of hanging.
+fn read_beside_fifo(
+    store: FsFileStore,
+    space: &SpaceId,
+    fifo: &Path,
+) -> Option<Result<Option<combined::ports::StoredFile>, StoreError>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let reader_space = space.clone();
     std::thread::spawn(move || {
-        let store = FsFileStore::new();
         let _ = tx.send(block_on(store.read(&reader_space, LAYOUT, LIMIT)));
     });
-    let read = rx
-        .recv_timeout(BOUND)
-        .expect("the read of an endless file did not stop at the bound");
+    let read = rx.recv_timeout(BOUND).ok();
+    daemon_support::release_fifo(fifo, b"{}");
+    read
+}
+
+/// A FIFO at the file is refused as not a regular file, at once and without reading: no
+/// writer, so a blocking open would never return.
+#[test]
+fn store_contract_fifo_in_the_project_is_refused_without_blocking() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let fifo = fs_layout(&space);
+    daemon_support::make_fifo(&fifo);
+    let read =
+        read_beside_fifo(FsFileStore::new(), &space, &fifo).expect("the read of a FIFO blocked");
+    assert_eq!(
+        read,
+        Err(StoreError::Unavailable(
+            ".workspace/layout.json is not a regular file".to_string()
+        ))
+    );
+}
+
+/// The same for a FIFO at the fallback copy, which a read looks at first: refused, and the
+/// project's file isn't read in its place.
+#[test]
+fn store_contract_fifo_as_the_fallback_copy_is_refused_without_blocking() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let project = fs_layout(&space);
+    fs::create_dir_all(project.parent().unwrap()).unwrap();
+    fs::write(&project, b"{}").unwrap();
+    let root = scratch.path().join("spaces");
+    let fifo = root.join(hex_sha256(&space.0)).join(LAYOUT);
+    daemon_support::make_fifo(&fifo);
+    let read = read_beside_fifo(FsFileStore::with_fallback(&root), &space, &fifo)
+        .expect("the read of a FIFO fallback copy blocked");
+    assert_eq!(
+        read,
+        Err(StoreError::Unavailable(
+            "the fallback copy of layout.json is not a regular file".to_string()
+        ))
+    );
+}
+
+/// A FIFO with a writer that keeps sending: still refused before any byte is read, so the
+/// read neither waits for an end nor holds what was sent.
+#[test]
+fn store_contract_fifo_with_an_endless_writer_is_refused() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let fifo = fs_layout(&space);
+    daemon_support::make_fifo(&fifo);
+    let writer_fifo = fifo.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Read-write, so the open doesn't wait for a reader that never comes.
+        let mut writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&writer_fifo)
+            .unwrap();
+        let chunk = vec![b' '; 4096];
+        while done_rx.try_recv().is_err() {
+            if writer.write_all(&chunk).is_err() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    });
+    let read = read_beside_fifo(FsFileStore::new(), &space, &fifo)
+        .expect("the read of an endless FIFO blocked");
     let _ = done_tx.send(());
     assert_eq!(
         read,
-        Err(StoreError::TooLarge {
-            size: LIMIT as u64 + 1,
-            read_only: false
-        })
+        Err(StoreError::Unavailable(
+            ".workspace/layout.json is not a regular file".to_string()
+        ))
+    );
+}
+
+/// A directory or a socket at the file, and a symlink to a device as the fallback copy, are
+/// refused the same way.
+#[test]
+fn store_contract_other_non_regular_files_are_refused() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let file = fs_layout(&space);
+    fs::create_dir_all(&file).unwrap();
+    let refused = Err(StoreError::Unavailable(
+        ".workspace/layout.json is not a regular file".to_string(),
+    ));
+    assert_eq!(
+        block_on(FsFileStore::new().read(&space, LAYOUT, LIMIT)),
+        refused
+    );
+    fs::remove_dir(&file).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(&file).unwrap();
+    assert_eq!(
+        block_on(FsFileStore::new().read(&space, LAYOUT, LIMIT)),
+        refused
+    );
+
+    let root = scratch.path().join("spaces");
+    let copy = root.join(hex_sha256(&space.0)).join(LAYOUT);
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/dev/null", &copy).unwrap();
+    assert_eq!(
+        block_on(FsFileStore::with_fallback(&root).read(&space, LAYOUT, LIMIT)),
+        Err(StoreError::Unavailable(
+            "the fallback copy of layout.json is not a regular file".to_string()
+        ))
     );
 }

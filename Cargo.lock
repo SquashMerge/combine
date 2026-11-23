@@ -400,6 +400,7 @@ dependencies = [
  "async-trait",
  "combine-protocol",
  "futures",
+ "libc",
  "notify",
  "serde",
  "serde_json",

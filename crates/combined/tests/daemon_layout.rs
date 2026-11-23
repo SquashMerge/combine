@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use combine_protocol::{
     ClientMessage, DaemonMessage, ErrorCode, LayoutNode, LayoutOp, LayoutSnapshot, MutateLayout,
-    Ratio, RequestId, SplitDirection, UnwatchLayout, WatchLayout,
+    Ratio, RequestId, SplitDirection, UnwatchLayout, WatchLayout, WatchTerminals,
 };
 use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{encode_layout, parse_layout, LayoutTiming, LAYOUT_FILE};
@@ -545,5 +545,55 @@ fn client_that_never_reads_layout_replies_is_disconnected() {
     assert!(
         wait_until(WAIT, || stats.connections() == 0),
         "the daemon kept a client that never reads its layout replies"
+    );
+}
+
+/// A FIFO at `layout.json` is reported as a read error, not opened for a blocking read: the
+/// watch answers at once and another client is served meanwhile.
+#[test]
+fn fifo_layout_file_is_refused_without_blocking_the_daemon() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    refuse_default_herdr_core(&fallback, &scratch);
+    let fifo = daemon_support::work_dir(&scratch)
+        .join(".workspace")
+        .join(LAYOUT_FILE);
+    daemon_support::make_fifo(&fifo);
+    let server = layout_server(
+        &scratch,
+        "d",
+        Arc::new(FsFileStore::with_fallback(&fallback)),
+        HOUR,
+        |_, backend| seed_project_terminal(backend, &scratch),
+    );
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+
+    let mut watcher = WireClient::open(&server.socket).0;
+    let mut other = WireClient::open(&server.socket).0;
+    watcher.send(&ClientMessage::WatchLayout(WatchLayout {
+        request: RequestId(1),
+        space,
+    }));
+    let watched = watcher.recv_within(WAIT);
+    other.send(&ClientMessage::WatchTerminals(WatchTerminals {
+        request: RequestId(2),
+    }));
+    let listed = other.recv_within(WAIT);
+    // Frees a daemon stuck on the FIFO, so a regression fails below instead of hanging.
+    daemon_support::release_fifo(&fifo, b"{}");
+
+    let Some(DaemonMessage::Layout(layout)) = watched else {
+        panic!("no layout reply while a FIFO sat at layout.json: {watched:?}");
+    };
+    assert_eq!(layout.request, Some(RequestId(1)));
+    let error = layout.layout.error.unwrap_or_default();
+    assert!(
+        error.contains(".workspace/layout.json is not a regular file"),
+        "{error}"
+    );
+    assert!(
+        matches!(listed, Some(DaemonMessage::Terminals(_))),
+        "the other client got no terminal list: {listed:?}"
     );
 }
