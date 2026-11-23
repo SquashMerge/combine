@@ -2,7 +2,7 @@
 
 use tauri::{Manager, RunEvent};
 
-use super::{hosts, layout, state};
+use super::{hosts, layout, spawn, state};
 use crate::hosts::service::{HostsService, ServiceDeps};
 use crate::state::service::ClientStates;
 
@@ -13,7 +13,10 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let service = HostsService::start(
                 &data_dir,
-                ServiceDeps::system(layout::layout_sink(app.handle().clone())),
+                ServiceDeps::system(
+                    layout::layout_sink(app.handle().clone()),
+                    spawn::spawn_sink(app.handle().clone()),
+                ),
                 hosts::sink(app.handle().clone()),
             );
             app.manage(service);
@@ -26,6 +29,8 @@ pub fn run() {
             layout::watch_layout,
             layout::unwatch_layout,
             layout::mutate_layout,
+            spawn::list_templates,
+            spawn::spawn_terminal,
             state::client_state,
             state::set_client_space_state,
             state::set_last_space

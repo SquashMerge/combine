@@ -12,6 +12,7 @@ pub mod outbound;
 pub mod registry;
 pub mod service;
 pub mod session;
+pub mod spawn;
 pub mod ssh;
 pub mod supervisor;
 pub mod terminals;

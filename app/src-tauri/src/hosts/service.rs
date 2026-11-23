@@ -15,6 +15,7 @@ use super::model::{ConfigStatus, ConnectionState, HostView, HostsSnapshot, Space
 use super::outbound::Outbound;
 use super::registry::HostRegistry;
 use super::session::{LayoutSink, LivePhase};
+use super::spawn::{SpawnReply, SpawnSink};
 use super::ssh::{SshConnector, SYSTEM_SSH};
 use super::supervisor::{
     spawn_supervisor, Clock, HostEvents, PhaseFactory, SessionPhase, StopSignal, SupervisorDeps,
@@ -33,12 +34,14 @@ pub struct ServiceDeps {
     pub phase: PhaseFactory,
     pub outbound: Arc<Outbound>,
     pub layout_sink: Arc<dyn LayoutSink>,
+    pub spawn_sink: Arc<dyn SpawnSink>,
 }
 
 impl ServiceDeps {
     /// The real thing: system `ssh`, the guarded local socket, the system clock and the live
-    /// session phase, with layout traffic going to `layout_sink`.
-    pub fn system(layout_sink: Arc<dyn LayoutSink>) -> Self {
+    /// session phase, with layout traffic going to `layout_sink` and spawn
+    /// replies to `spawn_sink`.
+    pub fn system(layout_sink: Arc<dyn LayoutSink>, spawn_sink: Arc<dyn SpawnSink>) -> Self {
         let outbound = Arc::new(Outbound::default());
         let live = Arc::clone(&outbound);
         ServiceDeps {
@@ -62,6 +65,7 @@ impl ServiceDeps {
             }),
             outbound,
             layout_sink,
+            spawn_sink,
         }
     }
 }
@@ -128,6 +132,10 @@ impl HostEvents for Inner {
 
     fn layout_disconnected(&self, host_id: &HostId) {
         self.deps.layout_sink.layout_disconnected(host_id);
+    }
+
+    fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
+        self.deps.spawn_sink.spawn_reply(host_id, reply);
     }
 }
 
@@ -265,7 +273,7 @@ impl HostsService {
 
 #[cfg(test)]
 mod tests {
-    use combine_protocol::{ErrorCode, ErrorMessage, MAX_FRAME_LEN};
+    use combine_protocol::{ErrorCode, ErrorMessage, Spawned, TermId, MAX_FRAME_LEN};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -278,7 +286,7 @@ mod tests {
     use super::super::supervisor::IdlePhase;
     use super::super::testing::{
         host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingLayoutSink, RecordingSink,
-        ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B,
+        RecordingSpawnSink, ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B,
     };
     use super::*;
 
@@ -329,6 +337,7 @@ mod tests {
             phase: Arc::new(|| Box::new(IdlePhase) as Box<dyn SessionPhase>),
             outbound: Arc::new(Outbound::default()),
             layout_sink: RecordingLayoutSink::new().0,
+            spawn_sink: RecordingSpawnSink::new().0,
         };
         let (sink, snapshots) = RecordingSink::new();
         let service = HostsService::start(dir.path(), deps, sink);
@@ -400,7 +409,7 @@ mod tests {
         let (sink, _snapshots) = RecordingSink::new();
         let service = HostsService::start(
             dir.path(),
-            ServiceDeps::system(RecordingLayoutSink::new().0),
+            ServiceDeps::system(RecordingLayoutSink::new().0, RecordingSpawnSink::new().0),
             sink,
         );
         let snapshot = service.snapshot();
@@ -414,6 +423,35 @@ mod tests {
     }
 
     #[test]
+    fn spawn_replies_reach_the_spawn_sink() {
+        let dir = ShortTempDir::new();
+        let (sink, _snapshots) = RecordingSink::new();
+        let (spawn_sink, received) = RecordingSpawnSink::new();
+        let service = HostsService::start(
+            dir.path(),
+            ServiceDeps::system(RecordingLayoutSink::new().0, spawn_sink),
+            sink,
+        );
+        let events: &dyn HostEvents = &*service.inner;
+        let host = host_id(HOST_A);
+        let spawned = Spawned {
+            request: RequestId(4),
+            space: "/work".to_string(),
+            terminal: TermId("t1".to_string()),
+        };
+        events.spawn_reply(&host, SpawnReply::Spawned(spawned.clone()));
+        events.spawn_reply(&host, SpawnReply::Disconnected);
+        let recv =
+            |rx: &Receiver<(HostId, SpawnReply)>| rx.recv_timeout(super::super::testing::WAIT);
+        assert_eq!(
+            recv(&received),
+            Ok((host.clone(), SpawnReply::Spawned(spawned)))
+        );
+        assert_eq!(recv(&received), Ok((host, SpawnReply::Disconnected)));
+        service.stop();
+    }
+
+    #[test]
     fn layout_events_reach_the_layout_sink() {
         use super::super::testing::LayoutEvent;
         use combine_protocol::{LayoutNode, LayoutSnapshot};
@@ -421,7 +459,11 @@ mod tests {
         let dir = ShortTempDir::new();
         let (sink, snapshots) = RecordingSink::new();
         let (layout_sink, received) = RecordingLayoutSink::new();
-        let service = HostsService::start(dir.path(), ServiceDeps::system(layout_sink), sink);
+        let service = HostsService::start(
+            dir.path(),
+            ServiceDeps::system(layout_sink, RecordingSpawnSink::new().0),
+            sink,
+        );
         drop(snapshots);
         let events: &dyn HostEvents = &*service.inner;
         let host = host_id(HOST_A);

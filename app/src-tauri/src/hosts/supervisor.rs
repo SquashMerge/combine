@@ -24,6 +24,7 @@ use super::identity::{
 use super::link::{abort_link, Closer, ConnectError, Connector, ExitInfo, Link};
 use super::model::{ConnectionState, SpaceView};
 use super::outbound::Outbound;
+use super::spawn::SpawnReply;
 use super::text::is_blank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +146,8 @@ pub trait HostEvents: Send + Sync {
     }
     /// The session ended, so the layout watch is gone.
     fn layout_disconnected(&self, _host_id: &HostId) {}
+    /// A reply to a spawn request, or the end of the session that could still answer one.
+    fn spawn_reply(&self, _host_id: &HostId, _reply: SpawnReply) {}
 }
 
 pub struct SessionIo<'a> {

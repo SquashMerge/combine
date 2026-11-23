@@ -12,6 +12,7 @@ use combine_protocol::{
 };
 
 use super::outbound::{Outbound, Outgoing, RequestKind};
+use super::spawn::SpawnReply;
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
 use super::terminals::space_views;
 use super::text::display_text;
@@ -72,17 +73,31 @@ impl SessionPhase for LivePhase {
                         Ok(Some(DaemonMessage::Layout(reply))) => {
                             events.layout(host_id, reply.request, reply.layout);
                         }
+                        Ok(Some(DaemonMessage::Templates(templates))) => {
+                            events.spawn_reply(host_id, SpawnReply::Templates(templates));
+                        }
+                        Ok(Some(DaemonMessage::Spawned(spawned))) => {
+                            events.spawn_reply(host_id, SpawnReply::Spawned(spawned));
+                        }
                         Ok(Some(DaemonMessage::Error(error))) => {
-                            if let Some(request) = error.request.filter(|request| {
-                                self.outbound.kind_of(host_id, *request)
-                                    == Some(RequestKind::Layout)
-                            }) {
-                                events.layout_error(
-                                    host_id,
-                                    request,
-                                    error.code,
-                                    display_text(error.trimmed_message()),
-                                );
+                            if let Some(request) = error.request {
+                                match self.outbound.kind_of(host_id, request) {
+                                    Some(RequestKind::Layout) => events.layout_error(
+                                        host_id,
+                                        request,
+                                        error.code,
+                                        display_text(error.trimmed_message()),
+                                    ),
+                                    Some(RequestKind::Spawn) => events.spawn_reply(
+                                        host_id,
+                                        SpawnReply::Error {
+                                            request,
+                                            code: error.code,
+                                            message: display_text(error.trimmed_message()),
+                                        },
+                                    ),
+                                    Some(RequestKind::Terminals) | None => {}
+                                }
                             }
                         }
                         Ok(Some(_)) => {}
@@ -93,6 +108,7 @@ impl SessionPhase for LivePhase {
             };
             drop(registration);
             events.layout_disconnected(host_id);
+            events.spawn_reply(host_id, SpawnReply::Disconnected);
             let _ = tx.send(Outgoing::Stop);
             let _ = writer_thread.join();
             end
@@ -102,22 +118,26 @@ impl SessionPhase for LivePhase {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::sync::Mutex;
     use std::time::Instant;
 
     use combine_protocol::{
-        ErrorCode, ErrorMessage, HostId, Layout, LayoutNode, LayoutSnapshot, MutateLayout,
-        RequestId, SpaceInfo, SpaceKind, TermId, Terminals, WatchLayout,
+        ErrorCode, ErrorMessage, HostId, Layout, LayoutNode, LayoutSnapshot, ListTemplates,
+        MutateLayout, RequestId, SpaceInfo, SpaceKind, Spawned, TemplateInfo, Templates, TermId,
+        Terminals, WatchLayout,
     };
 
     use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
     use super::super::outbound::NotConnected;
     use super::super::registry::HostRegistry;
+    use super::super::spawn::SpawnSink;
     use super::super::supervisor::HostEvents;
     use super::super::testing::{
-        host_id, recv, LayoutEvent, RecordingEvents, RecordingLayoutSink, HOST_A, WAIT,
+        host_id, recv, LayoutEvent, RecordingEvents, RecordingLayoutSink, RecordingSpawnSink,
+        HOST_A, WAIT,
     };
     use super::*;
 
@@ -473,6 +493,169 @@ mod tests {
             LayoutEvent::Error(host, watch, ErrorCode::StaleLayout, "sentinel".to_string())
         );
         assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    struct SpawnEvents(Arc<RecordingSpawnSink>);
+
+    impl HostEvents for SpawnEvents {
+        fn connection(&self, _name: &str, _state: ConnectionState) {}
+        fn host_id(&self, _name: &str, _host_id: &HostId) {}
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
+            self.0.spawn_reply(host_id, reply);
+        }
+    }
+
+    /// Routes spawn replies to one sink and layout traffic to another.
+    struct BothEvents(SpawnEvents, LayoutEvents);
+
+    impl HostEvents for BothEvents {
+        fn connection(&self, _name: &str, _state: ConnectionState) {}
+        fn host_id(&self, _name: &str, _host_id: &HostId) {}
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn layout_error(
+            &self,
+            host_id: &HostId,
+            request: RequestId,
+            code: ErrorCode,
+            message: String,
+        ) {
+            self.1.layout_error(host_id, request, code, message);
+        }
+        fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
+            self.0.spawn_reply(host_id, reply);
+        }
+    }
+
+    fn spawn_rig() -> (Rig, mpsc::Receiver<(HostId, SpawnReply)>) {
+        let (sink, received) = RecordingSpawnSink::new();
+        let mut rig = start(Arc::new(SpawnEvents(sink)));
+        read_client(&mut rig.daemon);
+        (rig, received)
+    }
+
+    #[test]
+    fn spawn_replies_reach_spawn_sink() {
+        let (mut rig, received) = spawn_rig();
+        let templates = Templates {
+            request: RequestId(2),
+            space: "/work".to_string(),
+            templates: vec![TemplateInfo {
+                panel: "claude".to_string(),
+                title: None,
+                slot: "claude".to_string(),
+                argv: vec!["claude".to_string()],
+                env: BTreeMap::new(),
+                cwd: String::new(),
+            }],
+            skipped: Vec::new(),
+            error: None,
+        };
+        let spawned = Spawned {
+            request: RequestId(3),
+            space: "/work".to_string(),
+            terminal: TermId("t12".to_string()),
+        };
+        write_message(
+            &mut rig.daemon,
+            &DaemonMessage::Templates(templates.clone()),
+        )
+        .expect("write");
+        write_message(&mut rig.daemon, &DaemonMessage::Spawned(spawned.clone())).expect("write");
+        let host = host_id(HOST_A);
+        assert_eq!(
+            recv(&received),
+            (host.clone(), SpawnReply::Templates(templates))
+        );
+        assert_eq!(recv(&received), (host, SpawnReply::Spawned(spawned)));
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
+    fn spawn_error_routed_by_request_kind() {
+        let (spawn_sink, spawn_received) = RecordingSpawnSink::new();
+        let (layout_sink, layout_received) = RecordingLayoutSink::new();
+        let mut rig = start(Arc::new(BothEvents(
+            SpawnEvents(spawn_sink),
+            LayoutEvents(layout_sink),
+        )));
+        read_client(&mut rig.daemon);
+        let host = host_id(HOST_A);
+        let layout = rig
+            .outbound
+            .send(&host, RequestKind::Layout, |request| {
+                ClientMessage::WatchLayout(WatchLayout {
+                    request,
+                    space: "/work".to_string(),
+                })
+            })
+            .expect("registered");
+        let spawn = rig
+            .outbound
+            .send(&host, RequestKind::Spawn, |request| {
+                ClientMessage::ListTemplates(ListTemplates {
+                    request,
+                    space: "/work".to_string(),
+                })
+            })
+            .expect("registered");
+        read_client(&mut rig.daemon);
+        read_client(&mut rig.daemon);
+        write_message(
+            &mut rig.daemon,
+            &error_for(RequestId(1), ErrorCode::Internal, "the watch"),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &error_for(RequestId(99), ErrorCode::Internal, "never sent"),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &error_for(spawn, ErrorCode::CwdRefused, "no\ngo"),
+        )
+        .expect("write");
+        write_message(
+            &mut rig.daemon,
+            &error_for(layout, ErrorCode::UnknownSpace, "no such space"),
+        )
+        .expect("write");
+        assert_eq!(
+            recv(&spawn_received),
+            (
+                host.clone(),
+                SpawnReply::Error {
+                    request: spawn,
+                    code: ErrorCode::CwdRefused,
+                    message: "no go".to_string(),
+                }
+            )
+        );
+        assert_eq!(
+            recv(&layout_received),
+            LayoutEvent::Error(
+                host,
+                layout,
+                ErrorCode::UnknownSpace,
+                "no such space".to_string()
+            )
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        assert_eq!(
+            recv(&spawn_received),
+            (host_id(HOST_A), SpawnReply::Disconnected)
+        );
+        assert!(spawn_received.try_recv().is_err());
+        assert!(layout_received.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_end_reports_spawn_disconnected() {
+        let (rig, received) = spawn_rig();
+        assert!(received.try_recv().is_err());
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        assert_eq!(recv(&received), (host_id(HOST_A), SpawnReply::Disconnected));
     }
 
     #[test]

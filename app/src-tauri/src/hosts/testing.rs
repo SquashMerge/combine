@@ -27,6 +27,7 @@ use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, Failure
 use super::model::{ConnectionState, HostsSnapshot, SpaceView};
 use super::service::SnapshotSink;
 use super::session::LayoutSink;
+use super::spawn::{SpawnReply, SpawnSink};
 use super::supervisor::{Clock, HostEvents, StopSignal, Wake};
 
 pub const HOST_A: &str = "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c";
@@ -528,5 +529,23 @@ impl HostIdStore for MemoryHostIdStore {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+}
+
+/// Sends every spawn reply to a channel, with the host it came from.
+pub struct RecordingSpawnSink {
+    tx: Mutex<Sender<(HostId, SpawnReply)>>,
+}
+
+impl RecordingSpawnSink {
+    pub fn new() -> (Arc<RecordingSpawnSink>, Receiver<(HostId, SpawnReply)>) {
+        let (tx, rx) = mpsc::channel();
+        (Arc::new(RecordingSpawnSink { tx: Mutex::new(tx) }), rx)
+    }
+}
+
+impl SpawnSink for RecordingSpawnSink {
+    fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
+        let _ = lock(&self.tx).send((host_id.clone(), reply));
     }
 }
