@@ -251,3 +251,175 @@ fn normal_connection_close_flushes_pending_layout() {
     );
     assert_eq!(stored_ratio(&server.work), 0.5);
 }
+
+const QUICK: LayoutTiming = LayoutTiming {
+    debounce_ms: 20,
+    max_wait_ms: 40,
+    retry_ms: 3_600_000,
+};
+
+/// Makes `file` unreadable and says whether that holds for this user: it doesn't for root.
+fn lock_file(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(file, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::read(file).is_err()
+}
+
+fn unlock_file(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// Spawns a terminal in `cwd`, which makes `cwd` a space.
+fn spawn_in(backend: &Arc<combined::testing::FakeBackend>, cwd: &Path) {
+    use combined::ports::TerminalBackend;
+    let spec = combined::model::SpawnSpec {
+        argv: vec!["sh".to_string()],
+        cwd: cwd.to_str().unwrap().to_string(),
+        env: Default::default(),
+        labels: Default::default(),
+        cols: 80,
+        rows: 24,
+    };
+    futures::executor::block_on(TerminalBackend::spawn(&**backend, spec)).unwrap();
+}
+
+/// The answer to `request`, skipping any pushes before it.
+fn answer(client: &WireClient, request: u64) -> LayoutSnapshot {
+    loop {
+        match client.recv() {
+            DaemonMessage::Layout(layout) if layout.request.is_none() => continue,
+            DaemonMessage::Layout(layout) => {
+                assert_eq!(layout.request, Some(RequestId(request)));
+                return layout.layout;
+            }
+            other => panic!("expected a layout, got {other:?}"),
+        }
+    }
+}
+
+fn split_main() -> Vec<LayoutOp> {
+    vec![LayoutOp::SplitTile {
+        tile: "main".to_string(),
+        dir: SplitDirection::H,
+        new_tile: "side".to_string(),
+        ratio: Ratio::new(0.5).unwrap(),
+        panel: None,
+    }]
+}
+
+/// Finding 1, over real files: an invalid `layout.json` the daemon can't read (mode 000, in a
+/// writable folder, so a rename over it would succeed) is never replaced, whether the held
+/// change would go out on its debounce, an unwatch, a switch to another space or shutdown.
+#[test]
+fn unreadable_layout_file_is_never_replaced() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let other = scratch.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    let mut server = layout_server(&scratch, "u", store, QUICK, |_, backend| {
+        seed_project_terminal(backend, &scratch);
+        spawn_in(backend, &other);
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let dir = server.work.join(".workspace");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(LAYOUT_FILE);
+    let original = b"{ \"version\": 1, \"root\": unread and invalid".to_vec();
+    fs::write(&file, &original).unwrap();
+    if !lock_file(&file) {
+        unlock_file(&file);
+        eprintln!("skipped: this user can read a mode 000 file");
+        return;
+    }
+
+    let mut client = WireClient::open(&server.socket).0;
+    let snapshot = watch(&mut client, &space, 1);
+    assert_eq!(snapshot.layout_revision, 0);
+    let error = snapshot.error.expect("the failed read is reported");
+    assert!(error.starts_with("Couldn't read layout.json ("), "{error}");
+    assert!(error.contains("until layout.json can be read"), "{error}");
+
+    // Accepted and held in memory.
+    assert_eq!(
+        mutate(&mut client, &space, 2, 0, split_main()).layout_revision,
+        1
+    );
+    // Well past the debounce and the max wait.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // An unwatch flushes; the reply to the next watch proves it was handled.
+    client.send(&ClientMessage::UnwatchLayout(UnwatchLayout {}));
+    client.send(&ClientMessage::WatchLayout(WatchLayout {
+        request: RequestId(3),
+        space: space.clone(),
+    }));
+    answer(&client, 3);
+    // A switch to another space flushes the old one.
+    client.send(&ClientMessage::WatchLayout(WatchLayout {
+        request: RequestId(4),
+        space: other.to_str().unwrap().to_string(),
+    }));
+    answer(&client, 4);
+    assert!(server.server.shutdown().is_none());
+
+    unlock_file(&file);
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        original,
+        "the unread file was replaced"
+    );
+    assert!(!fallback.exists(), "the held change went to the fallback");
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != LAYOUT_FILE)
+        .collect();
+    assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+}
+
+/// Finding 1, over real files: once the file can be read again, the held change goes through
+/// the conflict rule against what it holds, and is written.
+#[test]
+fn held_change_is_written_once_the_file_can_be_read() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let mut server = layout_server(&scratch, "r", store, HOUR, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let dir = server.work.join(".workspace");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(LAYOUT_FILE);
+    fs::write(&file, b"garbage").unwrap();
+    if !lock_file(&file) {
+        unlock_file(&file);
+        eprintln!("skipped: this user can read a mode 000 file");
+        return;
+    }
+
+    let mut client = WireClient::open(&server.socket).0;
+    assert!(watch(&mut client, &space, 1).error.is_some());
+    assert_eq!(
+        mutate(&mut client, &space, 2, 0, split_main()).layout_revision,
+        1
+    );
+
+    // Someone fixes the file: the default layout, so the held split still applies.
+    unlock_file(&file);
+    outside_write(
+        &server.work,
+        r#"{"version":1,"root":{"type":"tile","id":"main","panels":[],"active":null},"groups":[]}"#,
+    );
+    let push = layout_reply(&client, None);
+    assert_eq!(push.error, None);
+    assert_eq!(push.dropped, None);
+    assert_eq!(ratio_of(&push.root), 0.5);
+
+    assert!(server.server.shutdown().is_none());
+    assert_eq!(stored_ratio(&server.work), 0.5);
+    assert!(!fallback.exists());
+}

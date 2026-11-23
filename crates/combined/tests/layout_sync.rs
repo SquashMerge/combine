@@ -885,10 +885,7 @@ fn failed_read_keeps_state_and_reports_once() {
     sim.layouts.apply_read(&space("main"), failed(), Millis(10));
     let status = sim.layouts.status(&space("main")).unwrap();
     assert_eq!(status.layout, layout_before);
-    assert_eq!(
-        status.error.as_deref(),
-        Some("Couldn't read layout.json (permission denied); showing the last good layout.")
-    );
+    assert_eq!(status.error.as_deref(), Some(READ_FAILED));
     assert_eq!(status.layout_revision, LayoutRevision(revision.0 + 1));
     assert_eq!(sim.layouts.take_changed(), [space("main")]);
 
@@ -896,11 +893,311 @@ fn failed_read_keeps_state_and_reports_once() {
     assert_eq!(sim.revision("main"), LayoutRevision(revision.0 + 1));
     assert!(sim.layouts.take_changed().is_empty());
 
-    // Writes still go out, and a good re-read of the unchanged file clears the error.
+    // The file's content is unknown, so the held op isn't written when its debounce ends.
     sim.layouts.tick(Millis(500));
-    assert_eq!(write_effects(&sim.layouts.take_effects()).len(), 1);
-    sim.settle(Millis(500));
+    assert!(write_effects(&sim.layouts.take_effects()).is_empty());
+    // A good re-read of the unchanged file clears the error and releases the op.
     sim.layouts.apply_change(&space("main"));
     sim.settle(Millis(600));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error, None);
+    assert_eq!(status.layout, layout_before);
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(1_100)));
+    sim.layouts.tick(Millis(1_100));
+    sim.settle(Millis(1_100));
+    assert_eq!(sim.written(), 1);
+    assert_eq!(sim.disk[&space("main")], bytes_of(&layout_before));
+}
+
+// Finding 1: a failed read blocks every write until a read succeeds.
+
+const READ_FAILED: &str = "Couldn't read layout.json (permission denied). Showing the last good \
+     layout. Changes made now aren't saved, and are lost if the daemon restarts, until \
+     layout.json can be read.";
+
+/// How a held batch could reach the disk.
+#[derive(Debug, Clone, Copy)]
+enum Flush {
+    Debounce,
+    Unwatch,
+    Switch,
+    Shutdown,
+}
+
+const FLUSHES: [Flush; 4] = [
+    Flush::Debounce,
+    Flush::Unwatch,
+    Flush::Switch,
+    Flush::Shutdown,
+];
+
+/// Tries `how` at `now`, runs whatever it caused, and returns how many writes went out.
+fn try_flush(sim: &mut Sim, how: Flush, now: Millis) -> usize {
+    let before = sim.written();
+    match how {
+        Flush::Debounce => sim.layouts.tick(now),
+        Flush::Unwatch => sim.layouts.unwatch(MAIN, now),
+        Flush::Switch => {
+            sim.disk.insert(space("other"), bytes_of(&two_tiles()));
+            let failing = sim.failing_reads.take();
+            sim.layouts
+                .watch(MAIN, space("other"), 9, true, now)
+                .unwrap();
+            sim.settle(now);
+            sim.failing_reads = failing;
+        }
+        Flush::Shutdown => sim.layouts.flush_all(now),
+    }
+    sim.settle(now);
+    sim.writes[before..]
+        .iter()
+        .filter(|(written, _, _)| *written == space("main"))
+        .count()
+}
+
+fn split_main() -> LayoutOp {
+    LayoutOp::SplitTile {
+        tile: t("main"),
+        dir: combined::model::SplitDir::H,
+        new_tile: t("side"),
+        ratio: 0.5,
+        panel: None,
+    }
+}
+
+#[test]
+fn initial_failed_read_holds_mutations_and_never_writes() {
+    for how in FLUSHES {
+        let mut sim = Sim::new(LayoutTiming::default());
+        sim.disk.insert(space("main"), b"{ unread".to_vec());
+        sim.failing_reads = Some("permission denied".to_string());
+        sim.watch(MAIN, "main", Millis(0));
+        let status = sim.layouts.status(&space("main")).unwrap();
+        assert_eq!(status.layout, combined::core::default_layout(), "{how:?}");
+        assert_eq!(status.layout_revision, LayoutRevision(0), "{how:?}");
+        assert_eq!(status.error.as_deref(), Some(READ_FAILED), "{how:?}");
+
+        // Accepted in memory, like an invalid file's.
+        sim.mutate(vec![split_main()], Millis(10)).unwrap();
+        assert_eq!(sim.revision("main"), LayoutRevision(1), "{how:?}");
+
+        let at = match how {
+            Flush::Debounce => Millis(100_000),
+            _ => Millis(20),
+        };
+        assert_eq!(try_flush(&mut sim, how, at), 0, "{how:?}");
+        sim.layouts.flush_all(Millis(200_000));
+        sim.settle(Millis(200_000));
+        assert_eq!(sim.written(), 0, "{how:?}");
+        assert_eq!(sim.disk[&space("main")], b"{ unread".to_vec(), "{how:?}");
+    }
+}
+
+#[test]
+fn later_failed_read_holds_pending_and_never_writes() {
+    for how in FLUSHES {
+        let mut sim = Sim::open(&two_tiles());
+        sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+        sim.failing_reads = Some("permission denied".to_string());
+        sim.layouts.apply_change(&space("main"));
+        sim.settle(Millis(10));
+        assert_eq!(
+            sim.layouts.status(&space("main")).unwrap().error.as_deref(),
+            Some(READ_FAILED),
+            "{how:?}"
+        );
+        // A mutation made after the failure is held too.
+        sim.mutate(vec![set_ratio(&["a", "b"], 0.25)], Millis(20))
+            .unwrap();
+
+        let at = match how {
+            Flush::Debounce => Millis(100_000),
+            _ => Millis(30),
+        };
+        assert_eq!(try_flush(&mut sim, how, at), 0, "{how:?}");
+        sim.layouts.flush_all(Millis(200_000));
+        sim.settle(Millis(200_000));
+        assert_eq!(sim.written(), 0, "{how:?}");
+        assert_eq!(sim.disk[&space("main")], bytes_of(&two_tiles()), "{how:?}");
+    }
+}
+
+#[test]
+fn failed_read_rereads_after_retry_interval_while_ops_are_held() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(100));
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(5_100)));
+    // Later mutations don't push the re-read back.
+    sim.mutate(vec![set_ratio(&["a", "b"], 0.25)], Millis(4_000))
+        .unwrap();
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(5_100)));
+
+    let reads = sim.reads;
+    sim.layouts.tick(Millis(5_100));
+    assert_eq!(
+        sim.layouts.take_effects(),
+        [LayoutEffect::Read {
+            space: space("main")
+        }]
+    );
+    sim.layouts.apply_read(
+        &space("main"),
+        LayoutRead::Failed("permission denied".to_string()),
+        Millis(5_100),
+    );
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(10_100)));
+
+    sim.failing_reads = None;
+    sim.layouts.tick(Millis(10_100));
+    sim.settle(Millis(10_100));
+    assert_eq!(sim.reads, reads + 1);
     assert_eq!(sim.layouts.status(&space("main")).unwrap().error, None);
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(10_600)));
+    sim.layouts.tick(Millis(10_600));
+    sim.settle(Millis(10_600));
+    assert_eq!(sim.written(), 1);
+    let current = sim.current("main");
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p3"));
+    assert_eq!(root_ratio(&current), 0.25);
+    assert_eq!(sim.disk[&space("main")], bytes_of(&current));
+}
+
+#[test]
+fn failed_read_with_nothing_pending_schedules_nothing() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+    assert_eq!(sim.layouts.next_deadline(), None);
+}
+
+#[test]
+fn recovery_after_failed_read_rebases_disjoint_pending_ops() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+
+    sim.failing_reads = None;
+    sim.outside_write(bytes_of(&with_ratio(&two_tiles(), 0.3)), Millis(1_000));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error, None);
+    assert_eq!(status.dropped, None);
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(1_500)));
+    sim.layouts.tick(Millis(1_500));
+    sim.settle(Millis(1_500));
+    let current = sim.current("main");
+    assert_eq!(root_ratio(&current), 0.3);
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p3"));
+    assert_eq!(sim.writes.len(), 1);
+    assert_eq!(sim.disk[&space("main")], bytes_of(&current));
+}
+
+#[test]
+fn recovery_after_failed_read_drops_conflicting_pending_ops() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+
+    sim.failing_reads = None;
+    let outside = with_active(&two_tiles(), "a", "p1");
+    sim.outside_write(bytes_of(&outside), Millis(1_000));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error, None);
+    assert_eq!(status.layout, outside);
+    assert_eq!(status.dropped.unwrap().op_count, 1);
+    sim.layouts.flush_all(Millis(100_000));
+    sim.settle(Millis(100_000));
+    assert_eq!(sim.written(), 0);
+    assert_eq!(sim.disk[&space("main")], bytes_of(&outside));
+}
+
+#[test]
+fn recovery_after_initial_failed_read_applies_conflict_policy_to_the_real_file() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), bytes_of(&two_tiles()));
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.watch(MAIN, "main", Millis(0));
+    sim.mutate(vec![split_main()], Millis(10)).unwrap();
+
+    // The real file has a different tree than the default the split was made on: it wins.
+    sim.failing_reads = None;
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(100));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error, None);
+    assert_eq!(status.layout, two_tiles());
+    assert_eq!(status.dropped.unwrap().op_count, 1);
+    sim.layouts.flush_all(Millis(100_000));
+    sim.settle(Millis(100_000));
+    assert_eq!(sim.written(), 0);
+}
+
+#[test]
+fn recovery_after_initial_failed_read_of_missing_file_writes_held_ops() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.watch(MAIN, "main", Millis(0));
+    sim.mutate(vec![split_main()], Millis(10)).unwrap();
+    let held = sim.current("main");
+
+    sim.failing_reads = None;
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(100));
+    assert_eq!(sim.layouts.status(&space("main")).unwrap().error, None);
+    assert_eq!(sim.current("main"), held);
+    sim.layouts.flush_all(Millis(200));
+    sim.settle(Millis(200));
+    assert_eq!(sim.written(), 1);
+    assert_eq!(sim.disk[&space("main")], bytes_of(&held));
+}
+
+#[test]
+fn failed_read_then_invalid_read_stays_blocked() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+    sim.failing_reads = None;
+    sim.outside_write(b"garbage".to_vec(), Millis(20));
+    let error = sim.layouts.status(&space("main")).unwrap().error.unwrap();
+    assert!(error.starts_with("layout.json can't be used: "), "{error}");
+    assert_eq!(sim.layouts.next_deadline(), None);
+    sim.layouts.flush_all(Millis(100_000));
+    sim.settle(Millis(100_000));
+    assert_eq!(sim.written(), 0);
+    assert_eq!(sim.disk[&space("main")], b"garbage".to_vec());
+}
+
+#[test]
+fn write_outcome_during_failed_read_keeps_the_read_error_and_the_block() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.layouts.tick(Millis(500));
+    let effects = sim.layouts.take_effects();
+    assert_eq!(write_effects(&effects).len(), 1);
+    sim.layouts.apply_read(
+        &space("main"),
+        LayoutRead::Failed("permission denied".to_string()),
+        Millis(510),
+    );
+    sim.mutate(vec![set_ratio(&["a", "b"], 0.25)], Millis(520))
+        .unwrap();
+    sim.layouts.apply_write(
+        &space("main"),
+        LayoutWritten::Failed("disk full".to_string()),
+        Millis(530),
+    );
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert_eq!(status.error.as_deref(), Some(READ_FAILED));
+    sim.layouts.flush_all(Millis(600));
+    sim.layouts.unwatch(MAIN, Millis(600));
+    assert!(write_effects(&sim.layouts.take_effects()).is_empty());
 }

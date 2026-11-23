@@ -291,7 +291,10 @@ fn invalid_file_error(reason: &str) -> String {
 }
 
 fn read_failed_error(detail: &str) -> String {
-    format!("Couldn't read layout.json ({detail}); showing the last good layout.")
+    format!(
+        "Couldn't read layout.json ({detail}). Showing the last good layout. Changes made now \
+         aren't saved, and are lost if the daemon restarts, until layout.json can be read."
+    )
 }
 
 fn read_only_error(detail: &str) -> String {
@@ -368,6 +371,9 @@ struct SpaceState {
     dropped: Option<DroppedBatch>,
     /// The file can't be used, so nothing is written over it.
     invalid: bool,
+    /// The last read failed, so the file's content is unknown and nothing is written over it
+    /// until a read succeeds. While ops are pending, `deadline` is when to read again.
+    unread: bool,
     /// Watchers that asked before the first read finished.
     waiting: Vec<(ConnectionId, u64)>,
 }
@@ -389,6 +395,7 @@ impl SpaceState {
             read_only: false,
             dropped: None,
             invalid: false,
+            unread: false,
             waiting: Vec::new(),
         }
     }
@@ -403,7 +410,16 @@ impl SpaceState {
         }
     }
 
+    /// Nothing may be written: the file is invalid, or its content is unknown.
+    fn blocked(&self) -> bool {
+        self.invalid || self.unread
+    }
+
     fn arm_deadline(&mut self, now: Millis, timing: LayoutTiming) {
+        if self.unread {
+            self.arm_reread(now, timing);
+            return;
+        }
         self.deadline = match (&self.pending, self.invalid, &self.writing) {
             (Some(pending), false, None) => pending.first_at().map(|first| {
                 let quiet = now.saturating_add(Millis(timing.debounce_ms));
@@ -425,12 +441,14 @@ impl SpaceState {
         matches
     }
 
-    /// A failed read left its error up, so the next read must run even if the file looks the
-    /// same, to clear it.
-    fn read_failed(&self) -> bool {
-        self.error
-            .as_ref()
-            .is_some_and(|error| error.source == ErrorSource::Read)
+    /// After a failed read, held ops wait for a read that succeeds: one is due `retry_ms` after
+    /// the failure, and later mutations don't push it back.
+    fn arm_reread(&mut self, now: Millis, timing: LayoutTiming) {
+        self.deadline = match (&self.pending, self.deadline) {
+            (None, _) => None,
+            (Some(_), Some(due)) => Some(due),
+            (Some(_), None) => Some(now.saturating_add(Millis(timing.retry_ms))),
+        };
     }
 
     fn set_error(&mut self, source: ErrorSource, text: String) -> bool {
@@ -442,16 +460,23 @@ impl SpaceState {
 
     /// Takes in a read. Returns whether clients must hear about it: every read that isn't
     /// ignored counts, and so does a failed read that changes the error.
+    ///
+    /// A failed read says nothing about what the file holds, so it blocks writes (`unread`)
+    /// until a read succeeds. That read is never ignored, even if the file looks the same: it
+    /// clears the read error and runs the conflict rule against any ops held meanwhile.
     fn apply_read(&mut self, read: LayoutRead, now: Millis, timing: LayoutTiming) -> bool {
         let first = !self.loaded;
         self.loaded = true;
         match read {
             LayoutRead::Failed(detail) => {
+                self.unread = true;
+                self.deadline = None;
+                self.arm_reread(now, timing);
                 let changed = self.set_error(ErrorSource::Read, read_failed_error(&detail));
                 changed && !first
             }
             LayoutRead::Missing => {
-                if !first && self.known_hash.is_none() && !self.read_failed() {
+                if !first && self.known_hash.is_none() && !self.unread {
                     return false;
                 }
                 self.known_hash = None;
@@ -464,7 +489,7 @@ impl SpaceState {
                 hash,
                 read_only,
             } => {
-                if !first && self.known_hash == Some(hash) && !self.read_failed() {
+                if !first && self.known_hash == Some(hash) && !self.unread {
                     return false;
                 }
                 self.known_hash = Some(hash);
@@ -483,6 +508,8 @@ impl SpaceState {
         timing: LayoutTiming,
     ) {
         self.dropped = None;
+        let was_blocked = self.blocked();
+        self.unread = false;
         match parsed {
             Err(why) => {
                 self.invalid = true;
@@ -493,7 +520,6 @@ impl SpaceState {
                 self.deadline = None;
             }
             Ok(layout) => {
-                let was_invalid = self.invalid;
                 self.invalid = false;
                 self.clear_error(&[ErrorSource::Invalid, ErrorSource::Read]);
                 if first {
@@ -503,7 +529,7 @@ impl SpaceState {
                 } else {
                     self.rebase(layout);
                 }
-                if was_invalid && self.pending.is_some() && self.writing.is_none() {
+                if was_blocked && self.pending.is_some() && self.writing.is_none() {
                     self.deadline = Some(now.saturating_add(Millis(timing.debounce_ms)));
                 }
             }
@@ -569,19 +595,31 @@ impl SpaceState {
             LayoutWritten::ReadOnly(detail) => {
                 let mut changed = !self.read_only;
                 self.read_only = true;
-                changed |= self.set_error(ErrorSource::Write, read_only_error(&detail));
+                changed |= self.set_write_error(read_only_error(&detail));
                 self.retry_later(now, timing);
                 changed
             }
             LayoutWritten::Failed(detail) => {
-                let changed = self.set_error(ErrorSource::Write, write_failed_error(&detail));
+                let changed = self.set_write_error(write_failed_error(&detail));
                 self.retry_later(now, timing);
                 changed
             }
         }
     }
 
+    /// A write error, unless a failed read's error is up: that one says why nothing is written.
+    fn set_write_error(&mut self, text: String) -> bool {
+        if self.unread {
+            return false;
+        }
+        self.set_error(ErrorSource::Write, text)
+    }
+
     fn retry_later(&mut self, now: Millis, timing: LayoutTiming) {
+        if self.unread {
+            self.arm_reread(now, timing);
+            return;
+        }
         self.deadline = (self.pending.is_some() && !self.invalid)
             .then(|| now.saturating_add(Millis(timing.retry_ms)));
     }
@@ -803,7 +841,8 @@ impl Layouts {
         Ok(())
     }
 
-    /// Writes every space whose deadline is at or before `now`.
+    /// Writes every space whose deadline is at or before `now`. A space whose last read failed
+    /// is read again instead.
     pub fn tick(&mut self, now: Millis) {
         let due: Vec<SpaceId> = self
             .spaces
@@ -812,16 +851,30 @@ impl Layouts {
             .map(|(space, _)| space.clone())
             .collect();
         for space in due {
-            self.flush(&space, now);
+            let reread = self.spaces.get_mut(&space).is_some_and(|state| {
+                if state.unread {
+                    state.deadline = None;
+                }
+                state.unread
+            });
+            if reread {
+                self.effects.push(LayoutEffect::Read { space });
+            } else {
+                self.flush(&space, now);
+            }
         }
     }
 
-    /// Writes `space`'s pending ops now. Nothing happens while the file is invalid, while a
-    /// write is in flight, or when nothing is pending.
+    /// Writes `space`'s pending ops now. Nothing happens while the file is invalid, while its
+    /// last read failed (its content is unknown), while a write is in flight, or when nothing is
+    /// pending. Held ops stay pending in every case.
     pub fn flush(&mut self, space: &SpaceId, now: Millis) {
         let Some(state) = self.spaces.get_mut(space) else {
             return;
         };
+        if state.unread {
+            return;
+        }
         state.deadline = None;
         if state.invalid || state.writing.is_some() {
             return;

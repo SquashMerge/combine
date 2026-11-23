@@ -92,6 +92,8 @@ pub struct Sim {
     pub reads: usize,
     /// Outcomes to give the next writes instead of storing them.
     pub write_outcomes: VecDeque<LayoutWritten>,
+    /// While set, every read fails with this detail, whatever `disk` holds.
+    pub failing_reads: Option<String>,
 }
 
 impl Sim {
@@ -102,6 +104,7 @@ impl Sim {
             writes: Vec::new(),
             reads: 0,
             write_outcomes: VecDeque::new(),
+            failing_reads: None,
         }
     }
 
@@ -132,9 +135,10 @@ impl Sim {
                     LayoutEffect::Watch { .. } => {}
                     LayoutEffect::Read { space } => {
                         self.reads += 1;
-                        let read = match self.disk.get(&space) {
-                            None => LayoutRead::Missing,
-                            Some(bytes) => LayoutRead::Found {
+                        let read = match (&self.failing_reads, self.disk.get(&space)) {
+                            (Some(detail), _) => LayoutRead::Failed(detail.clone()),
+                            (None, None) => LayoutRead::Missing,
+                            (None, Some(bytes)) => LayoutRead::Found {
                                 hash: hash(bytes),
                                 bytes: bytes.clone(),
                                 read_only: false,
