@@ -1,6 +1,6 @@
-# Combine — Spec (rev 17)
+# Combine — Spec (rev 18)
 
-Updated 2026-11-22
+Updated 2026-11-23
 
 Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 17 (S7, layouts, client state and the palette):** the daemon owns a space's layout, `<project>/.workspace/layout.json`, and clients edit it over the wire. Wire protocol is version 3: `watch_layout`, `unwatch_layout`, `mutate_layout` and the `layout` message, with the error codes `unknown_space` and `stale_layout`. A layout change is a batch of 1 to 32 typed ops, made against a `layout_revision`. The daemon applies a batch whole or not at all, writes it after a debounce, and flushes on a space switch, an unwatch, a disconnect and shutdown. An outside edit is told from the daemon's own writes by content hash, and merged with pending ops by field or, on overlap, wins and drops them with a notice in the snapshot. An invalid file is never overwritten; a project that can't be written falls back to `<daemon data>/spaces/` and the rail marks it read-only. `FileStore` gains hashes, a read-only outcome, `watch` and a change stream, and has an on-disk adapter. `combined` now handles SIGTERM and SIGINT: it flushes pending layouts and exits 0. The client stores `ClientSpaceState` and `last_space` per host in `<client data>/hosts/<host-id>.json`, restores them on start, sends `watch_terminals` on every connection and watches the selected space's layout. Cmd+K opens a command palette over spaces, terminals and failed hosts.
 
 **Changes from rev 16 (prior art: OpenUI; streaming panel data):** the view language section gains a *Prior art* note on DivKit and OpenUI: what Combine takes from each and why neither is the view language. Streaming panel data is a planned requirement, not in v1: a `Stream` refresh policy is reserved, with the rules any design must keep (record updates keyed by the kind's `paging.key`, view state surviving updates, frame-batched delivery, the same approvals as other sources). Its mechanism is an open question. No behaviour changes in this revision.
 
@@ -101,7 +103,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - **Commands:** `combined serve [--config <path>]` runs the daemon, `combined connect [--socket <path>] [--config <path>]` is the stdio bridge, and `combined --version` prints the version.
 - **Socket:** by default `<daemon data>/combined.sock`, mode 0600 in a parent directory with no group or other access (the daemon creates the parent 0700 if it is missing, and refuses an existing other parent that is open to group or other). A socket path is at most 103 bytes. A daemon serves its socket only while it holds `<socket>.lock`. It replaces an existing socket file only while holding that lock and only if nothing answers on it. The connect probe is a second check, not proof, because macOS refuses connections when a backlog is full. `<daemon data>/combined.lock` allows one daemon per data directory, so `host.json` and `ids.json` each have one writer.
 - **Connections:** at most 64 client connections; another is closed without a reply. A connection closing after a malformed frame counts until its socket is closed. A write that makes no progress for 10 s closes the connection.
-- **No SIGTERM handler.** A stop is handled like a crash: the OS releases both locks, the next start replaces the stale socket, and clients reconnect and get `gap` for attachments the new incarnation doesn't know.
+- **Shutdown:** SIGTERM and SIGINT stop the daemon cleanly. Both handlers are registered inside the runtime before the socket is bound, so no signal reaches the default disposition once the socket exists. On a signal the daemon stops serving, writes every pending layout (see Persistence), waits for those writes, closes its connections, releases both locks and exits 0. Any other stop, SIGKILL included, is handled like a crash: the OS releases both locks, the next start replaces the stale socket, a layout change still inside its debounce is lost, and clients reconnect and get `gap` for attachments the new incarnation doesn't know.
 - **`host.json`** is `{ "version": 1, "host_id": "<uuid>" }`, mode 0600, written once with a safe write. The ID is a random (version 4) UUID read from `/dev/urandom`. A file that is unreadable, not valid JSON, another version, missing the field or holding something that isn't a lowercase UUID stops the start, and the daemon never rewrites it.
 - **herdr-core down:** the daemon checks at start that the herdr-core socket path is absolute, at most 103 bytes and an existing socket, without connecting. If not, it exits 3 with the path, where the path came from and a hint, and launchd retries every 10 s. If the backend's watch ends while the daemon runs, it also exits 3; clients reconnect and get `gap`, and attach fresh. Exit codes: 0 for a `connect` that ends cleanly, 1 for a runtime failure or a `connect` that can't reach a daemon, 2 for a usage, configuration or lock error, 3 for herdr-core.
 - **launchd:** the agent's label is `com.squashmerge.combined`. The plist ships in `crates/combined/launchd/` and is installed by hand (`docs/daemon.md`); Combine never writes `~/Library/LaunchAgents`.
@@ -109,6 +111,13 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 **Client** (the Tauri app)
 
 - Holds a list of hosts, each with an SSH destination (e.g. `mini`, `jcarreira@work-mbp.local`, or an `~/.ssh/config` alias). The local daemon is reached over its Unix socket directly.
+- **Terminal list:** on every connection, right after the handshake, the client sends `watch_terminals` and builds the host's spaces and terminals from each `terminals` snapshot. A terminal's name is its `name` label, else the file name of `argv[0]`, else its ID.
+- **Layout watch:** the client watches the selected space's layout and nothing else, one space per connection.
+  - Selecting another space on the same host sends `watch_layout` for it; the daemon writes the old space's pending changes.
+  - Selecting a space on another host first sends `unwatch_layout` to the previous host, then `watch_layout` to the new one. Clearing the selection sends `unwatch_layout`. An `unwatch_layout` to a host that is no longer connected is ignored: the daemon wrote on disconnect.
+  - When a host reconnects, the client watches its selected space again.
+  - A quitting app just closes its connections.
+- **Layout changes:** the client keeps at most one `mutate_layout` in flight per space, made against the newest `layout_revision` it holds; later changes wait for the reply. On `stale_layout` it checks the change against the layout it holds (dropping it if its tile is gone) and resends once, at once if it already holds a newer snapshot than the base, else when one arrives. A second `stale_layout` drops the change with the notice "Layout changed elsewhere; your change wasn't applied." An `invalid_request` drops the change and shows the daemon's message. A disconnect clears the queue.
 - Shows every connected host's spaces in one rail. A host that drops shows its spaces dimmed and reconnects in the background; its terminals keep running.
 
 **Transport**
@@ -126,9 +135,9 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - Reconnect: if the SSH session drops, the client starts a new one with backoff and resumes each attachment from its last applied cursor (see Attach, sequence and epoch). The backoff starts at 1 s, doubles to at most 30 s, and resets after a successful handshake. The failures above (host key, passphrase, authentication, missing binary), a host ID mismatch or a host ID another entry already has, a refused or malformed handshake and a `version_mismatch` stop reconnecting: the host shows the message until the user retries it.
 - Latency budget: keystroke echo should stay under about 30 ms on a local network. M0 measured p99 at 0.5 ms or less locally, through the daemon and over ssh to localhost (input to echo received, before xterm.js applies it). The local-network measurement is part of M1.
 
-**Wire protocol** (`crates/combine-protocol`, protocol version 2)
+**Wire protocol** (`crates/combine-protocol`, protocol version 3)
 
-- **Scope:** version 1 covered the handshake and terminal attachments; version 2 adds the terminal list (`watch_terminals`, `terminals`). Spawning and panels arrive as new message types, with a version bump, in the work that needs them.
+- **Scope:** version 1 covered the handshake and terminal attachments; version 2 added the terminal list (`watch_terminals`, `terminals`); version 3 adds a space's layout (`watch_layout`, `unwatch_layout`, `mutate_layout`, `layout`) and the error codes `unknown_space` and `stale_layout`. Spawning and panels arrive as new message types, with a version bump, in the work that needs them.
 - **Frames:** `u32 length | u8 kind | payload`. Every integer on the wire is big-endian. The length counts the kind byte and the payload, and is between 1 and 2^20 (1 MiB). So a frame is at most 1 MiB plus its 4-byte prefix. A reader checks the length before allocating. Memory per decoded control frame is bounded by a constant factor of the 1 MiB cap: within the 32 MiB bound; the frame buffer for unknown values and unescaped keys. Unknown fields are skipped, never stored. There is one message per frame; batching (see Streaming) writes several frames per flush.
 - **Kinds:**
 
@@ -157,6 +166,9 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   - `attach { request, terminal, options }` is a fresh attach. Its options are `cols`, `rows`, `display`, `observe` and `history`; `resume` takes the place of the trait's `resumed`.
   - `resume { request, cursor }`
   - `watch_terminals { request }` subscribes the connection to the host's terminals and spaces. Asking again answers with a fresh snapshot carrying the new `request`; there is no unwatch. A connection that leaves more than 16 answers unflushed is disconnected.
+  - `watch_layout { request, space }` subscribes the connection to one space's layout. The daemon answers `layout` with that `request` once it has read the file, then pushes the newest layout after each change. A connection watches one space at most: watching another replaces the first and writes the first space's pending changes at once. A `space` the host doesn't list gets `unknown_space`. A connection that leaves more than 16 layout replies and errors unflushed is disconnected, as for `watch_terminals`.
+  - `unwatch_layout {}` stops the watch. It has no `request` and gets no reply, and it writes the space's pending changes at once. A connection that closes does the same.
+  - `mutate_layout { request, space, base_layout_revision, ops }` changes the watched space's layout. `ops` holds 1 to 32 ops, applied in order, whole or not at all, and the result must be valid (see `layout.json`). The daemon answers `layout` with this `request`. Errors, each carrying the `request`: `invalid_request` for a batch outside 1 to 32 ops, an invalid ID, a space this connection isn't watching, an op whose precondition fails or a result that isn't valid, with nothing changed; `unknown_space`; and `stale_layout` when `base_layout_revision` isn't the space's current revision.
   - `detach { attachment }`
   - `ack { cursor }`
   - `resize { attachment, cols, rows, ownership_generation }`
@@ -171,6 +183,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   - `attached { request, attachment }`, sent before the attachment's first `started`.
   - `resumed { request, attachment, replay_through }` and `gap { attachment, request }`.
   - `terminals { request, terminals, spaces }`, always a full snapshot, never a delta. The answer to `watch_terminals` carries its `request`; after any change, a snapshot is pushed with `request: null`, at most one per flush per watching connection. Each `terminals` entry is `{ id, cwd, argv, state, exit_code, labels, cols, rows }`, with `state` `running` or `exited` and `exit_code` `null` unless the terminal exited with a code; each `spaces` entry is `{ id, kind, terminals }`, where `id` is the space's folder path, `kind` is `repository`, `worktree` or `folder`, and `terminals` lists its terminal IDs. Both lists are sorted by ID. A snapshot too large for one frame is answered with an `internal` error, `the terminal list is larger than one frame`, in its place. Example: `{"type":"terminals","request":7,"terminals":[{"id":"hc:t8","cwd":"/Users/me/src/trellis/crates","argv":["claude"],"state":"running","exit_code":null,"labels":{},"cols":120,"rows":40}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["hc:t8"]}]}`.
+  - `layout { request, layout }`: the answer to `watch_layout` or `mutate_layout` carries its `request`; a push after a change has `request: null`, at most one per flush per watching connection. `layout` is `{ space, layout_revision, root, read_only, error, dropped }`. `root` is the tile tree as in `layout.json`, without `groups` or unknown keys. `layout_revision` is a `u64` the mutation's `base_layout_revision` must match. `read_only` is true when the layout lives in the fallback. `error` is text, or `null`, shown while `layout.json` can't be used or saved; `root` is then the last good layout. `dropped` is `{ op_count, message }` or `null` (see Persistence). Ops are tagged by `op`: `set_active { tile, panel }`, `set_ratio { leaves, ratio }`, `move_panel { panel, to_tile, index }`, `split_tile { tile, dir, new_tile, ratio, panel }` (`panel` optional) and `close_tile { tile }`; a split is addressed by `leaves`, the tile IDs under it in any order.
   - `ownership { attachment, ownership_generation, owner }`, where `owner` is an attachment ID, or `null` for no owner.
   - `error { code, message, request, attachment }`.
   - The attachment events, each with its `cursor`:
@@ -187,7 +200,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
   An attachment's ordered stream carries its attachment events. If the stream ends with an in-order `gap` (`request: null`), that gap comes after the last event. Everything else here is control traffic, queued ahead of output (see Transport): `welcome`, `attached`, `resumed`, a `gap` that answers a resume, `terminals`, `ownership` and `error`.
 - **Flow control:** no credit message crosses the wire. The client's `ack` of the last event it applied is its only flow-control signal; the daemon's credit to the backend stays inside the daemon.
 - **Errors:**
-  - `code` is one of `version_mismatch`, `malformed`, `unknown_terminal`, `attach_failed`, `unknown_attachment`, `stale_generation`, `watch_only`, `invalid_request` (including a `hello` after the handshake) and `internal`. `message` is for people. `request` or `attachment` names what the error answers.
+  - `code` is one of `version_mismatch`, `malformed`, `unknown_terminal`, `attach_failed`, `unknown_attachment`, `stale_generation`, `watch_only`, `invalid_request` (including a `hello` after the handshake), `unknown_space`, `stale_layout` and `internal`. `message` is for people. `request` or `attachment` names what the error answers.
   - A frame that can't be decoded is a protocol error: truncated, over the cap, an unknown kind or message type, or bad JSON. The receiver closes the connection, and the daemon sends `malformed` first. The codec returns each of these as a typed error and never panics.
   - The daemon answers a first frame that can't be decoded with `malformed`, and a first message that isn't `hello` with `invalid_request`, before it closes. It waits 10 s in total, from admission, for the `hello` to arrive in full, and closes without a reply when the time runs out.
   - `ErrorMessage::trimmed_message` cuts a peer's `error` message to 256 bytes (`MAX_ERROR_DETAIL`) on a character boundary. It is applied before a peer's error text is logged or put in the `Display` of `HandshakeError::Refused`. It is not the client's display rule (see Handshake), which it neither replaces nor restates.
@@ -209,20 +222,20 @@ A space is one project folder on one host: the herdr-core terminals started in i
 | Terminal | One live PTY: shell or agent | `TermId`, e.g. `hc:t8` | herdr-core |
 | Panel | A tab in a tile: terminal view or data/diagram view | Panel ID | App (files) |
 | Panel group | Several panels for one service, sharing a loader library and selection | Group instance ID | App (files) |
-| Layout | Split tree of tiles; each tile is a stack of panels shown as tabs | Per space | App (files) |
+| Layout | Split tree of tiles; each tile is a stack of panels shown as tabs | Per space | Daemon (`.workspace/layout.json`) |
 
 - A terminal joins the space of the git root containing its starting `cwd` (or that folder itself outside git), and stays there: a program that later changes directory doesn't move it. The navigator can reassign a terminal explicitly; the assignment is daemon runtime state. The daemon finds the git root through a `GitProbe` port: the nearest ancestor of the starting `cwd` holding `.git` (a directory: a repository; a file: a worktree or submodule) is the space's folder; with none, the `cwd` itself. A space's ID is that folder's path.
 - A git worktree has its own root, so it is its own space.
 - The daemon watches the backend's terminals, then lists them, and keeps them with their spaces in core's `TerminalList`; `terminals` snapshots report it.
 - Only the host's own terminals count. herdr-core also lists terminals on machines it has linked (`work/t7`); those never join a space here (see Terminal backends).
-- The daemon keeps one in-memory file store per project path, with a single revision counter, so every reader of a `.workspace/` sees one copy (the `FileStore` port: read, write and the revision).
+- **`FileStore` port:** the daemon reaches a project's `.workspace/` only through it: `read`, `write`, `revision`, `watch` and `changes`. A read returns the bytes, their content hash (SHA-256) and whether they came from the fallback; a write returns the revision, the hash and whether it went to the fallback; `watch` starts reporting a space's changes and `changes` is the stream of them, taken once. A write to a project that can't be written fails with `ReadOnly` when the store has no fallback. The in-memory store (tests) keeps one copy per project path with a single revision counter; the on-disk store (`FsFileStore`) is what `combined serve` runs on, and refuses a symlink at `.workspace`, under it or at the file itself.
 
 Three models, never one serialized and then stripped: a portable spec, daemon runtime state, and per-client state.
 
 ```
 // Portable spec: <project>/.workspace/
 SpaceLayout   { version, root: SplitNode, groups: [GroupInstance] }       // layout.json
-SplitNode   = Split { dir: H | V, ratio, a, b } | Tile { id: TileId, panels: [PanelId], active: PanelId }
+SplitNode   = Split { dir: H | V, ratio, a, b } | Tile { id: TileId, panels: [PanelId], active: PanelId | null }
 
 PanelSpec     { version, id, title, lifetime: Persistent | Scratch, group?: GroupInstanceId,
                 content: Terminal { slot: String, template: SpawnSpec, follow_active }
@@ -243,7 +256,27 @@ ClientSpaceState { space_id, focused_tile: TileId, active_terminal: slot,
                    active_tabs: Map<TileId, PanelId>,                     // overrides Tile.active
                    group_state: Map<GroupInstanceId, Map<String, Value>>,   // selection keys named by kinds, e.g. selected_issue
                    view_state: Map<PanelId, Map<String, Value>> }            // scroll, focus, set_state; never reloads loaders
+                                                                              // (view_state arrives with panels; the client doesn't store it yet)
+// Per-client file, <client data>/hosts/<host-id>.json
+ClientState   { version: 1, last_space: { space_id, selected_at_ms } | null, spaces: Map<space path, ClientSpaceState> }
 ```
+
+**`layout.json`** is one JSON object: `{ "version": 1, "root": <node>, "groups": [] }`.
+
+- **Nodes:** `{ "type": "split", "dir": "h" | "v", "ratio": <number>, "a": <node>, "b": <node> }` or `{ "type": "tile", "id": "<tile id>", "panels": ["<panel id>"], "active": "<panel id>" | null }`. `h` puts `a` left of `b`, and `v` puts `a` above `b`. `ratio` is `a`'s share.
+- **IDs:** tile and panel IDs are opaque strings of 1 to 256 bytes with no control characters. The client chooses a new tile's ID. Panel IDs that name no panel are kept and shown as missing.
+- **Valid** means: `version` is 1; the encoded file is at most 256 KiB; the tree is at most 64 levels deep; every ratio is finite and strictly between 0 and 1; tile IDs are unique, and so are panel IDs; an empty tile has `active` null; and a non-empty tile's `active` is one of its `panels`.
+- **`active`:** a tile with no `active` key parses as null; the daemon always writes the key.
+- **Unknown keys** at the top level, on splits and on tiles are kept and written back. `groups` is kept untouched, defaults to `[]` and is always written. The wire snapshot carries neither.
+- **No file:** the layout is one empty tile, `main`, held in memory only until the first accepted change writes the file.
+- **Encoding:** pretty-printed JSON and a trailing newline. Nothing compares layouts by their bytes.
+
+**Client state file** (`<client data>/hosts/<host-id>.json`, one per host)
+
+- The file name is the host's lowercase UUID. The file is `{ "version": 1, "last_space": { "space_id", "selected_at_ms" } | null, "spaces": { "<space path>": { "space_id", "focused_tile", "active_terminal", "active_tabs", "group_state" } } }`. Unknown fields make it invalid. `focused_tile` and `active_terminal` may be null; `active_terminal` holds a `TermId` until terminal slots exist; `group_state` is opaque, stored and returned as is.
+- `last_space` is the space the user last selected on that host, stamped by the client with `selected_at_ms` (milliseconds, from the app's clock). At start the client opens the newest `last_space` across the hosts it listed.
+- A missing file means defaults. An invalid file shows its error, runs on defaults and is never written. A write is safe: it takes a lock, checks that the file is the one loaded (otherwise it fails with `ChangedOnDisk`), writes a unique temp file with mode 0600, fsyncs it, renames it over the file and fsyncs the directory. Writes aren't debounced.
+- On restore the client drops what no longer exists, without writing it back: an `active_tabs` entry whose tile or panel is gone from the layout, an `active_terminal` or `focused_tile` that no longer exists. A stored active tab wins over the tile's own `active`.
 
 **Who owns which state**
 
@@ -290,6 +323,7 @@ No database: every panel is a directory of plain files on the space's host, so a
   combined.sock                       the daemon's socket (default path)
   combined.sock.lock                  held by the daemon serving that socket
   state.json                          SpaceBinding per space, pins and recents
+  spaces/<sha256 of space ID>/layout.json   fallback layout of a project that can't be written (read-only)
   scratch/<space-id>/<panel-id>/      scratch panels until pinned or closed
 
 <daemon cache>/sources/               last good data per source key; ~/Library/Caches/com.squashmerge.combined/
@@ -300,12 +334,15 @@ No database: every panel is a directory of plain files on the space's host, so a
 ```
 
 - **Authority:** the daemon is the sole authority for mutations made through the API (clients and MCP tools). The files stay editable by agents, editors and `git`; the daemon treats those as outside edits.
-- **Watching:** the daemon watches `.workspace/`, the group library and the kind library, and reloads on change.
-- **Self-write detection:** the daemon records the hash of every file it writes, and ignores watcher events whose content matches.
-- **Conflicts:** if an outside edit lands while the daemon holds an unsaved change to the same file, the outside edit wins. The daemon re-applies its pending change on top only if it touches different fields; otherwise it drops it and reports that in `list_panels`.
-- **Invalid files:** invalid JSON or an unsupported `version` leaves that panel showing the error and its last good spec; the daemon never overwrites a file it can't parse.
-- **Read-only projects:** if `.workspace/` can't be written, the space's layout lives in `<daemon data>` and the rail marks it.
-- **Safe writes:** temp file and rename, debounced about 500 ms on layout changes, immediate on space switch and quit.
+- **Watching:** the daemon watches `.workspace/`, the group library and the kind library, and reloads on change. S7 builds the `layout.json` watch: for each space a client has watched, the daemon watches the project folder and its `.workspace/`, not recursively, and arms again if `.workspace/` is created later. Only the exact name `layout.json` counts; names starting with `.` (temp files) don't. The group and kind libraries arrive with their milestones.
+- **Self-write detection:** per space, the daemon keeps the SHA-256 of the last `layout.json` bytes it read or wrote, in memory only. Every change event triggers a read, and a read whose hash matches is ignored; so is a missing file when none was known. Any other read is an outside edit.
+- **Layout changes and revisions:** a space's layout holds the last good layout read from disk, that layout with the pending ops applied, and a `layout_revision` that starts at 0 per daemon run and is never persisted. The revision goes up by 1 on every accepted `mutate_layout`, on every read that isn't ignored (valid or invalid, even when the layout is identical, so a reformat still bumps it), and on every change to `error`, `read_only` or `dropped` caused by a write. Each bump is pushed to the space's watchers. It doesn't change on an ignored read, or on a write that changes none of those fields. At start the disk is authoritative and nothing is pending.
+- **Conflicts:** if a valid outside edit lands while the daemon holds pending ops, the daemon compares the fields the edit changed with the fields the pending ops touched: the structure of the tree, each split's ratio, each tile's panels, each tile's active panel, `groups` and unknown keys. With no overlap, and every op still valid in order on the new file, the daemon applies the ops on top of it and keeps its write deadline. Otherwise the outside edit wins, the whole pending batch is dropped, and the layout snapshot carries `dropped { op_count, message }` until the next accepted mutation or outside edit. Removing the file counts as an outside edit to the default layout. `list_panels` reporting of dropped changes comes with panels in M2; until then the snapshot is the only report.
+- **Invalid files:** invalid JSON or an unsupported `version` leaves that panel showing the error and its last good spec; the daemon never overwrites a file it can't parse. For `layout.json`, which is also invalid when it fails the checks above, the snapshot keeps the last good layout (the default at start) and sets `error` to `layout.json can't be used: <reason>. Showing the last good layout. Changes made now aren't saved, and are lost if the daemon restarts, until layout.json is fixed.` Mutations are still accepted and held, and nothing is written. When the file is valid again, the conflict rule above runs against it. A read that fails sets `error` to `Couldn't read layout.json (<detail>); showing the last good layout.`
+- **Read-only projects:** if `.workspace/` can't be written (permission denied, or a read-only filesystem), the daemon writes the layout to `<daemon data>/spaces/<sha256 of the space ID in hex>/layout.json` instead, and the snapshot has `read_only: true`, which the rail shows.
+  - Limits: once that file exists it stays authoritative, and a read prefers it. Deleting it returns the space to the project's file. While it exists, outside edits to the project's `layout.json` are ignored, and the fallback file isn't watched. The rail marks a space read-only only after a write fell back or an existing fallback was read.
+  - A store with no fallback, or a failure that isn't a denied write, keeps the pending batch, retries every 5 s and sets `error`: `Can't write .workspace/ (<detail>). Changes aren't saved, and are lost if the daemon restarts.` for a refused project, `Couldn't save layout.json (<detail>); retrying.` for any other failure. `combined serve` always has the fallback. A symlink on the way to the file, or a path outside `.workspace/`, is refused and never reaches it.
+- **Safe writes:** temp file and rename. Layout changes are debounced: a batch is written 500 ms after its latest change, and at most 2 s after its first, however busy, so a burst makes one write. They are written at once when a connection watches another space, unwatches or disconnects, and at shutdown. Files are written with mode 0644; the daemon's own files stay 0600.
 - **Scratch panels** survive space switches and daemon restarts; they are deleted when closed, or after 7 days unopened.
 - **Versioning:** every JSON file has a `version` field for later migrations.
 - **`daemon.json`:** `{ "version": 1, "backend"?, "herdr_core_socket"?, "data_dir"?, "socket"? }`. It is read before anything else, which is why it isn't part of `settings.json` (the allowlists and approvals of later milestones). Paths must be absolute. `backend` is `"herdr-core"` (the default), or `"fake"` in a build with the `test-support` feature only. An unknown field, another version, bad JSON or a relative path stops the start. A missing default file means every default applies; a missing file named with `--config` stops the start.
@@ -332,7 +369,7 @@ A rail of spaces grouped by host swaps the whole screen; a terminal navigator sw
 
 | Shortcut | Action |
 | --- | --- |
-| Cmd+K | Command palette: spaces, terminals, panels, groups, actions, fuzzy matched |
+| Cmd+K | Command palette: spaces, terminals, panels, groups, actions, fuzzy matched (S7 builds spaces, terminals and failed hosts; see Command palette) |
 | Cmd+P | Switch space |
 | Cmd+T | Switch terminal in the focused panel |
 | Cmd+1 to Cmd+9 | Go to space 1 to 9 on the rail |
@@ -340,12 +377,19 @@ A rail of spaces grouped by host swaps the whole screen; a terminal navigator sw
 | Cmd+Shift+N | New terminal in this space |
 | Cmd+Option+arrows | Move focus between tiles |
 
+**Command palette** (Cmd+K)
+
+- Cmd+K opens a dialog with a text field and a result list; Up and Down move, Enter runs the selected entry and Escape closes it.
+- **Entries:** every space on every host (running it switches to that space); every terminal (it switches to the terminal's space first if needed, then focuses the terminal); and "Retry <host>" for each host whose connection failed. There is no new-terminal or open-folder entry yet, and panels, groups and other actions come with their milestones.
+- **Matching:** a case-insensitive subsequence match over the entry's label and detail text. A match scores +16 at the first character, +8 after a separator and +4 for each consecutive character, and loses 1 per gap. Ties sort by kind (spaces, terminals, hosts), then label. An empty query lists entries in registry order. At most 50 results show.
+- A space that is read-only shows a `read-only` mark in the rail.
+
 **Switching rules**
 
 - Switching spaces never kills terminals; the client only detaches the old space's terminal panels.
 - Three kinds of subscription, kept separate: high-volume terminal output (visible panels only), lightweight state events for every terminal on every host (badges, navigator), and space discovery (new or removed spaces).
 - Client-independent persistent panels keep refreshing in the daemon on their own policy; the client just stops drawing them (see Background refresh).
-- Each client remembers, per space, its focused tile and active terminal, so returning restores exactly where you were on that machine.
+- Each client remembers, per space, its focused tile, active terminal and each tile's active tab, and which space was last selected on each host, so returning restores exactly where you were on that machine (see Client state file).
 
 ## Terminal backends
 
