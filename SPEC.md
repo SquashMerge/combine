@@ -264,12 +264,12 @@ ClientState   { version: 1, last_space: { space_id, selected_at_ms } | null, spa
 **`layout.json`** is one JSON object: `{ "version": 1, "root": <node>, "groups": [] }`.
 
 - **Nodes:** `{ "type": "split", "dir": "h" | "v", "ratio": <number>, "a": <node>, "b": <node> }` or `{ "type": "tile", "id": "<tile id>", "panels": ["<panel id>"], "active": "<panel id>" | null }`. `h` puts `a` left of `b`, and `v` puts `a` above `b`. `ratio` is `a`'s share.
-- **IDs:** tile and panel IDs are opaque strings of 1 to 256 bytes with no control characters. The client chooses a new tile's ID. Panel IDs that name no panel are kept and shown as missing.
+- **IDs:** tile and panel IDs are opaque strings of 1 to 256 bytes with no control characters. The client chooses a new tile's ID. Panel IDs that name no panel are kept. Until panels exist (M2) the client shows each one as a tab labelled with its ID; showing it as missing comes with panels.
 - **Valid** means: `version` is 1; the encoded file is at most 256 KiB; the tree is at most 64 levels deep; every ratio is finite and strictly between 0 and 1; tile IDs are unique, and so are panel IDs; an empty tile has `active` null; and a non-empty tile's `active` is one of its `panels` (so a non-empty tile with no `active` is invalid).
 - **`active`:** a tile with no `active` key parses as null; the daemon always writes the key.
 - **Unknown keys** at the top level, on splits and on tiles are kept and written back. `groups` is kept untouched, defaults to `[]` and is always written. The wire snapshot carries neither.
 - **No file:** the layout is one empty tile, `main`, held in memory only until the first accepted change writes the file.
-- **Encoding:** pretty-printed JSON and a trailing newline. Nothing compares layouts by their bytes.
+- **Encoding:** pretty-printed JSON and a trailing newline. The encoding isn't canonical, so layout equality and conflict detection compare parsed fields; only self-write detection compares bytes, by hash.
 
 **Client state file** (`<client data>/hosts/<host-id>.json`, one per host)
 
