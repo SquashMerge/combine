@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
 
@@ -26,7 +27,7 @@ function sample() {
 }
 
 async function mount() {
-  render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort()} />);
+  render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={new MemoryClientStatePort()} />);
   await screen.findByRole('navigation', { name: 'Spaces' });
 }
 
@@ -82,7 +83,7 @@ describe('TerminalNavigator', () => {
 
   it('prompts again when the selected space disappears', async () => {
     const port = new MemoryHostsPort(sample());
-    render(<App layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('navigation', { name: 'Spaces' });
     fireEvent.click(spaceButton('mac', 'alpha'));
     expect(navigator().querySelectorAll('li')).toHaveLength(2);
@@ -95,7 +96,7 @@ describe('TerminalNavigator', () => {
   });
 
   it('shows No terminals when nothing remains', async () => {
-    render(<App layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(snapshot([host('a', HOST_A, connected, [space(HOST_A, '/x')])]))} clientStatePort={new MemoryClientStatePort()} />);
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(snapshot([host('a', HOST_A, connected, [space(HOST_A, '/x')])]))} clientStatePort={new MemoryClientStatePort()} />);
     await screen.findByRole('navigation', { name: 'Spaces' });
     fireEvent.click(within(navigator()).getByRole('button', { name: 'All spaces' }));
     expect(within(navigator()).getByText('No terminals.')).toBeTruthy();

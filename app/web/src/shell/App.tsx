@@ -13,11 +13,13 @@ import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort } from '../ipc/port';
+import type { TerminalPort } from '../ipc/terminalPort';
+import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import type { HostsSnapshot } from '../model/hosts';
-import { firstTileId, layoutTiles } from '../model/layout';
+import { type LayoutSnapshot, firstTileId, layoutTiles } from '../model/layout';
 import { CommandPalette } from './CommandPalette';
 import { SpaceRail } from './SpaceRail';
-import { TileTree } from './TileTree';
+import { type TerminalMount, TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
 import { useSpaceLayout } from './useSpaceLayout';
 import { useHostsSnapshot } from './useHostsSnapshot';
@@ -27,6 +29,8 @@ interface AppProps {
   port: HostsPort;
   clientStatePort: ClientStatePort;
   layoutPort: LayoutPort;
+  terminalPort: TerminalPort;
+  createAdapter?: XtermAdapterFactory;
   newTileId?: () => string;
   now?: () => number;
 }
@@ -49,7 +53,15 @@ interface PendingSelection {
   selectedAtMs: DecimalU64;
 }
 
-export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.now }: AppProps) {
+export function App({
+  port,
+  clientStatePort,
+  layoutPort,
+  terminalPort,
+  createAdapter,
+  newTileId,
+  now = Date.now,
+}: AppProps) {
   const { snapshot, error } = useHostsSnapshot(port);
   const [selected, setSelected] = useState<SpaceKey | null>(null);
   const [allSpaces, setAllSpaces] = useState(false);
@@ -217,20 +229,50 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
   );
   const layout = useSpaceLayout(layoutPort, snapshot, selected, newTileId);
 
+  // useSpaceLayout drops its layout on any disconnect. Rendering the tree from the last layout of the
+  // selected space keeps the terminal panel mounted through a host drop, so its controller reconnects
+  // and resumes instead of being stopped and re-attached. The held copy is read-only until the watch
+  // replies again.
+  const lastLayout = useRef<{ space: string; snapshot: LayoutSnapshot } | null>(null);
+  const selectedId = selected === null ? null : spaceKeyId(selected);
+  if (layout.snapshot !== null && selectedId !== null) {
+    lastLayout.current = { space: selectedId, snapshot: layout.snapshot };
+  }
+  const shownLayout = useMemo<LayoutSnapshot | null>(() => {
+    if (layout.snapshot !== null) return layout.snapshot;
+    const held = lastLayout.current;
+    return held !== null && held.space === selectedId ? { ...held.snapshot, readOnly: true } : null;
+  }, [layout.snapshot, selectedId]);
+
   const restoredTiles = useMemo(() => {
-    if (layout.snapshot === null || selected === null) return null;
+    if (shownLayout === null || selected === null) return null;
     const space = snapshot?.hosts
       .find((host) => host.hostId === selected.hostId)
       ?.spaces.find((candidate) => candidate.key.path === selected.path);
     const terminalIds = new Set<string>(space?.terminals.map((terminal) => terminal.id) ?? []);
-    const { root } = layout.snapshot;
+    const { root } = shownLayout;
     const result = restoreSpaceState(
       storedSpaceState(states.get(selected.hostId), selected.path),
       layoutTiles(root),
       terminalIds,
     );
     return { ...result, focusedTile: result.focusedTile ?? firstTileId(root) };
-  }, [layout.snapshot, selected, snapshot, states]);
+  }, [shownLayout, selected, snapshot, states]);
+
+  const mountedTerminal = useMemo<TerminalMount | null>(() => {
+    if (selected === null) return null;
+    const hostView = snapshot?.hosts.find((candidate) => candidate.hostId === selected.hostId);
+    const termId = activeTerminals.get(spaceKeyId(selected));
+    const summary = hostView?.spaces
+      .find((candidate) => candidate.key.path === selected.path)
+      ?.terminals.find((terminal) => terminal.id === termId);
+    if (hostView === undefined || summary === undefined) return null;
+    return {
+      hostId: selected.hostId,
+      termId: summary.id,
+      label: { name: summary.name, host: hostView.name, state: summary.state },
+    };
+  }, [activeTerminals, selected, snapshot]);
 
   const changeSpaceState = useCallback(
     (space: SpaceKey, change: (state: ClientSpaceState) => ClientSpaceState) => {
@@ -295,14 +337,14 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
       />
-      {layout.snapshot === null && layout.error !== null && (
+      {shownLayout === null && layout.error !== null && (
         <p className="layout-error" role="alert">
           {layout.error}
         </p>
       )}
-      {layout.snapshot !== null && restoredTiles !== null && (
+      {shownLayout !== null && restoredTiles !== null && (
         <TileTree
-          layout={layout.snapshot}
+          layout={shownLayout}
           notice={layout.notice}
           error={layout.error}
           focusedTile={restoredTiles.focusedTile}
@@ -311,6 +353,9 @@ export function App({ port, clientStatePort, layoutPort, newTileId, now = Date.n
           onSelectTab={selectTab}
           onSplit={layout.split}
           onClose={layout.close}
+          terminalPort={terminalPort}
+          terminal={mountedTerminal}
+          {...(createAdapter === undefined ? {} : { createAdapter })}
         />
       )}
       <CommandPalette

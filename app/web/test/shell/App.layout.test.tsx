@@ -7,6 +7,7 @@ import { App } from '../../src/shell/App';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
+import { MemoryTerminalPort } from '../support/memoryTerminalPort';
 import { HOST_A, host, snapshot, space } from '../support/snapshots';
 
 const connected = { kind: 'connected' } as const;
@@ -50,6 +51,7 @@ async function mount(state: ClientState | null) {
   );
   render(
     <App
+      terminalPort={new MemoryTerminalPort()}
       port={new MemoryHostsPort(hosts())}
       clientStatePort={clientStatePort}
       layoutPort={layoutPort}
