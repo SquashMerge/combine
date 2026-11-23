@@ -5,14 +5,34 @@ import { installTerminalDom } from '../support/terminalDom';
 const webgl = vi.hoisted(() => ({
   events: [] as string[],
   failOnLoad: false,
+  failOnConstruct: false,
   contextLoss: [] as Array<() => void>,
 }));
 
+const terminals = vi.hoisted(() => [] as Array<{ _core: { coreService: { triggerBinaryEvent(data: string): void } } }>);
+
+vi.mock('@xterm/xterm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@xterm/xterm')>();
+  return {
+    ...actual,
+    Terminal: class extends actual.Terminal {
+      constructor(options?: ConstructorParameters<typeof actual.Terminal>[0]) {
+        super(options);
+        terminals.push(this as unknown as (typeof terminals)[number]);
+      }
+    },
+  };
+});
+
 vi.mock('@xterm/addon-webgl', () => ({
   WebglAddon: class {
+    constructor() {
+      if (webgl.failOnConstruct) throw new Error('webgl constructor failed');
+    }
     activate(): void {
       if (webgl.failOnLoad) throw new Error('webgl unavailable');
-      webgl.events.push('webgl:activate');
+      const opened = document.querySelector('.terminal-view__xterm .xterm') !== null;
+      webgl.events.push(opened ? 'webgl:activate:after-open' : 'webgl:activate:before-open');
     }
     dispose(): void {
       const live = document.querySelector('.terminal-view__xterm .xterm') !== null;
@@ -33,6 +53,8 @@ interface Harness {
   adapter: XtermAdapter;
   host: HTMLElement;
   inputs: string[];
+  binary: number[][];
+  cells: Array<{ width: number; height: number }>;
   replies: string[];
   focusReports: string[];
   focus: ReturnType<typeof vi.fn>;
@@ -43,21 +65,28 @@ function make(): Harness {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const inputs: string[] = [];
+  const binary: number[][] = [];
+  const cells: Array<{ width: number; height: number }> = [];
   const replies: string[] = [];
   const focusReports: string[] = [];
   const focus = vi.fn();
   const callbacks: XtermCallbacks = {
-    onInput: (b) => inputs.push(decoder.decode(b)),
+    onInput: (b) => {
+      inputs.push(decoder.decode(b));
+      binary.push([...b]);
+    },
     onAutomaticReply: (b) => replies.push(decoder.decode(b)),
     onFocusReport: (b) => focusReports.push(decoder.decode(b)),
     onFocus: focus,
-    onCellSize: () => {},
+    onCellSize: (c) => cells.push(c),
   };
   const adapter = createXtermAdapter(host, { cols: 80, rows: 24 }, callbacks);
   return {
     adapter,
     host,
     inputs,
+    binary,
+    cells,
     replies,
     focusReports,
     focus,
@@ -77,6 +106,7 @@ describe('createXtermAdapter', () => {
   beforeEach(() => {
     webgl.events.length = 0;
     webgl.failOnLoad = false;
+    webgl.failOnConstruct = false;
     webgl.contextLoss.length = 0;
     document.body.innerHTML = '';
   });
@@ -91,7 +121,7 @@ describe('createXtermAdapter', () => {
 
   it('loads the WebGL addon after open', () => {
     const h = make();
-    expect(webgl.events).toEqual(['webgl:activate']);
+    expect(webgl.events).toEqual(['webgl:activate:after-open']);
     expect(h.adapter.renderer).toBe('webgl');
     expect(h.host.querySelector('.terminal-view__xterm .xterm')).not.toBeNull();
     h.adapter.dispose();
@@ -99,6 +129,13 @@ describe('createXtermAdapter', () => {
 
   it('falls back to the DOM renderer when the WebGL addon fails to load', () => {
     webgl.failOnLoad = true;
+    const h = make();
+    expect(h.adapter.renderer).toBe('dom');
+    h.adapter.dispose();
+  });
+
+  it('falls back to the DOM renderer when the WebGL addon constructor throws', () => {
+    webgl.failOnConstruct = true;
     const h = make();
     expect(h.adapter.renderer).toBe('dom');
     h.adapter.dispose();
@@ -116,7 +153,7 @@ describe('createXtermAdapter', () => {
   it('disposes the addon before the terminal', () => {
     const h = make();
     h.adapter.dispose();
-    expect(webgl.events).toEqual(['webgl:activate', 'webgl:dispose:terminal-live']);
+    expect(webgl.events).toEqual(['webgl:activate:after-open', 'webgl:dispose:terminal-live']);
     expect(h.host.querySelector('.terminal-view__xterm')).toBeNull();
   });
 
@@ -160,10 +197,55 @@ describe('createXtermAdapter', () => {
 
   it('does not consume Cmd key combinations', () => {
     const h = make();
-    h.term().dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', keyCode: 75, metaKey: true, bubbles: true }),
-    );
+    for (const [key, code, keyCode] of [
+      ['Enter', 'Enter', 13],
+      ['Backspace', 'Backspace', 8],
+    ] as const) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code,
+        keyCode,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      h.term().dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
     expect(h.inputs).toEqual([]);
+    h.adapter.dispose();
+  });
+
+  it('routes onBinary data to onInput as bytes', () => {
+    const h = make();
+    terminals[terminals.length - 1]?._core.coreService.triggerBinaryEvent('\xff\x01\x80');
+    expect(h.binary).toEqual([[0xff, 0x01, 0x80]]);
+    h.adapter.dispose();
+  });
+
+  it('calls onFocus on focusin', () => {
+    const h = make();
+    h.term().dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(h.focus).toHaveBeenCalledTimes(1);
+    h.adapter.dispose();
+  });
+
+  it('reports a measured cell size only when it is non-zero and changed', async () => {
+    const h = make();
+    const screen = h.host.querySelector('.xterm-screen') as HTMLElement;
+    const rect = { width: 0, height: 0 };
+    screen.getBoundingClientRect = () => rect as DOMRect;
+    const rendered = async () => {
+      await write(h.adapter, 'x');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+    await rendered();
+    expect(h.cells).toEqual([]);
+    rect.width = 640;
+    rect.height = 480;
+    await rendered();
+    await rendered();
+    expect(h.cells).toEqual([{ width: 8, height: 20 }]);
     h.adapter.dispose();
   });
 

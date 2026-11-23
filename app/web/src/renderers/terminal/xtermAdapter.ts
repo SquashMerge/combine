@@ -65,17 +65,19 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
   terminal.open(child);
 
   let webgl: WebglAddon | null = null;
-  const addon = new WebglAddon();
+  let addon: WebglAddon | undefined;
   try {
-    addon.onContextLoss(() => {
-      addon.dispose();
+    const loading = new WebglAddon();
+    addon = loading;
+    loading.onContextLoss(() => {
+      loading.dispose();
       webgl = null;
     });
-    terminal.loadAddon(addon);
-    webgl = addon;
+    terminal.loadAddon(loading);
+    webgl = loading;
   } catch {
     try {
-      addon.dispose();
+      addon?.dispose();
     } catch {
       // The addon never finished loading; the DOM renderer stays.
     }
