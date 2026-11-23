@@ -8,7 +8,7 @@ use std::path::Path;
 use combine_protocol as wire;
 use serde_json::{Map, Value};
 
-use crate::model::{PanelId, SpaceId, SpawnSpec};
+use crate::model::{ContentHash, PanelId, SpaceId, SpawnSpec};
 use crate::ports::DirRefusal;
 
 pub const PANELS_DIR: &str = "panels";
@@ -355,7 +355,8 @@ pub fn shell_spec(root: &SpaceId) -> SpawnSpec {
     }
 }
 
-pub fn template_info(template: &TerminalTemplate) -> wire::TemplateInfo {
+/// What a listing offers for `template`; `hash` is the hash of the bytes it was parsed from.
+pub fn template_info(template: &TerminalTemplate, hash: &ContentHash) -> wire::TemplateInfo {
     wire::TemplateInfo {
         panel: template.panel.clone(),
         title: template.title.clone(),
@@ -363,5 +364,6 @@ pub fn template_info(template: &TerminalTemplate) -> wire::TemplateInfo {
         argv: template.argv.clone(),
         env: template.env.clone(),
         cwd: template.cwd.clone(),
+        hash: hash.to_hex(),
     }
 }

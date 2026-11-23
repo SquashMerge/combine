@@ -136,7 +136,7 @@ pub struct ListTemplates {
 
 /// Starts a terminal in a space. The daemon answers `spawned` carrying this
 /// `request`, or an `error` with `unknown_space`, `unknown_template`,
-/// `cwd_refused` or `spawn_failed`.
+/// `template_changed`, `cwd_refused` or `spawn_failed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnTerminal {
     pub request: RequestId,

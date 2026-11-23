@@ -4,7 +4,9 @@
 //! with effects to run, reported back through the `apply_*` methods, and replies to send. A
 //! `Spawn` effect comes only from a `spawn_terminal` request: nothing else starts a terminal.
 //! The daemon reads `panel.json` again at spawn time; a client names a template by its panel ID
-//! and never supplies a command.
+//! and the hash of the definition it was shown, and never supplies a command. When the file's
+//! bytes no longer have that hash, the spawn is refused with `template_changed`; otherwise the
+//! terminal runs the definition parsed from exactly those bytes.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +22,7 @@ use crate::core::panels::{
     valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, MAX_PANELS, PANELS_DIR,
     PANEL_LIST_MAX,
 };
-use crate::model::{SpaceId, SpawnSpec};
+use crate::model::{ContentHash, SpaceId, SpawnSpec};
 use crate::ports::{BackendResult, DirListing, EntryKind, ProjectDirs, StoreError, StoredFile};
 
 /// How many template and spawn requests one connection may have unanswered.
@@ -34,7 +36,11 @@ pub struct SpawnTicket(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelRead {
     Missing,
-    Found(Vec<u8>),
+    /// The bytes read and their hash, as the store computed it.
+    Found {
+        bytes: Vec<u8>,
+        hash: ContentHash,
+    },
     /// The file is larger than the bound the read was given.
     TooLarge {
         size: u64,
@@ -46,7 +52,10 @@ impl From<Result<Option<StoredFile>, StoreError>> for PanelRead {
     fn from(result: Result<Option<StoredFile>, StoreError>) -> PanelRead {
         match result {
             Ok(None) => PanelRead::Missing,
-            Ok(Some(file)) => PanelRead::Found(file.bytes),
+            Ok(Some(file)) => PanelRead::Found {
+                bytes: file.bytes,
+                hash: file.hash,
+            },
             Err(StoreError::TooLarge { size, .. }) => PanelRead::TooLarge { size },
             Err(other) => PanelRead::Failed(store_error_detail(other)),
         }
@@ -93,8 +102,8 @@ enum Step {
         skipped: BTreeMap<String, String>,
         note: Option<String>,
     },
-    /// Waiting for the one panel file a spawn names.
-    ReadingTemplate { panel: String },
+    /// Waiting for the one panel file a spawn names; `hash` is the hash the client was shown.
+    ReadingTemplate { panel: String, hash: String },
     /// Waiting for the backend.
     Spawning,
 }
@@ -175,14 +184,14 @@ impl Spawns {
     ) {
         let panel = match &source {
             SpawnSource::Shell => None,
-            SpawnSource::Template { panel } => Some(panel.as_str()),
+            SpawnSource::Template { panel, .. } => Some(panel.as_str()),
         };
         let Some(ticket) = self.admit(conn, request, listed, panel) else {
             return;
         };
         let step = match source {
             SpawnSource::Shell => Step::Spawning,
-            SpawnSource::Template { panel } => Step::ReadingTemplate { panel },
+            SpawnSource::Template { panel, hash } => Step::ReadingTemplate { panel, hash },
         };
         let pending = Pending {
             conn,
@@ -191,7 +200,7 @@ impl Spawns {
             step,
         };
         let effect = match &pending.step {
-            Step::ReadingTemplate { panel } => Some(SpawnEffect::ReadPanels {
+            Step::ReadingTemplate { panel, .. } => Some(SpawnEffect::ReadPanels {
                 ticket,
                 space: space.clone(),
                 panels: vec![panel.clone()],
@@ -317,7 +326,7 @@ impl Spawns {
                         .remove(&panel)
                         .unwrap_or_else(|| PanelRead::Failed("not read".to_owned()));
                     match self.template_of(&space, &panel, read) {
-                        Ok(template) => templates.push(template_info(&template)),
+                        Ok((template, hash)) => templates.push(template_info(&template, &hash)),
                         Err(skip) => {
                             skipped.insert(panel, clip_reason(&skip));
                         }
@@ -326,13 +335,26 @@ impl Spawns {
                 let message = Self::templates_reply(request, &space, templates, skipped, note);
                 self.finish(ticket, message);
             }
-            Step::ReadingTemplate { panel } => {
+            Step::ReadingTemplate { panel, hash } => {
                 let read = reads
                     .into_iter()
                     .find(|(name, _)| *name == panel)
                     .map_or(PanelRead::Missing, |(_, read)| read);
+                if let PanelRead::Found {
+                    hash: read_hash, ..
+                } = &read
+                {
+                    if read_hash.to_hex() != hash {
+                        let message = format!(
+                            "the panel {panel} changed since it was listed; review it and choose again"
+                        );
+                        self.fail(ticket, ErrorCode::TemplateChanged, message);
+                        return;
+                    }
+                }
+                // The bytes have the hash the client was shown: the spec comes from them alone.
                 match self.template_of(&space, &panel, read) {
-                    Ok(template) => {
+                    Ok((template, _)) => {
                         let spec = template_spec(&space, &template);
                         self.effects.push(SpawnEffect::Spawn { ticket, spec });
                     }
@@ -472,22 +494,23 @@ impl Spawns {
         self.replies.push((pending.conn, message));
     }
 
-    /// The template a panel file defines, with its `cwd` checked against the project.
+    /// The template a panel file defines, with its `cwd` checked against the project, and the
+    /// hash of the bytes it was parsed from.
     fn template_of(
         &self,
         space: &SpaceId,
         panel: &str,
         read: PanelRead,
-    ) -> Result<TerminalTemplate, PanelSkip> {
-        let bytes = match read {
+    ) -> Result<(TerminalTemplate, ContentHash), PanelSkip> {
+        let (bytes, hash) = match read {
             PanelRead::Missing => return Err(PanelSkip::NoFile),
             PanelRead::TooLarge { size } => return Err(PanelSkip::TooLarge { size }),
             PanelRead::Failed(detail) => return Err(PanelSkip::ReadFailed(detail)),
-            PanelRead::Found(bytes) => bytes,
+            PanelRead::Found { bytes, hash } => (bytes, hash),
         };
         let template = parse_terminal_panel(panel, &bytes)?;
         match self.dirs.check_dir(space, &template.cwd) {
-            Ok(()) => Ok(template),
+            Ok(()) => Ok((template, hash)),
             Err(refusal) => Err(PanelSkip::Cwd {
                 cwd: template.cwd,
                 refusal: CwdRefusal::Dir(refusal),

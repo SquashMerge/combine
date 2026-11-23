@@ -34,11 +34,12 @@ fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Spawning `panel` is refused with `code`, and the backend is not asked to start anything.
+/// Spawning `panel`, with the hash of its file as the store has it now, is refused with `code`,
+/// and the backend is not asked to start anything.
 fn assert_refused(rig: &Rig, panel: &str, code: ErrorCode) -> String {
     let mut client = rig.client();
     let before = (spawn_calls(&rig.control), spawn_attempts(&rig.control));
-    rig.spawn_template(&mut client, 1, panel);
+    rig.spawn_template(&mut client, 1, panel, &rig.current_hash(panel));
     let error = expect_error(&client, 1, code);
     assert_eq!(
         (spawn_calls(&rig.control), spawn_attempts(&rig.control)),
@@ -115,7 +116,7 @@ fn spawn_template_runs_file_argv_env_labels_and_size() {
     write_panel_memory(&store, &rig.space, "agent", &bytes);
 
     let mut client = rig.client();
-    rig.spawn_template(&mut client, 1, "agent");
+    rig.spawn_template(&mut client, 1, "agent", &hash_hex(&bytes));
     let spawned = expect_spawned(&client, 1);
 
     let specs = rig.control.spawn_specs();
@@ -188,6 +189,7 @@ fn templates_carry_argv_env_cwd_exactly() {
     assert_eq!(template.argv, ["sh", odd, ""]);
     assert_eq!(template.env, map(&[("NOTE", odd)]));
     assert_eq!(template.cwd, "sub");
+    assert_eq!(template.hash, hash_hex(&bytes));
 }
 
 #[test]
@@ -376,4 +378,82 @@ fn over_one_hundred_folders_sets_error() {
     let templates = rig.list(&mut client, 1);
     assert_eq!(templates.templates.len(), 100);
     assert!(templates.error.is_some());
+}
+
+/// The review's reproduction: the menu shows one valid definition, the file is replaced by
+/// another valid one, and the click that names the shown definition must not run the new one.
+#[test]
+fn replaced_template_is_refused_and_choosing_again_runs_the_new_one() {
+    let rig = Rig::new(Arc::new(FsFileStore::new()));
+    let work = work_dir(&rig.scratch);
+    let reviewed = terminal_panel_json(&["echo", "reviewed"], None);
+    write_panel_fs(&work, "agent", &reviewed);
+    let mut client = rig.client();
+    let shown = rig.list(&mut client, 1);
+    assert_eq!(shown.templates[0].argv, ["echo", "reviewed"]);
+    assert_eq!(shown.templates[0].hash, hash_hex(&reviewed));
+    let specs_before = rig.control.spawn_specs().len();
+
+    let unreviewed = terminal_panel_json(&["sh", "-c", "echo unreviewed"], None);
+    write_panel_fs(&work, "agent", &unreviewed);
+    rig.spawn_template(&mut client, 2, "agent", &shown.templates[0].hash);
+    let error = expect_error(&client, 2, ErrorCode::TemplateChanged);
+    assert_eq!(
+        error.message,
+        "the panel agent changed since it was listed; review it and choose again"
+    );
+    assert_eq!(rig.control.spawn_specs().len(), specs_before);
+    assert_eq!(spawn_calls(&rig.control), specs_before);
+
+    // The refreshed menu shows the new definition; choosing it runs exactly that.
+    let again = rig.list(&mut client, 3);
+    assert_eq!(again.templates[0].argv, ["sh", "-c", "echo unreviewed"]);
+    assert_eq!(again.templates[0].hash, hash_hex(&unreviewed));
+    rig.spawn_template(&mut client, 4, "agent", &again.templates[0].hash);
+    expect_spawned(&client, 4);
+    let specs = rig.control.spawn_specs();
+    assert_eq!(specs.len(), specs_before + 1);
+    assert_eq!(specs.last().unwrap().argv, ["sh", "-c", "echo unreviewed"]);
+}
+
+/// A template source without `hash` is a malformed frame: the daemon answers `malformed`,
+/// closes the connection and starts nothing.
+#[test]
+fn template_source_without_hash_is_malformed() {
+    let (rig, store) = Rig::in_memory();
+    write_panel_memory(
+        &store,
+        &rig.space,
+        "agent",
+        &terminal_panel_json(&["sh"], None),
+    );
+    let mut client = rig.client();
+    let before = spawn_attempts(&rig.control);
+    let json = json!({
+        "type": "spawn_terminal",
+        "request": 1,
+        "space": rig.name(),
+        "source": { "type": "template", "panel": "agent" }
+    })
+    .to_string();
+    let mut frame = u32::try_from(json.len() + 1)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    frame.push(1);
+    frame.extend_from_slice(json.as_bytes());
+    client.send_bytes(&frame);
+    match client.recv() {
+        DaemonMessage::Error(error) => {
+            assert_eq!(error.code, ErrorCode::Malformed);
+            assert!(
+                error.message.contains("`template` is missing `hash`"),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("expected the malformed error, got {other:?}"),
+    }
+    client.expect_closed();
+    assert_eq!(spawn_attempts(&rig.control), before);
 }

@@ -2,7 +2,9 @@
 //! spawning a shell or a template. Request IDs cross as `DecimalU64`.
 //!
 //! What a template starts (argv, env, cwd and the panel it belongs to) crosses unchanged,
-//! because it is exactly what the user's click approves. Only labels are trimmed.
+//! because it is exactly what the user's click approves, and so does the hash that names that
+//! definition: the click sends it back, and the daemon runs only a file with that hash. Only
+//! labels are trimmed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,6 +35,7 @@ pub struct IpcTemplate {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub hash: String,
 }
 
 impl From<TemplateInfo> for IpcTemplate {
@@ -47,6 +50,7 @@ impl From<TemplateInfo> for IpcTemplate {
             argv: template.argv,
             env: template.env,
             cwd: template.cwd,
+            hash: template.hash,
         }
     }
 }
@@ -145,19 +149,20 @@ fn spawn_event(host_id: &HostId, reply: SpawnReply) -> IpcSpawnEvent {
     }
 }
 
-/// What a terminal starts, as the webview names it.
+/// What a terminal starts, as the webview names it. A template carries the `hash` of the
+/// definition the menu showed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IpcSpawnSource {
     Shell,
-    Template { panel: String },
+    Template { panel: String, hash: String },
 }
 
 impl From<IpcSpawnSource> for SpawnSource {
     fn from(source: IpcSpawnSource) -> Self {
         match source {
             IpcSpawnSource::Shell => SpawnSource::Shell,
-            IpcSpawnSource::Template { panel } => SpawnSource::Template { panel },
+            IpcSpawnSource::Template { panel, hash } => SpawnSource::Template { panel, hash },
         }
     }
 }
@@ -237,6 +242,9 @@ mod tests {
     use super::*;
     use crate::hosts::outbound::Outgoing;
 
+    /// The hash the fixtures use: the SHA-256 of `test`.
+    const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
     fn fixture(name: &str) -> Value {
         let path = format!("{}/../web/test/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(path).expect("fixture is readable");
@@ -271,6 +279,7 @@ mod tests {
                 argv: vec!["claude".to_string(), "--resume".to_string()],
                 env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
                 cwd: "src".to_string(),
+                hash: HASH.to_string(),
             }],
             skipped: vec![SkippedPanel {
                 panel: "notes".to_string(),
@@ -296,6 +305,16 @@ mod tests {
                     message: "the template's cwd \"../x\" has a .. segment".to_string(),
                 },
             ),
+            (
+                "changed",
+                SpawnReply::Error {
+                    request: RequestId(10),
+                    code: ErrorCode::TemplateChanged,
+                    message:
+                        "the panel claude changed since it was listed; review it and choose again"
+                            .to_string(),
+                },
+            ),
             ("disconnected", SpawnReply::Disconnected),
         ];
         for (name, reply) in events {
@@ -315,8 +334,23 @@ mod tests {
             vec![
                 IpcSpawnSource::Shell,
                 IpcSpawnSource::Template {
-                    panel: "claude".to_string()
+                    panel: "claude".to_string(),
+                    hash: HASH.to_string(),
                 }
+            ]
+        );
+        // Every entry of the fixture is checked above.
+        let mut names: Vec<&String> = fixture.as_object().expect("object").keys().collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "changed",
+                "disconnected",
+                "error",
+                "sources",
+                "spawned",
+                "templates"
             ]
         );
     }
@@ -332,16 +366,21 @@ mod tests {
         assert_eq!(
             SpawnSource::from(
                 serde_json::from_value::<IpcSpawnSource>(
-                    json!({"kind": "template", "panel": "claude"})
+                    json!({"kind": "template", "panel": "claude", "hash": HASH})
                 )
                 .expect("template")
             ),
             SpawnSource::Template {
-                panel: "claude".to_string()
+                panel: "claude".to_string(),
+                hash: HASH.to_string(),
             }
         );
         assert!(serde_json::from_value::<IpcSpawnSource>(json!({"kind": "explode"})).is_err());
         assert!(serde_json::from_value::<IpcSpawnSource>(json!({"kind": "template"})).is_err());
+        assert!(serde_json::from_value::<IpcSpawnSource>(
+            json!({"kind": "template", "panel": "claude"})
+        )
+        .is_err());
     }
 
     #[test]
@@ -359,6 +398,7 @@ mod tests {
             argv: argv.clone(),
             env: env.clone(),
             cwd: "dir with space".to_string(),
+            hash: HASH.to_string(),
         };
         let list: IpcTemplateList = Templates {
             request: RequestId(1),
@@ -379,6 +419,7 @@ mod tests {
         assert_eq!(first.argv, argv);
         assert_eq!(first.env, env);
         assert_eq!(first.cwd, "dir with space");
+        assert_eq!(first.hash, HASH);
         assert_eq!(first.panel, "pa\nnel");
         assert_eq!(first.slot, "sl ot");
         assert_eq!(first.title.as_deref(), Some("T itle"));
@@ -420,6 +461,7 @@ mod tests {
             "/work".to_string(),
             IpcSpawnSource::Template {
                 panel: "claude".to_string(),
+                hash: HASH.to_string(),
             },
         )
         .expect("sent");
@@ -440,7 +482,8 @@ mod tests {
                     request: RequestId(2),
                     space: "/work".to_string(),
                     source: SpawnSource::Template {
-                        panel: "claude".to_string()
+                        panel: "claude".to_string(),
+                        hash: HASH.to_string(),
                     },
                 }
             )))

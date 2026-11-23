@@ -9,13 +9,16 @@ use common::control_frame;
 
 const LIST_JSON: &str = r#"{"type":"list_templates","request":9,"space":"/Users/me/src/trellis"}"#;
 const SHELL_JSON: &str = r#"{"type":"spawn_terminal","request":10,"space":"/Users/me/src/trellis","source":{"type":"shell"}}"#;
-const TEMPLATE_JSON: &str = r#"{"type":"spawn_terminal","request":11,"space":"/Users/me/src/trellis","source":{"type":"template","panel":"claude"}}"#;
-const TEMPLATES_JSON: &str = r#"{"type":"templates","request":9,"space":"/Users/me/src/trellis","templates":[{"panel":"claude","title":"Claude","slot":"claude","argv":["claude","--resume"],"env":{"FOO":"bar"},"cwd":"src"}],"skipped":[{"panel":"notes","reason":"not a terminal panel"}],"error":null}"#;
+const TEMPLATE_JSON: &str = r#"{"type":"spawn_terminal","request":11,"space":"/Users/me/src/trellis","source":{"type":"template","panel":"claude","hash":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}"#;
+const TEMPLATES_JSON: &str = r#"{"type":"templates","request":9,"space":"/Users/me/src/trellis","templates":[{"panel":"claude","title":"Claude","slot":"claude","argv":["claude","--resume"],"env":{"FOO":"bar"},"cwd":"src","hash":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}],"skipped":[{"panel":"notes","reason":"not a terminal panel"}],"error":null}"#;
 const SPAWNED_JSON: &str =
     r#"{"type":"spawned","request":11,"space":"/Users/me/src/trellis","terminal":"t12"}"#;
 const ERROR_JSON: &str =
     r#"{"type":"error","code":"cwd_refused","message":"no","request":11,"attachment":null}"#;
+const CHANGED_JSON: &str = r#"{"type":"error","code":"template_changed","message":"the panel claude changed since it was listed; review it and choose again","request":11,"attachment":null}"#;
 const SPACE: &str = "/Users/me/src/trellis";
+/// An example hash: the SHA-256 of `test`.
+const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
 fn s(text: &str) -> String {
     text.to_owned()
@@ -29,6 +32,7 @@ fn template() -> TemplateInfo {
         argv: vec![s("claude"), s("--resume")],
         env: BTreeMap::from([(s("FOO"), s("bar"))]),
         cwd: s("src"),
+        hash: s(HASH),
     }
 }
 
@@ -81,7 +85,10 @@ fn spawn_terminal_shell_and_template_round_trip() {
         ClientMessage::SpawnTerminal(SpawnTerminal {
             request: RequestId(11),
             space: s(SPACE),
-            source: SpawnSource::Template { panel: s("claude") },
+            source: SpawnSource::Template {
+                panel: s("claude"),
+                hash: s(HASH),
+            },
         }),
         "spawn_terminal",
     );
@@ -170,9 +177,28 @@ fn template_source_without_panel_is_malformed() {
 }
 
 #[test]
+fn template_source_without_hash_is_malformed() {
+    let json = r#"{"type":"spawn_terminal","request":1,"space":"s","source":{"type":"template","panel":"claude"}}"#;
+    match ClientMessage::decode(&control_frame(json)) {
+        Err(DecodeError::BadJson { detail }) => {
+            assert!(detail.contains("`template` is missing `hash`"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn template_info_without_hash_is_malformed() {
+    let json = TEMPLATES_JSON.replace(&format!(r#","hash":"{HASH}""#), "");
+    assert!(!json.contains("hash"), "{json}");
+    assert!(DaemonMessage::decode(&control_frame(&json)).is_err());
+}
+
+#[test]
 fn new_error_codes_round_trip() {
     for (code, name) in [
         (ErrorCode::UnknownTemplate, "unknown_template"),
+        (ErrorCode::TemplateChanged, "template_changed"),
         (ErrorCode::CwdRefused, "cwd_refused"),
         (ErrorCode::SpawnFailed, "spawn_failed"),
     ] {
@@ -187,9 +213,20 @@ fn new_error_codes_round_trip() {
         assert!(json.contains(&format!(r#""code":"{name}""#)), "{json}");
         assert_eq!(DaemonMessage::decode(&frame).unwrap().0, message);
     }
-    let frame = control_frame(ERROR_JSON);
-    let (message, _) = DaemonMessage::decode(&frame).unwrap();
-    assert_eq!(message.encode().unwrap(), frame);
+    for json in [ERROR_JSON, CHANGED_JSON] {
+        let frame = control_frame(json);
+        let (message, _) = DaemonMessage::decode(&frame).unwrap();
+        assert_eq!(message.encode().unwrap(), frame);
+    }
+    let (changed, _) = DaemonMessage::decode(&control_frame(CHANGED_JSON)).unwrap();
+    assert!(matches!(
+        changed,
+        DaemonMessage::Error(ErrorMessage {
+            code: ErrorCode::TemplateChanged,
+            request: Some(RequestId(11)),
+            ..
+        })
+    ));
 }
 
 #[test]

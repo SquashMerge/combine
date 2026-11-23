@@ -90,6 +90,9 @@ pub enum ErrorCode {
     StaleLayout,
     /// The named panel has no usable terminal template.
     UnknownTemplate,
+    /// The panel's file changed since the client listed it: its hash no
+    /// longer matches the one the request carries. Nothing was started.
+    TemplateChanged,
     /// The directory a terminal would start in is refused.
     CwdRefused,
     /// The backend couldn't start the terminal.

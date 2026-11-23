@@ -547,6 +547,7 @@ mod tests {
                 argv: vec!["claude".to_string()],
                 env: BTreeMap::new(),
                 cwd: String::new(),
+                hash: "0".repeat(64),
             }],
             skipped: Vec::new(),
             error: None,

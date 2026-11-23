@@ -8,7 +8,7 @@ use combined::core::{
     valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS, DEFAULT_ROWS,
     REASON_MAX_BYTES,
 };
-use combined::model::SpaceId;
+use combined::model::{ContentHash, SpaceId};
 use combined::ports::DirRefusal;
 use serde_json::{json, Value};
 
@@ -277,7 +277,9 @@ fn template_and_shell_specs() {
         "/work/proj/"
     );
 
-    let info = template_info(&t);
+    let hash = ContentHash([0xab; 32]);
+    let info = template_info(&t, &hash);
+    assert_eq!(info.hash, "ab".repeat(32));
     assert_eq!(info.panel, "p");
     assert_eq!(info.slot, "main");
     assert_eq!(info.argv, t.argv);

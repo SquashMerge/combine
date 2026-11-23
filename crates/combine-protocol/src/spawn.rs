@@ -6,14 +6,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// What `spawn_terminal` starts: the user's shell in the project folder, or
-/// the terminal template of one panel.
+/// the terminal template of one panel. A template source carries the `hash`
+/// of the definition the client was shown, from its [`TemplateInfo`].
 ///
 /// It decodes through a flat struct, like [`LayoutNode`](crate::LayoutNode).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", try_from = "RawSource")]
 pub enum SpawnSource {
     Shell,
-    Template { panel: String },
+    Template { panel: String, hash: String },
 }
 
 #[derive(Deserialize)]
@@ -21,6 +22,7 @@ struct RawSource {
     #[serde(rename = "type")]
     kind: String,
     panel: Option<String>,
+    hash: Option<String>,
 }
 
 impl TryFrom<RawSource> for SpawnSource {
@@ -33,6 +35,9 @@ impl TryFrom<RawSource> for SpawnSource {
                 panel: raw
                     .panel
                     .ok_or_else(|| "`template` is missing `panel`".to_owned())?,
+                hash: raw
+                    .hash
+                    .ok_or_else(|| "`template` is missing `hash`".to_owned())?,
             }),
             other => Err(format!("unknown spawn source `{}`", clip(other))),
         }
@@ -45,6 +50,8 @@ fn clip(text: &str) -> &str {
 
 /// One panel's terminal template, as the daemon read it from `panel.json`.
 /// `cwd` is relative to the project root, with `""` for the root itself.
+/// `hash` is the lowercase hex SHA-256 of the exact `panel.json` bytes the
+/// daemon read; a `spawn_terminal` for this template sends it back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateInfo {
     pub panel: String,
@@ -53,6 +60,7 @@ pub struct TemplateInfo {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub hash: String,
 }
 
 /// A panel folder the daemon couldn't offer as a template, and why.

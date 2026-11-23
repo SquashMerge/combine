@@ -15,6 +15,7 @@ use combined::ports::FileStore;
 use combined::rpc::ServerHandle;
 use combined::testing::{FakeBackend, FakeConfig, FakeControl, MemoryFileStore};
 use serde_json::{json, Value};
+use sha2::Digest as _;
 
 use crate::daemon_support::{
     refuse_default_herdr_core, seed_project_terminal, server_on, work_dir, DaemonPaths,
@@ -84,14 +85,26 @@ impl Rig {
         }));
     }
 
-    pub fn spawn_template(&self, client: &mut WireClient, request: u64, panel: &str) {
+    /// Asks to start `panel`'s template, naming the definition by `hash`, as a click on a menu
+    /// item that showed it does.
+    pub fn spawn_template(&self, client: &mut WireClient, request: u64, panel: &str, hash: &str) {
         self.spawn(
             client,
             request,
             SpawnSource::Template {
                 panel: panel.to_string(),
+                hash: hash.to_string(),
             },
         );
+    }
+
+    /// The hash of `panel`'s `panel.json` as the store has it now, or [`NO_HASH`] without one.
+    pub fn current_hash(&self, panel: &str) -> String {
+        let path = format!("panels/{panel}/panel.json");
+        match futures::executor::block_on(self.store.read(&self.space, &path, 8_192)) {
+            Ok(Some(file)) => file.hash.to_hex(),
+            _ => NO_HASH.to_string(),
+        }
     }
 }
 
@@ -104,6 +117,14 @@ pub fn watch_terminals(client: &mut WireClient, request: u64) -> Terminals {
             break terminals;
         }
     }
+}
+
+/// A well-formed hash that no test file has.
+pub const NO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The lowercase hex SHA-256 of `bytes`, as a listing reports it.
+pub fn hash_hex(bytes: &[u8]) -> String {
+    combined::model::ContentHash(sha2::Sha256::digest(bytes).into()).to_hex()
 }
 
 /// The JSON of a terminal panel running `argv` in `cwd` (the project root when `None`).

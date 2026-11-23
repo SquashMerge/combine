@@ -8,11 +8,12 @@ use combine_protocol::{DaemonMessage, ErrorCode, RequestId, SkippedPanel, SpawnS
 use combined::core::{
     ConnectionId, PanelRead, SpawnEffect, SpawnTicket, Spawns, MAX_SPAWN_IN_FLIGHT,
 };
-use combined::model::{SpaceId, SpawnSpec};
+use combined::model::{ContentHash, SpaceId, SpawnSpec};
 use combined::ports::{
     BackendError, DirListing, DirRefusal, EntryKind, ListedEntry, ProjectDirs, StoreError,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Default)]
 struct Dirs(Arc<Mutex<BTreeMap<String, DirRefusal>>>);
@@ -47,9 +48,31 @@ fn req(n: u64) -> RequestId {
     RequestId(n)
 }
 
+/// A template source carrying a hash that no test file has.
 fn template(panel: &str) -> SpawnSource {
     SpawnSource::Template {
         panel: panel.to_owned(),
+        hash: "0".repeat(64),
+    }
+}
+
+fn hash_of(bytes: &[u8]) -> ContentHash {
+    ContentHash(Sha256::digest(bytes).into())
+}
+
+/// A template source for the definition `bytes` hold, as a listing showed it.
+fn template_for(panel: &str, bytes: &[u8]) -> SpawnSource {
+    SpawnSource::Template {
+        panel: panel.to_owned(),
+        hash: hash_of(bytes).to_hex(),
+    }
+}
+
+/// What the store gives for a file holding `bytes`.
+fn found(bytes: Vec<u8>) -> PanelRead {
+    PanelRead::Found {
+        hash: hash_of(&bytes),
+        bytes,
     }
 }
 
@@ -196,36 +219,34 @@ fn template_cwd_refused_by_dirs_emits_no_spawn() {
     ] {
         let (mut spawns, dirs) = setup();
         dirs.refuse("sub", refusal);
-        spawns.spawn_terminal(CONN, req(1), space(), template("dev"), true);
+        let source = template_for("dev", &panel_json("sub"));
+        spawns.spawn_terminal(CONN, req(1), space(), source, true);
         let ticket = ticket_of(&spawns.take_effects());
-        spawns.apply_panels(
-            ticket,
-            vec![("dev".to_owned(), PanelRead::Found(panel_json("sub")))],
-        );
+        spawns.apply_panels(ticket, vec![("dev".to_owned(), found(panel_json("sub")))]);
         assert!(spawns.take_effects().is_empty());
         let (code, message, _) = error_of(&only_reply(&mut spawns));
         assert_eq!(code, ErrorCode::CwdRefused);
         assert_eq!(message, format!("the template's cwd \"sub\" {why}"));
     }
     let (mut spawns, _) = setup();
-    spawns.spawn_terminal(CONN, req(1), space(), template("dev"), true);
+    let source = template_for("dev", &panel_json("../x"));
+    spawns.spawn_terminal(CONN, req(1), space(), source, true);
     let ticket = ticket_of(&spawns.take_effects());
-    spawns.apply_panels(
-        ticket,
-        vec![("dev".to_owned(), PanelRead::Found(panel_json("../x")))],
-    );
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), found(panel_json("../x")))]);
     assert!(spawns.take_effects().is_empty());
     let (code, message, _) = error_of(&only_reply(&mut spawns));
     assert_eq!(code, ErrorCode::CwdRefused);
     assert_eq!(message, "the template's cwd \"../x\" has a .. segment");
 }
 
+/// A file that is gone or unreadable, or whose bytes (with the hash the client sent) aren't a
+/// terminal template.
 #[test]
 fn template_file_now_invalid_is_unknown_template() {
     let reads = [
         PanelRead::Missing,
-        PanelRead::Found(b"{".to_vec()),
-        PanelRead::Found(
+        found(b"{".to_vec()),
+        found(
             json!({"version": 1, "content": {"type": "web"}})
                 .to_string()
                 .into_bytes(),
@@ -235,7 +256,11 @@ fn template_file_now_invalid_is_unknown_template() {
     ];
     for read in reads {
         let (mut spawns, _) = setup();
-        spawns.spawn_terminal(CONN, req(1), space(), template("dev"), true);
+        let source = match &read {
+            PanelRead::Found { bytes, .. } => template_for("dev", bytes),
+            _ => template("dev"),
+        };
+        spawns.spawn_terminal(CONN, req(1), space(), source, true);
         let ticket = ticket_of(&spawns.take_effects());
         spawns.apply_panels(ticket, vec![("dev".to_owned(), read.clone())]);
         assert!(spawns.take_effects().is_empty(), "{read:?}");
@@ -266,12 +291,10 @@ fn spawned_and_spawn_failed_replies() {
         other => panic!("{other:?}"),
     }
 
-    spawns.spawn_terminal(CONN, req(2), space(), template("dev"), true);
+    let source = template_for("dev", &panel_json("sub"));
+    spawns.spawn_terminal(CONN, req(2), space(), source, true);
     let ticket = ticket_of(&spawns.take_effects());
-    spawns.apply_panels(
-        ticket,
-        vec![("dev".to_owned(), PanelRead::Found(panel_json("sub")))],
-    );
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), found(panel_json("sub")))]);
     let (ticket, spec) = spawn_effect(spawns.take_effects());
     assert_eq!(spec.argv, ["claude"]);
     assert_eq!(spec.cwd, "/p/sub");
@@ -296,10 +319,7 @@ fn disconnect_orphans_ticket_and_never_spawns() {
     let listing = ticket_of(&spawns.take_effects());
     spawns.disconnect(CONN);
 
-    spawns.apply_panels(
-        read,
-        vec![("dev".to_owned(), PanelRead::Found(panel_json("")))],
-    );
+    spawns.apply_panels(read, vec![("dev".to_owned(), found(panel_json("")))]);
     spawns.apply_spawned(running, Ok(TermId("t1".to_owned())));
     spawns.apply_listing(
         listing,
@@ -350,7 +370,7 @@ fn symlinked_panel_folders_count_toward_one_hundred() {
         ticket,
         panels
             .iter()
-            .map(|p| (p.clone(), PanelRead::Found(panel_json(""))))
+            .map(|p| (p.clone(), found(panel_json(""))))
             .collect(),
     );
     let templates = templates_of(only_reply(&mut spawns));
@@ -400,10 +420,10 @@ fn listing_never_spawns() {
     spawns.apply_panels(
         ticket,
         vec![
-            ("d".to_owned(), PanelRead::Found(panel_json("bad"))),
+            ("d".to_owned(), found(panel_json("bad"))),
             ("c".to_owned(), PanelRead::Failed("denied".to_owned())),
             ("b".to_owned(), PanelRead::TooLarge { size: 10_000 }),
-            ("a".to_owned(), PanelRead::Found(panel_json("sub"))),
+            ("a".to_owned(), found(panel_json("sub"))),
         ],
     );
     assert!(spawns.take_effects().is_empty());
@@ -462,4 +482,76 @@ fn only_spawn_requests_emit_spawn_effects() {
         spawns.take_effects().as_slice(),
         [SpawnEffect::Spawn { .. }]
     ));
+}
+
+/// A listing offers each template with the hash of the bytes it was parsed from.
+#[test]
+fn listed_templates_carry_the_hash_of_their_bytes() {
+    let (mut spawns, _) = setup();
+    spawns.list_templates(CONN, req(1), space(), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_listing(
+        ticket,
+        listing(vec![entry("a", EntryKind::Directory)], false),
+    );
+    spawns.take_effects();
+    spawns.apply_panels(ticket, vec![("a".to_owned(), found(panel_json("sub")))]);
+    let templates = templates_of(only_reply(&mut spawns));
+    let expected = hash_of(&panel_json("sub")).to_hex();
+    assert_eq!(templates.templates[0].hash, expected);
+    assert_eq!(expected.len(), 64);
+    assert!(expected
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+}
+
+/// The click approves the definition the menu showed: a file whose bytes no longer have that
+/// hash is refused, even when it is another valid template, and nothing is spawned.
+#[test]
+fn changed_template_is_refused_and_never_spawned() {
+    let shown = panel_json("");
+    let now = json!({
+        "version": 1,
+        "content": {
+            "type": "terminal",
+            "slot": "main",
+            "template": { "argv": ["sh", "-c", "echo unreviewed"] }
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let (mut spawns, _) = setup();
+    spawns.spawn_terminal(CONN, req(1), space(), template_for("dev", &shown), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), found(now.clone()))]);
+    assert!(spawns.take_effects().is_empty());
+    let (code, message, request) = error_of(&only_reply(&mut spawns));
+    assert_eq!(code, ErrorCode::TemplateChanged);
+    assert_eq!(
+        message,
+        "the panel dev changed since it was listed; review it and choose again"
+    );
+    assert_eq!(request, Some(req(1)));
+
+    // The store's hash is what counts: bytes that match the request under a different
+    // reported hash are refused too.
+    spawns.spawn_terminal(CONN, req(2), space(), template_for("dev", &shown), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    let read = PanelRead::Found {
+        bytes: shown.clone(),
+        hash: hash_of(&now),
+    };
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), read)]);
+    assert!(spawns.take_effects().is_empty());
+    assert_eq!(
+        error_of(&only_reply(&mut spawns)).0,
+        ErrorCode::TemplateChanged
+    );
+
+    // Choosing again with the new listing's hash runs the new definition.
+    spawns.spawn_terminal(CONN, req(3), space(), template_for("dev", &now), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), found(now))]);
+    let (_, spec) = spawn_effect(spawns.take_effects());
+    assert_eq!(spec.argv, ["sh", "-c", "echo unreviewed"]);
 }
