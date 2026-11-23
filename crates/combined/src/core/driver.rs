@@ -1,9 +1,13 @@
 //! Glue that runs a [`Core`] against a backend, on whatever runtime the caller has.
 //!
-//! The driver awaits port calls and polls attachment streams with the caller's own `Context`.
+//! The driver starts attachment calls and polls attachment streams with the caller's own
+//! `Context`. A call is polled once when it starts. One that isn't done stays in flight, and
+//! that attachment's later calls queue behind it, in the order core issued them. Other
+//! attachments, connections and the server loop carry on. [`Driver::poll_event`] polls the calls
+//! in flight, so the caller's waker is registered on them.
 //! It uses only `futures`: no locks, threads or clocks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -14,16 +18,41 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use super::effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 use super::machine::Core;
 use crate::model::Millis;
-use crate::ports::{AttachEvents, Attachment, BackendResult, TerminalBackend};
+use crate::ports::{AttachEvents, Attachment, BackendError, BackendResult, TerminalBackend};
+
+/// The most commands one attachment may have queued behind a call in flight.
+pub const MAX_QUEUED_COMMANDS: usize = 256;
+
+const QUEUE_FULL: &str = "an earlier backend call on this attachment hasn't completed";
 
 type Opening = BoxFuture<'static, (AttachmentId, BackendResult<Box<dyn Attachment>>)>;
+
+/// One attachment's backend handle and the commands waiting for it.
+struct Slot {
+    /// `None` while a call for this attachment is in flight.
+    held: Option<Box<dyn Attachment>>,
+    queued: VecDeque<BackendCommand>,
+    /// Core has issued the detach, so a failure of an earlier call is no longer reported.
+    detaching: bool,
+}
+
+enum Finished {
+    Command {
+        attachment: AttachmentId,
+        held: Box<dyn Attachment>,
+        refused: Option<RefusedCommand>,
+        result: BackendResult<()>,
+    },
+    Detached,
+}
 
 pub struct Driver {
     core: Core,
     backend: Arc<dyn TerminalBackend>,
-    attachments: BTreeMap<AttachmentId, Box<dyn Attachment>>,
+    attachments: BTreeMap<AttachmentId, Slot>,
     events: BTreeMap<AttachmentId, AttachEvents>,
     pending: FuturesUnordered<Opening>,
+    running: FuturesUnordered<BoxFuture<'static, Finished>>,
     last_polled: Option<AttachmentId>,
     journal: Option<Vec<BackendCommand>>,
     disconnects: Vec<ConnectionId>,
@@ -37,6 +66,7 @@ impl Driver {
             attachments: BTreeMap::new(),
             events: BTreeMap::new(),
             pending: FuturesUnordered::new(),
+            running: FuturesUnordered::new(),
             last_polled: None,
             journal: None,
             disconnects: Vec::new(),
@@ -55,10 +85,12 @@ impl Driver {
         &self.backend
     }
 
+    /// The attachment's backend handle. `None` while a call for it is in flight, and once it has
+    /// been detached.
     pub fn attachment(&self, id: AttachmentId) -> Option<&dyn Attachment> {
         self.attachments
             .get(&id)
-            .map(|attachment| attachment.as_ref())
+            .and_then(|slot| slot.held.as_deref())
     }
 
     /// Starts or stops recording each backend command, in the order it runs.
@@ -83,7 +115,9 @@ impl Driver {
     }
 
     /// Runs core's effects until it has none left. An attach is started without waiting for it;
-    /// whatever is already ready completes within the call.
+    /// whatever is already ready completes within the call. Each attachment call is started and
+    /// polled once: one that isn't done stays in flight, and that attachment's later calls queue
+    /// behind it, in order, while other attachments carry on.
     pub async fn run_effects(&mut self, now: Millis) {
         loop {
             let effects = self.core.take_effects();
@@ -92,14 +126,14 @@ impl Driver {
             }
             for effect in effects {
                 match effect {
-                    Effect::Backend(command) => self.run(command, now).await,
+                    Effect::Backend(command) => self.run(command, now),
                     Effect::Disconnect(connection) => self.disconnects.push(connection),
                 }
             }
         }
     }
 
-    async fn run(&mut self, command: BackendCommand, now: Millis) {
+    fn run(&mut self, command: BackendCommand, now: Millis) {
         if let Some(journal) = &mut self.journal {
             journal.push(command.clone());
         }
@@ -117,77 +151,115 @@ impl Driver {
             }
             BackendCommand::Detach { attachment } => {
                 self.events.remove(&attachment);
-                if let Some(held) = self.attachments.remove(&attachment) {
-                    let _ = held.detach().await;
+                self.submit(attachment, BackendCommand::Detach { attachment }, now);
+            }
+            other => self.submit(other.attachment(), other, now),
+        }
+    }
+
+    /// Starts the command if the attachment is idle, and queues it otherwise.
+    fn submit(&mut self, attachment: AttachmentId, command: BackendCommand, now: Millis) {
+        let Some(slot) = self.attachments.get_mut(&attachment) else {
+            return;
+        };
+        if slot.held.is_some() && slot.queued.is_empty() {
+            self.start(attachment, command, now);
+            return;
+        }
+        let full = slot.queued.len() >= MAX_QUEUED_COMMANDS;
+        match command {
+            BackendCommand::Detach { .. } => {
+                slot.detaching = true;
+                slot.queued.push_back(command);
+            }
+            BackendCommand::Credit { bytes, .. } => {
+                if let Some(BackendCommand::Credit { bytes: tail, .. }) = slot.queued.back_mut() {
+                    *tail = tail.saturating_add(bytes);
+                } else {
+                    slot.queued.push_back(command);
                 }
             }
-            BackendCommand::Write {
-                attachment,
-                ownership,
-                bytes,
-            } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.write(ownership, &bytes).await;
-                    self.refused(attachment, RefusedCommand::Input, result, now);
-                }
-            }
-            BackendCommand::WriteAutomatic {
-                attachment,
-                generation,
-                bytes,
-            } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.write_automatic(generation, &bytes).await;
-                }
-            }
-            BackendCommand::Resize {
-                attachment,
-                ownership,
-                cols,
-                rows,
-            } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.resize(ownership, cols, rows).await;
-                    self.refused(attachment, RefusedCommand::Resize, result, now);
-                }
-            }
-            BackendCommand::Focus {
-                attachment,
-                ownership,
-            } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.focus(ownership).await;
-                    self.refused(attachment, RefusedCommand::Focus, result, now);
-                }
-            }
-            BackendCommand::SetDisplay {
-                attachment,
-                ownership,
-                display,
-            } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let result = held.set_display(ownership, display).await;
-                    self.refused(attachment, RefusedCommand::SetDisplay, result, now);
-                }
-            }
-            BackendCommand::Credit { attachment, bytes } => {
-                if let Some(held) = self.attachments.get_mut(&attachment) {
-                    let _ = held.credit(bytes).await;
+            _ if !full => slot.queued.push_back(command),
+            _ => {
+                if let Some(kind) = refusal(&command) {
+                    let failure = BackendError::Failed(QUEUE_FULL.into());
+                    self.core.command_failed(attachment, kind, &failure, now);
                 }
             }
         }
     }
 
-    /// Tells core when the backend refused a command a client's message caused.
-    fn refused(
-        &mut self,
-        attachment: AttachmentId,
-        command: RefusedCommand,
-        result: BackendResult<()>,
-        now: Millis,
-    ) {
-        if let Err(failure) = result {
-            self.core.command_failed(attachment, command, &failure, now);
+    /// Starts the attachment's next queued calls, for as long as each completes at once.
+    fn pump(&mut self, attachment: AttachmentId, now: Millis) {
+        loop {
+            let Some(slot) = self.attachments.get_mut(&attachment) else {
+                return;
+            };
+            if slot.held.is_none() {
+                return;
+            }
+            let Some(command) = slot.queued.pop_front() else {
+                return;
+            };
+            self.start(attachment, command, now);
+        }
+    }
+
+    /// Takes the idle attachment's handle, calls it once and completes the call if it is ready.
+    /// A call that isn't ready stays in flight in `running`.
+    fn start(&mut self, attachment: AttachmentId, command: BackendCommand, now: Millis) {
+        let Some(slot) = self.attachments.get_mut(&attachment) else {
+            return;
+        };
+        let Some(held) = slot.held.take() else {
+            return;
+        };
+        let refused = refusal(&command);
+        let mut call = if matches!(command, BackendCommand::Detach { .. }) {
+            self.attachments.remove(&attachment);
+            Box::pin(async move {
+                let _ = held.detach().await;
+                Finished::Detached
+            })
+        } else {
+            call(attachment, held, refused, command)
+        };
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        match call.as_mut().poll(&mut cx) {
+            Poll::Ready(finished) => self.complete(finished, now),
+            Poll::Pending => self.running.push(call),
+        }
+    }
+
+    /// Takes the handle back and reports a failure. It never starts another call.
+    fn complete(&mut self, finished: Finished, now: Millis) {
+        let Finished::Command {
+            attachment,
+            held,
+            refused,
+            result,
+        } = finished
+        else {
+            return;
+        };
+        let Some(slot) = self.attachments.get_mut(&attachment) else {
+            return;
+        };
+        slot.held = Some(held);
+        if let (Some(kind), Err(failure), false) = (refused, result, slot.detaching) {
+            self.core.command_failed(attachment, kind, &failure, now);
+        }
+    }
+
+    /// Completes a call that finished in `running`, then starts what was queued behind it.
+    fn finish(&mut self, finished: Finished, now: Millis) {
+        let attachment = match &finished {
+            Finished::Command { attachment, .. } => Some(*attachment),
+            Finished::Detached => None,
+        };
+        self.complete(finished, now);
+        if let Some(attachment) = attachment {
+            self.pump(attachment, now);
         }
     }
 
@@ -208,7 +280,12 @@ impl Driver {
         match result {
             Ok(mut held) => {
                 self.events.insert(id, held.events());
-                self.attachments.insert(id, held);
+                let slot = Slot {
+                    held: Some(held),
+                    queued: VecDeque::new(),
+                    detaching: false,
+                };
+                self.attachments.insert(id, slot);
                 self.core.attach_result(id, Ok(()), now);
             }
             Err(failure) => self.core.attach_result(id, Err(failure), now),
@@ -221,6 +298,10 @@ impl Driver {
     pub fn poll_event(&mut self, cx: &mut Context<'_>, now: Millis) -> Poll<()> {
         if let Poll::Ready(Some((id, result))) = self.pending.poll_next_unpin(cx) {
             self.complete_attach(id, result, now);
+            return Poll::Ready(());
+        }
+        if let Poll::Ready(Some(finished)) = self.running.poll_next_unpin(cx) {
+            self.finish(finished, now);
             return Poll::Ready(());
         }
         let ids: Vec<AttachmentId> = self.events.keys().copied().collect();
@@ -263,4 +344,52 @@ impl Driver {
             self.run_effects(now).await;
         }
     }
+}
+
+/// The refusal core tells the client about if the backend fails this command.
+fn refusal(command: &BackendCommand) -> Option<RefusedCommand> {
+    match command {
+        BackendCommand::Write { .. } => Some(RefusedCommand::Input),
+        BackendCommand::Resize { .. } => Some(RefusedCommand::Resize),
+        BackendCommand::Focus { .. } => Some(RefusedCommand::Focus),
+        BackendCommand::SetDisplay { .. } => Some(RefusedCommand::SetDisplay),
+        _ => None,
+    }
+}
+
+/// A future that owns the handle for one command and gives it back with the result.
+fn call(
+    attachment: AttachmentId,
+    mut held: Box<dyn Attachment>,
+    refused: Option<RefusedCommand>,
+    command: BackendCommand,
+) -> BoxFuture<'static, Finished> {
+    Box::pin(async move {
+        let result = match command {
+            BackendCommand::Write {
+                ownership, bytes, ..
+            } => held.write(ownership, &bytes).await,
+            BackendCommand::WriteAutomatic {
+                generation, bytes, ..
+            } => held.write_automatic(generation, &bytes).await,
+            BackendCommand::Resize {
+                ownership,
+                cols,
+                rows,
+                ..
+            } => held.resize(ownership, cols, rows).await,
+            BackendCommand::Focus { ownership, .. } => held.focus(ownership).await,
+            BackendCommand::SetDisplay {
+                ownership, display, ..
+            } => held.set_display(ownership, display).await,
+            BackendCommand::Credit { bytes, .. } => held.credit(bytes).await,
+            BackendCommand::Attach { .. } | BackendCommand::Detach { .. } => Ok(()),
+        };
+        Finished::Command {
+            attachment,
+            held,
+            refused,
+            result,
+        }
+    })
 }
