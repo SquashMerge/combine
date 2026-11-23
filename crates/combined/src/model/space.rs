@@ -19,6 +19,6 @@ pub enum RootKind {
 pub struct Space {
     pub id: SpaceId,
     pub kind: RootKind,
-    /// Sorted by the ID's string.
+    /// In the backend's list order; terminals created later are appended.
     pub terminals: Vec<TermId>,
 }
