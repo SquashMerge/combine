@@ -8,6 +8,7 @@ mod layout_sync;
 mod log;
 mod machine;
 mod ownership;
+mod panels;
 mod spaces;
 mod terminal_list;
 
@@ -27,5 +28,11 @@ pub use layout_sync::{
 pub use log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats, ResumeError};
 pub use machine::{Core, OwnershipState};
 pub use ownership::{OwnershipChange, TerminalOwnership};
+pub use panels::{
+    normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,
+    template_spec, valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS,
+    DEFAULT_ROWS, MAX_PANELS, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
+    REASON_MAX_BYTES,
+};
 pub use spaces::Spaces;
 pub use terminal_list::TerminalList;
