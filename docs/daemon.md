@@ -38,7 +38,9 @@ Optional. With no file at `~/.config/combine/daemon.json`, every default applies
 
 ## Before you install
 
-Until #23 wires the herdr-core adapter, a release `combined` can't serve: `backend = "herdr-core"` exits 3, and the release build refuses `"backend": "fake"`. launchd with `KeepAlive` would restart that exit every 10 s, so don't install the release build yet. The checks below need an interim build, `cargo build -p combined --features test-support`, run by its absolute path (`target/debug/combined`) with `"backend": "fake"` in `daemon.json`.
+- The release `combined` serves herdr-core, which is the default backend.
+- `"backend": "fake"` exists only in `test-support` builds, and the release build refuses it.
+- herdr-core must be running for your user; otherwise the daemon exits 3 and launchd retries every 10 s.
 
 ## Install
 
@@ -65,7 +67,7 @@ rm ~/Library/LaunchAgents/com.squashmerge.combined.plist
 
 ## Fail-fast and restarts
 
-The daemon doesn't wait for herdr-core. If its socket is missing at start, or the backend's watch ends while running, `combined` exits 3 and, because of `KeepAlive`, launchd starts it again every 10 s. Clients reconnect and get `gap` for attachments the new process doesn't know.
+The daemon doesn't wait for herdr-core. If its socket is missing, or herdr-core doesn't answer `hello` (2 s to connect, 5 s for the answer), at start, or the backend's watch ends while running, `combined` exits 3 and, because of `KeepAlive`, launchd starts it again every 10 s. Clients reconnect and get `gap` for attachments the new process doesn't know.
 
 A stop that isn't SIGTERM or SIGINT (SIGKILL, a crash, power loss) is handled like a crash: the OS releases both locks, the next start replaces the stale socket, and a layout change still inside its debounce is lost. SIGTERM and SIGINT are a clean shutdown (see Shutdown).
 
@@ -81,27 +83,27 @@ The daemon owns each space's layout. Clients watch a space and change it with `m
 
 ## Shutdown
 
-SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout change, closes its connections, releases both locks and exits 0. Both handlers are registered before the socket is bound. launchd's `bootout` sends SIGTERM, so an uninstall or a restart through `launchctl` loses no layout change that can be written. Changes held while `layout.json` is invalid, and writes that fail, aren't written. Terminals keep running in herdr-core; clients reconnect to the next daemon and get `gap` for attachments it doesn't know.
+SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout change, closes its connections, releases both locks and exits 0. Both handlers are registered before the daemon connects to herdr-core, and start-up is cancellable: a SIGTERM or SIGINT while it is connecting to herdr-core, reading the first terminal watch or listing terminals for the first time stops it at once with exit 0, before the socket is bound, so it leaves no socket behind. The ID block it reserved is spent. launchd's `bootout` sends SIGTERM, so an uninstall or a restart through `launchctl` loses no layout change that can be written. Changes held while `layout.json` is invalid, and writes that fail, aren't written. Terminals keep running in herdr-core; clients reconnect to the next daemon and get `gap` for attachments it doesn't know.
 
 ## Check the bridge over ssh
 
-Until #23 lands this needs the interim `test-support` build and a daemon on `"backend": "fake"`, started by that build's `combined serve`. Keep its `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`, and use the build's absolute path below. With Remote Login on, this sends a `hello` for protocol version 4 through `combined connect` and prints the reply:
+This is a manual check. It is not part of the automated pass criteria: no automated test runs ssh or reads `~/.ssh`. `sh tools/verify-herdr-core` runs `combined connect` as a subprocess with piped stdio, which is what `ssh -T` runs on the far side. The general form is `ssh -T -o BatchMode=yes localhost <path>/combined connect`. Keep the daemon's `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`. With Remote Login on, this sends a `hello` for protocol version 4 through `combined connect` and prints the reply:
 
 ```sh
 printf '\000\000\000\046\001{"type":"hello","protocol_version":4}' \
   | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
 ```
 
-Use the absolute path of `combined` on that machine. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":4}`. The reply is a control frame holding `{"type":"welcome","protocol_version":4,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":4}`. The reply is a control frame holding `{"type":"welcome","protocol_version":4,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Check that no network port is open
-
-Until #23 lands, run this against the interim `test-support` build serving the `fake` backend.
 
 ```sh
 lsof -a -p "$(pgrep -x combined)" -i    # prints nothing
 lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
 ```
+
+The first prints nothing, because `lsof` shows no network socket for `combined`. The second lists `combined.sock` and the daemon's other Unix sockets (its connections to herdr-core, its clients' connections and the runtime's internal socket pair), none of them a network socket.
 
 ## Exit codes
 
@@ -110,7 +112,7 @@ lsof -a -p "$(pgrep -x combined)" -U    # lists combined.sock
 | 0 | `combined connect` ended cleanly: the socket reached EOF or stdout closed (EPIPE). Stdin EOF alone only half-closes the socket. `combined serve` stopped on SIGTERM or SIGINT |
 | 1 | a runtime failure (for example a failed write to `ids.json`), or `combined connect` couldn't reach a daemon, couldn't read stdin, or hit another I/O error |
 | 2 | bad usage, a bad `daemon.json`, a bad data directory or file in it, or another daemon already serving the socket or data directory |
-| 3 | herdr-core is unavailable: its socket is missing at start, or its watch ended while running |
+| 3 | herdr-core is unavailable: its socket is missing or doesn't answer at start, or its watch ended while running |
 
 ## Troubleshooting
 

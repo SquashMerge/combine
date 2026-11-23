@@ -187,7 +187,10 @@ pub fn resolve(
 
 /// Finds herdr-core's socket: the config's `herdr_core_socket`, else `HC_SOCKET`, else the
 /// session's socket under `XDG_RUNTIME_DIR`, else under `XDG_STATE_HOME` or `$HOME/.local/state`.
-/// This is the only place Combine spells herdr-core's default path.
+/// The daemon's resolver spells herdr-core's default path here. The client's refusal guard
+/// spells the default session's socket again, in `app/src-tauri/src/hosts/local.rs`
+/// (`DEFAULT_SOCKET_SUFFIX`). SPEC's layering keeps the two crates apart, so a change to
+/// herdr-core's layout changes both.
 pub fn herdr_core_socket(
     configured: Option<PathBuf>,
     env: &DaemonEnv,
