@@ -84,7 +84,7 @@ export class TerminalController {
       else this.dispatch({ kind: 'event', event });
     });
     if (this.stopped) {
-      await stream.close();
+      await stream.close().catch(() => undefined);
       return;
     }
     this.stream = stream;
@@ -138,7 +138,7 @@ export class TerminalController {
     await Promise.allSettled([...this.inFlight]);
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
-    await this.stream?.close();
+    await this.stream?.close().catch(() => undefined);
   }
 
   /** UI input is ignored once the controller is stopping. */

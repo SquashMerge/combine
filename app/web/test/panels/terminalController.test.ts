@@ -259,6 +259,24 @@ describe('terminalController attach and detach', () => {
     expect(t.stream().commands('detach')).toEqual([]);
   });
 
+  it('stop resolves and records close after the connection drops', async () => {
+    const t = rig();
+    await t.goLive();
+    t.port.setConnected(HOST_ID, false);
+    await t.controller.stop();
+    expect(t.ops().at(-1)).toBe('close');
+  });
+
+  it('stop before start resolves does not reject while disconnected', async () => {
+    const t = rig();
+    t.port.setConnected(HOST_ID, false);
+    const starting = t.controller.start(t.host);
+    const stopping = t.controller.stop();
+    await expect(starting).resolves.toBeUndefined();
+    await expect(stopping).resolves.toBeUndefined();
+    expect(t.ops()).toEqual(['close']);
+  });
+
   it('stop sends detach from the webview and closes the stream once hidden', async () => {
     const t = rig();
     await t.goLive();
@@ -376,6 +394,16 @@ describe('terminalController epochs and instances', () => {
     expect(t.controller.getView()).toMatchObject({ phase: 'live', stale: false });
     expect(t.fake.instances).toHaveLength(2);
     expect(t.fake.instances[0]?.disposed).toBe(true);
+  });
+
+  it('events arriving while the instance is stale are dropped, not written to it', async () => {
+    const t = rig();
+    await t.goLive();
+    t.stream().emit(gapEvent(7, null));
+    t.stream().emit(attachedEvent(2, 8));
+    t.stream().emit(dataEvent(cursor(8, 1, 1), 'early'));
+    expect(t.fake.instances[0]?.writes).toHaveLength(0);
+    expect(t.controller.getView()).toMatchObject({ phase: 'attaching', stale: true });
   });
 
   it('events of another epoch are dropped, not applied', async () => {
