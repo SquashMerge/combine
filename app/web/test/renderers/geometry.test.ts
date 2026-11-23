@@ -23,6 +23,11 @@ describe('terminal geometry', () => {
       cols: 12,
       rows: 6,
     });
+    expect(fitGrid({ width: 100, height: 100 }, { width: 7.4, height: 16.6 })).toEqual({
+      cols: 13,
+      rows: 6,
+    });
+    expect(fitGrid({ width: 8, height: 17 }, DEFAULT_CELL)).toEqual({ cols: 1, rows: 1 });
     expect(fitGrid({ width: 1e9, height: 1e9 }, { width: 1, height: 1 })).toEqual({
       cols: 65535,
       rows: 65535,

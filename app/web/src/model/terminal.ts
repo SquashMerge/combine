@@ -2,6 +2,7 @@ import {
   ModelError,
   compareDecimalU64,
   decimalU64FromBigInt,
+  parseCursor,
   parseDecimalU64,
   type Cursor,
   type DecimalU64,
@@ -115,15 +116,6 @@ function parseNullableU64(value: unknown): DecimalU64 | null {
   return value === null ? null : parseDecimalU64(value);
 }
 
-function parseCursorValue(value: unknown): Cursor {
-  const record = asRecord(value, 'cursor');
-  return {
-    attachment: parseDecimalU64(record['attachment']),
-    epoch: parseDecimalU64(record['epoch']),
-    seq: parseDecimalU64(record['seq']),
-  };
-}
-
 function parseFidelity(value: unknown): Fidelity {
   if (value !== 'exact' && value !== 'inexact') {
     throw new ModelError(`unknown fidelity: ${JSON.stringify(value)}`);
@@ -157,7 +149,7 @@ export function parseTerminalStreamEvent(
     case 'started':
       return {
         type: 'started',
-        cursor: parseCursorValue(record['cursor']),
+        cursor: parseCursor(record['cursor']),
         backend_generation: parseDecimalU64(record['backend_generation']),
         cols: parseIntegerInRange(record['cols'], 1, 'cols'),
         rows: parseIntegerInRange(record['rows'], 1, 'rows'),
@@ -167,26 +159,26 @@ export function parseTerminalStreamEvent(
     case 'resized':
       return {
         type: 'resized',
-        cursor: parseCursorValue(record['cursor']),
+        cursor: parseCursor(record['cursor']),
         cols: parseIntegerInRange(record['cols'], 1, 'cols'),
         rows: parseIntegerInRange(record['rows'], 1, 'rows'),
       };
     case 'facts':
       return {
         type: 'facts',
-        cursor: parseCursorValue(record['cursor']),
+        cursor: parseCursor(record['cursor']),
         display: parseDisplay(record['display']),
       };
     case 'resynced':
-      return { type: 'resynced', cursor: parseCursorValue(record['cursor']) };
+      return { type: 'resynced', cursor: parseCursor(record['cursor']) };
     case 'closed':
       return {
         type: 'closed',
-        cursor: parseCursorValue(record['cursor']),
+        cursor: parseCursor(record['cursor']),
         reason: parseCloseReason(record['reason']),
       };
     case 'lost':
-      return { type: 'lost', cursor: parseCursorValue(record['cursor']) };
+      return { type: 'lost', cursor: parseCursor(record['cursor']) };
     case 'attached':
       return {
         type: 'attached',
@@ -199,7 +191,7 @@ export function parseTerminalStreamEvent(
         request: parseDecimalU64(record['request']),
         attachment: parseDecimalU64(record['attachment']),
         replay_through:
-          record['replay_through'] === null ? null : parseCursorValue(record['replay_through']),
+          record['replay_through'] === null ? null : parseCursor(record['replay_through']),
       };
     case 'gap':
       return {

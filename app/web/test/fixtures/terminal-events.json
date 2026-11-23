@@ -76,7 +76,7 @@
       "name": "error_request",
       "ipc": {
         "type": "error",
-        "code": "not_found",
+        "code": "unknown_terminal",
         "message": "no such terminal",
         "request": "5",
         "attachment": null
@@ -309,6 +309,37 @@
         "rows": 24,
         "fidelity": "approximate",
         "ordered_resizes": true
+      }
+    },
+    {
+      "name": "u64_negative",
+      "ipc": {
+        "type": "attached",
+        "request": "-1",
+        "attachment": "7"
+      }
+    },
+    {
+      "name": "u64_over_max",
+      "ipc": {
+        "type": "attached",
+        "request": "18446744073709551616",
+        "attachment": "7"
+      }
+    },
+    {
+      "name": "u64_leading_zero",
+      "ipc": {
+        "type": "attached",
+        "request": "01",
+        "attachment": "7"
+      }
+    },
+    {
+      "name": "missing_required_field",
+      "ipc": {
+        "type": "attached",
+        "request": "1"
       }
     }
   ],
