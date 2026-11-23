@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { type ClientState, defaultClientState } from '../../src/model/clientState';
 import type { DecimalU64, HostId, TermId } from '../../src/model/ids';
@@ -15,7 +15,7 @@ import {
   ownershipEvent,
   startedEvent,
 } from '../support/memoryTerminalPort';
-import { HOST_A, host, snapshot, space, terminal } from '../support/snapshots';
+import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snapshots';
 import { FakeResizeObserver, installTerminalDom } from '../support/terminalDom';
 
 const PATH = '/src/alpha';
@@ -147,5 +147,71 @@ describe('App terminal mount', () => {
     expect(stream.commands('attach')).toHaveLength(1);
     expect(terminalPort.streams).toHaveLength(1);
     expect(stream.commands('close')).toHaveLength(0);
+  });
+
+  it('during a host drop, selecting the same path on another host shows no held tree and no panel', async () => {
+    const state: ClientState = {
+      ...defaultClientState(),
+      lastSpace: { spaceId: PATH, selectedAtMs: '5' as DecimalU64 },
+      spaces: {
+        [PATH]: {
+          spaceId: PATH,
+          focusedTile: null,
+          activeTerminal: 'term-1' as TermId,
+          activeTabs: {},
+          groupState: {},
+        },
+      },
+    };
+    const connected = snapshot([
+      host('mac', HOST_A, { kind: 'connected' }, [
+        space(HOST_A, PATH, [terminal('term-1', 'build', 'make', 'running')]),
+      ]),
+      host('box', HOST_B, { kind: 'connected' }, [space(HOST_B, PATH, [])]),
+    ]);
+    const hostsPort = new MemoryHostsPort(connected);
+    const layoutPort = new MemoryLayoutPort();
+    render(
+      <App
+        port={hostsPort}
+        clientStatePort={
+          new MemoryClientStatePort(
+            new Map<HostId, ClientState>([
+              [HOST_A, state],
+              [HOST_B, defaultClientState()],
+            ]),
+          )
+        }
+        layoutPort={layoutPort}
+        terminalPort={new MemoryTerminalPort()}
+        createAdapter={fakeXtermFactory().factory}
+      />,
+    );
+    await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() =>
+      layoutPort.push(HOST_A, {
+        space: PATH,
+        layoutRevision: '1' as DecimalU64,
+        root: { type: 'tile', id: 'held-tile', panels: [], active: null },
+        readOnly: false,
+        error: null,
+        dropped: null,
+      }),
+    );
+    await screen.findByTestId('terminal-panel');
+    expect(document.querySelector('[data-tile-id="held-tile"]')).not.toBeNull();
+
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    await act(async () => {});
+    // Same space still selected: the held tree and panel stay.
+    expect(document.querySelector('[data-tile-id="held-tile"]')).not.toBeNull();
+
+    const boxSection = screen.getByRole('region', { name: 'box' });
+    fireEvent.click(within(boxSection).getByRole('button', { name: /^alpha/ }));
+    await act(async () => {});
+    expect(document.querySelector('[data-tile-id="held-tile"]')).toBeNull();
+    expect(screen.queryByTestId('terminal-panel')).toBeNull();
   });
 });
