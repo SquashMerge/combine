@@ -11,7 +11,7 @@ interface Deferred<T> {
   reject: (error: Error) => void;
 }
 
-type Script<T> = { kind: 'ok'; value: T } | { kind: 'error'; message: string } | { kind: 'defer' };
+type Script<T> = { kind: 'ok'; value: T } | { kind: 'error'; error: Error } | { kind: 'defer' };
 
 export const emptyTemplateList = (space = '/work'): TemplateList => ({
   space,
@@ -42,7 +42,7 @@ export class MemorySpawnPort implements SpawnPort {
 
   /** Every later `listTemplates` rejects with this message. */
   failList(message: string): void {
-    this.listScript = { kind: 'error', message };
+    this.listScript = { kind: 'error', error: new Error(message) };
   }
 
   /** Every later `listTemplates` waits for `resolveList` or `rejectList`. */
@@ -55,9 +55,12 @@ export class MemorySpawnPort implements SpawnPort {
     this.spawnScript = { kind: 'ok', value: terminal };
   }
 
-  /** Every later `spawnTerminal` rejects with this message. */
-  failSpawn(message: string): void {
-    this.spawnScript = { kind: 'error', message };
+  /** Every later `spawnTerminal` rejects with this message, or with this error itself. */
+  failSpawn(failure: string | Error): void {
+    this.spawnScript = {
+      kind: 'error',
+      error: typeof failure === 'string' ? new Error(failure) : failure,
+    };
   }
 
   /** Every later `spawnTerminal` waits for `resolveSpawn` or `rejectSpawn`. */
@@ -105,7 +108,7 @@ export class MemorySpawnPort implements SpawnPort {
       case 'ok':
         return Promise.resolve(script.value);
       case 'error':
-        return Promise.reject(new Error(script.message));
+        return Promise.reject(script.error);
       case 'defer':
         return new Promise<T>((resolve, reject) => {
           pending.push({ resolve, reject });

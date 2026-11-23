@@ -15,6 +15,8 @@ export interface TerminalTemplate {
   argv: string[];
   env: Dict<string>;
   cwd: string;
+  /** The listed definition's hash; a template spawn sends it back so the host runs what was shown. */
+  hash: string;
 }
 
 export interface SkippedPanel {
@@ -29,7 +31,10 @@ export interface TemplateList {
   error: string | null;
 }
 
-export type SpawnSource = { kind: 'shell' } | { kind: 'template'; panel: string };
+export type SpawnSource = { kind: 'shell' } | { kind: 'template'; panel: string; hash: string };
+
+/** The host refused a template spawn because the panel changed after it was listed. */
+export const TEMPLATE_CHANGED = 'template_changed';
 
 export type SpawnEvent =
   | { kind: 'templates'; hostId: string; request: DecimalU64; list: TemplateList }
@@ -53,6 +58,14 @@ function nullableStr(value: unknown, what: string): string | null {
   return value === null ? null : str(value, what);
 }
 
+const TEMPLATE_HASH = /^[0-9a-f]{64}$/;
+
+function templateHash(value: unknown, what: string): string {
+  const hash = str(value, what);
+  if (!TEMPLATE_HASH.test(hash)) throw new ModelError(`${what} must be 64 lowercase hex digits`);
+  return hash;
+}
+
 function array(value: unknown, what: string): unknown[] {
   if (!Array.isArray(value)) throw new ModelError(`${what} must be an array`);
   return value;
@@ -71,6 +84,7 @@ function parseTemplate(value: unknown, what: string): TerminalTemplate {
     argv: array(r['argv'], `${what}.argv`).map((a, i) => str(a, `${what}.argv[${i}]`)),
     env,
     cwd: str(r['cwd'], `${what}.cwd`),
+    hash: templateHash(r['hash'], `${what}.hash`),
   };
 }
 

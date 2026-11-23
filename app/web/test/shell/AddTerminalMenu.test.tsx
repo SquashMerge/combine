@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TermId } from '../../src/model/ids';
 import type { SpaceKey } from '../../src/model/space';
-import type { TemplateList, TerminalTemplate } from '../../src/model/spawn';
+import { SpawnError, type TemplateList, type TerminalTemplate } from '../../src/model/spawn';
 import { AddTerminalMenu } from '../../src/shell/AddTerminalMenu';
 import { MemorySpawnPort } from '../support/memorySpawnPort';
 import { HOST_A, HOST_B, host, snapshot, space } from '../support/snapshots';
@@ -10,6 +10,8 @@ import { HOST_A, HOST_B, host, snapshot, space } from '../support/snapshots';
 const alpha: SpaceKey = { hostId: HOST_A, path: '/src/alpha' };
 const beta: SpaceKey = { hostId: HOST_A, path: '/src/beta' };
 const connected = { kind: 'connected' } as const;
+const HASH_1 = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+const HASH_2 = '60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752';
 
 const hosts = snapshot([
   host('mac', HOST_A, connected, [space(HOST_A, alpha.path), space(HOST_A, beta.path)]),
@@ -26,6 +28,7 @@ function template(over: Partial<TerminalTemplate> = {}): TerminalTemplate {
     argv: ['claude', '--resume'],
     env: { FOO: 'bar' } as TerminalTemplate['env'],
     cwd: '',
+    hash: HASH_1,
     ...over,
   };
 }
@@ -220,7 +223,74 @@ describe('AddTerminalMenu', () => {
     mount(port);
     await open();
     await click(/Claude/);
-    expect(port.spawnCalls().map((c) => c.source)).toEqual([{ kind: 'template', panel: 'claude' }]);
+    expect(port.spawnCalls().map((c) => c.source)).toEqual([
+      { kind: 'template', panel: 'claude', hash: HASH_1 },
+    ]);
+  });
+
+  it('template_click_sends_the_hash_of_the_clicked_entry', async () => {
+    const port = new MemorySpawnPort();
+    port.setList(
+      list({
+        templates: [
+          template(),
+          template({ panel: 'codex', title: 'Codex', slot: 'codex', hash: HASH_2 }),
+        ],
+      }),
+    );
+    mount(port);
+    await open();
+    await click(/Codex/);
+    expect(port.spawnCalls().map((c) => c.source)).toEqual([
+      { kind: 'template', panel: 'codex', hash: HASH_2 },
+    ]);
+  });
+
+  it('template_changed_refreshes_the_list_and_does_not_spawn_again', async () => {
+    const changed = 'the panel claude changed since it was listed; review it and choose again';
+    const port = new MemorySpawnPort();
+    port.setList(list({ templates: [template()] }));
+    port.failSpawn(new SpawnError('template_changed', changed));
+    const { onSpawned } = mount(port);
+    await open();
+    expect(port.listCalls()).toHaveLength(1);
+    // The host now holds an edited definition; the refreshed list shows it with its new hash.
+    port.setList(list({ templates: [template({ argv: ['claude', '--edited'], hash: HASH_2 })] }));
+    await click(/Claude/);
+    expect(screen.getByRole('alert').textContent).toBe(changed);
+    expect(menu()).not.toBeNull();
+    expect(onSpawned).not.toHaveBeenCalled();
+    expect(port.listCalls()).toHaveLength(2);
+    expect(port.spawnCalls()).toHaveLength(1);
+    expect(screen.getByRole('menu').querySelector('code.command')?.textContent).toBe(
+      'FOO=bar claude --edited',
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(port.spawnCalls()).toHaveLength(1);
+
+    port.setSpawned('hc:t7' as TermId);
+    await click(/Claude/);
+    expect(port.spawnCalls().map((c) => c.source)).toEqual([
+      { kind: 'template', panel: 'claude', hash: HASH_1 },
+      { kind: 'template', panel: 'claude', hash: HASH_2 },
+    ]);
+    expect(port.listCalls()).toHaveLength(2);
+    expect(onSpawned).toHaveBeenCalledExactlyOnceWith(alpha, 'hc:t7');
+  });
+
+  it('other_spawn_errors_do_not_refresh_the_list', async () => {
+    const port = new MemorySpawnPort();
+    port.setList(list({ templates: [template()] }));
+    port.failSpawn(new SpawnError('cwd_refused', 'the template\'s cwd "../x" has a .. segment'));
+    mount(port);
+    await open();
+    await click(/Claude/);
+    expect(screen.getByRole('alert').textContent).toBe(
+      'Couldn\'t add the terminal: the template\'s cwd "../x" has a .. segment',
+    );
+    expect(port.listCalls()).toHaveLength(1);
   });
 
   it('one_spawn_per_click', async () => {
