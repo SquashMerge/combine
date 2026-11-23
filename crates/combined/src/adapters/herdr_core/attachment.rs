@@ -21,10 +21,10 @@ use tokio::sync::{mpsc, Notify};
 use super::connection::reserve_slot;
 #[cfg(feature = "test-support")]
 use super::control::PairHalf;
-use super::fencing::{Effect, Facts, Fence, Out, Phase, Request};
+use super::fencing::{Effect, Fence, Out, Phase, Request, ViewerSettings};
 use super::frame::{self, Frame, Kind};
 use super::jsonrpc::{self, fidelity_of};
-use super::pair::{self, Half, Halves, OpenError, OpenParams};
+use super::pair::{self, Halves, OpenError, OpenParams, Viewer};
 use super::Env;
 #[cfg(feature = "test-support")]
 use super::INITIAL_CREDIT;
@@ -176,8 +176,13 @@ impl PairRun {
 
 enum Command {
     Detach,
-    /// A half failed: rebuild the pair at once.
-    Fail,
+    /// A half of the pair at `generation` failed: rebuild the pair at once. A Fail for an older
+    /// generation was queued during a failure that a rebuild has already handled (a request
+    /// found the writer closed while the supervisor saw the half end), and is dropped, so one
+    /// failure starts one new epoch.
+    Fail {
+        generation: u64,
+    },
 }
 
 /// Where a request's frames go.
@@ -291,8 +296,9 @@ impl Shared {
 
     /// Starts the reopen when the input writer is gone.
     fn input_writer_closed(&self, state: &mut State) {
+        let generation = state.fence.generation;
         state.fence.begin_reopen();
-        let _ = self.commands.send(Command::Fail);
+        let _ = self.commands.send(Command::Fail { generation });
     }
 
     fn request(&self, ownership: OwnershipGeneration, request: Request) -> BackendResult<()> {
@@ -308,8 +314,8 @@ impl Shared {
                         // its ownership generation still reached the terminal: record it, as
                         // a refused reopen-queue request does, so another attachment's older
                         // deferred request can't replay as current (port contract).
-                        let mut fence = lock(&self.env.fence);
-                        let highest = fence.entry(self.address.clone()).or_insert(0);
+                        let mut table = lock(&self.env.highest_ownership);
+                        let highest = table.entry(self.address.clone()).or_insert(0);
                         *highest = (*highest).max(ownership.0);
                         return Err(BackendError::Failed("input queue full".to_string()));
                     }
@@ -318,8 +324,8 @@ impl Shared {
             }
         }
         let effects = {
-            let mut fence = lock(&self.env.fence);
-            let highest = fence.entry(self.address.clone()).or_insert(0);
+            let mut table = lock(&self.env.highest_ownership);
+            let highest = table.entry(self.address.clone()).or_insert(0);
             state.fence.request(highest, ownership.0, request)?
         };
         let frames = self.frames_of(&state, effects);
@@ -371,9 +377,16 @@ impl Shared {
     /// Fails one half. False when the attachment is closed. The reopen begins at once, under
     /// the lock, as it does when a connection breaks, so a request made right after this call
     /// is queued for the new pair rather than racing the supervisor.
+    ///
+    /// Which half failed matters only to a watch-only attachment, which has no input half to
+    /// fail. Otherwise both halves are torn down either way, as they are when either half's
+    /// connection really ends: a generation belongs to the pair, so `rebuild` closes the old
+    /// pair and opens both halves again. The real path uses which half ended first only to wait
+    /// for the other half, telling a core-wide failure from one half's; an injected failure is
+    /// one half's by construction, so `rebuild` skips that wait and reopens at once.
     #[cfg(feature = "test-support")]
     pub(super) fn fail(&self, half: PairHalf) -> bool {
-        {
+        let generation = {
             let mut state = lock(&self.state);
             if state.fence.phase == Phase::Closed {
                 return false;
@@ -382,8 +395,9 @@ impl Shared {
                 return true;
             }
             state.fence.begin_reopen();
-        }
-        self.commands.send(Command::Fail).is_ok()
+            state.fence.generation
+        };
+        self.commands.send(Command::Fail { generation }).is_ok()
     }
 }
 
@@ -401,9 +415,34 @@ pub(super) fn start(
     opts: &crate::ports::AttachOptions,
     halves: Halves,
 ) -> HerdrCoreAttachment {
+    let (shared, events_rx, commands_rx) = share(env, address, opts, &halves);
+    tokio::spawn(supervise(Arc::clone(&shared), halves, commands_rx));
+    HerdrCoreAttachment {
+        shared,
+        events: Some(
+            futures::stream::unfold(events_rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            })
+            .boxed(),
+        ),
+    }
+}
+
+/// The state of a pair that is open, with `Started` at generation 1 already emitted, and the
+/// receivers its supervisor reads.
+fn share(
+    env: Arc<Env>,
+    address: &str,
+    opts: &crate::ports::AttachOptions,
+    halves: &Halves,
+) -> (
+    Arc<Shared>,
+    mpsc::UnboundedReceiver<(BackendGeneration, AttachEvent)>,
+    mpsc::UnboundedReceiver<Command>,
+) {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-    let requested = Facts {
+    let requested = ViewerSettings {
         size: (opts.cols, opts.rows),
         display: opts.display.clone(),
     };
@@ -412,7 +451,7 @@ pub(super) fn start(
     let fidelity = lock(&env.fidelities).observe(address, halves.created_ms, &halves.screen);
     let state = State {
         fence,
-        writers: writers_of(&halves),
+        writers: writers_of(halves),
         fidelity,
         ordered: halves.ordered,
         display_open: true,
@@ -443,16 +482,7 @@ pub(super) fn start(
             ordered_resizes: halves.ordered,
         },
     );
-    tokio::spawn(supervise(Arc::clone(&shared), halves, commands_rx));
-    HerdrCoreAttachment {
-        shared,
-        events: Some(
-            futures::stream::unfold(events_rx, |mut rx| async move {
-                rx.recv().await.map(|item| (item, rx))
-            })
-            .boxed(),
-        ),
-    }
+    (shared, events_rx, commands_rx)
 }
 
 fn writers_of(halves: &Halves) -> Writers {
@@ -477,7 +507,7 @@ enum Ended {
     },
 }
 
-async fn recv_input(input: &mut Option<Half>) -> Option<Frame> {
+async fn recv_input(input: &mut Option<Viewer>) -> Option<Frame> {
     match input {
         Some(half) => half.frames.recv().await,
         None => std::future::pending().await,
@@ -545,15 +575,19 @@ async fn run_pair(
                 continue;
             }
             () = shared.credit_wake.notified() => continue,
-            command = commands.recv() => {
-                return match command {
-                    Some(Command::Fail) => Ended::Rebuild {
+            command = commands.recv() => match command {
+                // Left over from the failure the last rebuild handled: this pair is fine.
+                Some(Command::Fail { generation }) if generation < shared.generation() => continue,
+                // `display_first` is unused: `rebuild` doesn't wait for the other half of an
+                // injected failure.
+                Some(Command::Fail { .. }) => {
+                    return Ended::Rebuild {
                         injected: true,
                         display_first: true,
-                    },
-                    Some(Command::Detach) | None => Ended::Detached,
-                };
-            }
+                    }
+                }
+                Some(Command::Detach) | None => return Ended::Detached,
+            },
         };
         if let Some(ended) = apply(shared, reaction, from_display, &mut input_owed) {
             return ended;
@@ -698,7 +732,8 @@ async fn rebuild(
             tokio::select! {
                 () = &mut slept => break,
                 command = commands.recv() => match command {
-                    Some(Command::Fail) => {}
+                    // Every Fail queued now is for the pair being rebuilt.
+                    Some(Command::Fail { .. }) => {}
                     Some(Command::Detach) | None => {
                         finish(shared, None, Some(AttachEvent::Closed(CloseReason::Detached)));
                         return None;
@@ -769,7 +804,7 @@ fn install(shared: &Shared, halves: &Halves) -> bool {
     }
     state.fence.automatic = halves.automatic;
     let effects = {
-        let mut table = lock(&shared.env.fence);
+        let mut table = lock(&shared.env.highest_ownership);
         let highest = table.entry(shared.address.clone()).or_insert(0);
         state.fence.finish_reopen(*highest)
     };
@@ -1117,7 +1152,7 @@ mod queue_tests {
     fn env() -> Arc<Env> {
         Arc::new(Env {
             config: super::super::HerdrCoreConfig::new("/nonexistent".into()),
-            fence: Mutex::new(HashMap::new()),
+            highest_ownership: Mutex::new(HashMap::new()),
             fidelities: Mutex::new(Fidelities::default()),
             automatic_feature: true,
             control: Arc::new(control::Shared::default()),
@@ -1135,7 +1170,7 @@ mod queue_tests {
 
     /// A connection to a model core that answers hello. `pipe` is the size of the in-memory
     /// pipe: a small one makes the writer block, so its queue fills.
-    async fn connect(pipe: usize, channel: u32) -> (Half, Core) {
+    async fn connect(pipe: usize, channel: u32) -> (Viewer, Core) {
         let (client, server) = tokio::io::duplex(pipe);
         let (mut read, mut write) = tokio::io::split(server);
         let hello = serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {
@@ -1155,7 +1190,7 @@ mod queue_tests {
         let (connection, frames) = Connection::from_stream(client).await.expect("open");
         let (read, write) = answer.await.expect("core");
         (
-            Half {
+            Viewer {
                 connection,
                 frames,
                 channel,
@@ -1545,6 +1580,49 @@ mod queue_tests {
         let frames = input.drain_until(|frames| frames.len() >= 2).await;
         assert_eq!(frames.len(), 2, "each write goes out once");
         assert_eq!(typed(&frames), b"onetwo");
+    }
+
+    /// A request that finds the input writer closed while the supervisor is already handling
+    /// that half's end leaves a Fail behind. The rebuilt pair drops it: one failure, one new
+    /// epoch. A Fail for the rebuilt pair itself still rebuilds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_leftover_fail_does_not_rebuild_the_new_pair() {
+        let (first, _display, _input) = halves(65_536).await;
+        let (shared, mut events, mut commands) = share(env(), "t1", &options(), &first);
+        // The pair's input connection died: a request sees the writer closed and queues a
+        // Fail, while the supervisor rebuilds for the half's end it saw itself.
+        close_input_writer(&shared);
+        shared
+            .request(OwnershipGeneration(1), Request::Write(b"x".to_vec()))
+            .expect("queued for the reopen");
+        first.close();
+        let (mut second, _display, mut input) = halves(65_536).await;
+        assert!(install(&shared, &second));
+        assert_eq!(shared.generation(), 2);
+
+        // The leftover Fail is still queued; a Detach behind it shows where it went.
+        shared.commands.send(Command::Detach).expect("queued");
+        let ended = run_pair(&shared, &mut second, &mut commands).await;
+        assert!(
+            matches!(ended, Ended::Detached),
+            "the leftover Fail rebuilt the new pair"
+        );
+        let mut started = Vec::new();
+        while let Ok((generation, event)) = events.try_recv() {
+            if matches!(event, AttachEvent::Started { .. }) {
+                started.push(generation);
+            }
+        }
+        assert_eq!(started, [BackendGeneration(1), BackendGeneration(2)]);
+        let frames = input.drain_until(|frames| !frames.is_empty()).await;
+        assert_eq!(typed(&frames), b"x", "the queued write replays once");
+
+        shared.input_writer_closed(&mut lock(&shared.state));
+        let ended = run_pair(&shared, &mut second, &mut commands).await;
+        assert!(
+            matches!(ended, Ended::Rebuild { injected: true, .. }),
+            "a Fail for the current pair rebuilds it"
+        );
     }
 
     /// An automatic reply that finds the writer closed is not an error, and the reopen begins.

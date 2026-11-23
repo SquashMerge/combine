@@ -217,6 +217,10 @@ impl Target for FakeTarget {
         Ok(())
     }
 
+    fn late_events_delivered(&self) -> Result<(), Unsupported> {
+        Ok(())
+    }
+
     fn set_paint_after_resize(&mut self, on: bool) -> Result<(), Unsupported> {
         self.control.set_paint_after_resize(on);
         Ok(())

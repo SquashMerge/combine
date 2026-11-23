@@ -123,6 +123,11 @@ pub fn check_socket_path(
             expected_socket(root, session)
         ));
     }
+    // Unreachable today: the equality check above admits only
+    // `<root>/run/herdr-core/<session>.sock`, and `check_root` and `check_session` hold that to
+    // 51 bytes at most (`longest_valid_lane_socket_fits_the_103_byte_limit` pins it). Kept as
+    // defence in depth, so a later change that loosens the root or session rules still can't
+    // name a socket path macOS would refuse.
     if socket.len() > SOCKET_PATH_MAX {
         return Err(format!(
             "{socket} is {} bytes; a socket path is at most {SOCKET_PATH_MAX}",
@@ -497,6 +502,7 @@ mod tests {
     fn longest_valid_lane_socket_fits_the_103_byte_limit() {
         let root = "/private/tmp/chc.Zz99Zz";
         let socket = expected_socket(root, "cZz99Zz");
+        assert_eq!(socket.len(), 51, "{socket}");
         assert!(socket.len() <= SOCKET_PATH_MAX, "{}", socket.len());
         assert!(check_socket_path(&socket, root, "cZz99Zz", HOME).is_ok());
         // Anything longer than the limit is refused by the equality check, whichever branch
@@ -901,7 +907,15 @@ mod tests {
             .env("PATH", "/usr/bin:/bin")
             .output()
             .expect("sh runs");
-        assert!(output.status.success(), "exit {:?}", output.status.code());
+        // A child killed by a signal (seen once under heavy machine load) has no exit code;
+        // name the signal so a kill isn't mistaken for the library running something.
+        assert!(
+            output.status.success(),
+            "exit {:?}, signal {:?}, stderr {:?}",
+            output.status.code(),
+            std::os::unix::process::ExitStatusExt::signal(&output.status),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(output.stdout.is_empty() && output.stderr.is_empty());
     }
 }
