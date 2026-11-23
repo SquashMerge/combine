@@ -7,9 +7,10 @@ use crate::display::Display;
 use crate::error::EncodeError;
 use crate::frame::{MAX_DATA_CHUNK, MAX_ERROR_DETAIL};
 use crate::ids::{
-    AttachmentId, BackendGeneration, Cursor, HostId, OwnershipGeneration, RequestId, Seq,
+    AttachmentId, BackendGeneration, Cursor, HostId, OwnershipGeneration, RequestId, Seq, TermId,
 };
 use crate::layout::LayoutSnapshot;
+use crate::spawn::{SkippedPanel, TemplateInfo};
 use crate::terminals::{SpaceInfo, TerminalInfo};
 
 /// The daemon's answer to `hello`.
@@ -87,6 +88,12 @@ pub enum ErrorCode {
     /// A `mutate_layout` made against a layout revision that is no longer
     /// current.
     StaleLayout,
+    /// The named panel has no usable terminal template.
+    UnknownTemplate,
+    /// The directory a terminal would start in is refused.
+    CwdRefused,
+    /// The backend couldn't start the terminal.
+    SpawnFailed,
     /// Anything else.
     Internal,
 }
@@ -128,6 +135,28 @@ pub struct Terminals {
 pub struct Layout {
     pub request: Option<RequestId>,
     pub layout: LayoutSnapshot,
+}
+
+/// The terminal templates of a space's panels, answering a `list_templates`
+/// with that `request`. `skipped` names the panel folders that offer none.
+/// `error` is set when the panels couldn't be listed at all. It is control
+/// traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Templates {
+    pub request: RequestId,
+    pub space: String,
+    pub templates: Vec<TemplateInfo>,
+    pub skipped: Vec<SkippedPanel>,
+    pub error: Option<String>,
+}
+
+/// A terminal the daemon started, answering a `spawn_terminal` with that
+/// `request`. `terminal` is its ID, such as `t12`. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spawned {
+    pub request: RequestId,
+    pub space: String,
+    pub terminal: TermId,
 }
 
 /// Whether the backend reproduced the screen exactly.
@@ -239,6 +268,8 @@ pub enum DaemonMessage {
     Error(ErrorMessage),
     Terminals(Terminals),
     Layout(Layout),
+    Templates(Templates),
+    Spawned(Spawned),
     Started(Started),
     #[serde(skip)]
     Data(Data),
@@ -261,6 +292,8 @@ impl DaemonMessage {
             Self::Error(_) => "error",
             Self::Terminals(_) => "terminals",
             Self::Layout(_) => "layout",
+            Self::Templates(_) => "templates",
+            Self::Spawned(_) => "spawned",
             Self::Started(_) => "started",
             Self::Data(_) => "data",
             Self::Resized(_) => "resized",
@@ -297,7 +330,7 @@ impl DaemonMessage {
     /// The stream is an attachment's seven events, in cursor order, plus the
     /// in-order `gap { request: None }` after the last of them. Control
     /// traffic (`welcome`, `attached`, `resumed`, a `gap` answering a resume,
-    /// `ownership`, `error`, `terminals` and `layout`) is queued ahead of output.
+    /// `ownership`, `error`, `terminals`, `layout`, `templates` and `spawned`) is queued ahead of output.
     pub fn stream_attachment(&self) -> Option<AttachmentId> {
         match self {
             Self::Gap(gap) if gap.request.is_none() => Some(gap.attachment),

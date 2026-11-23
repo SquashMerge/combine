@@ -19,7 +19,7 @@ use crate::stream::{read_message, write_message};
 /// can't safely ignore bumps it: a new message type, frame kind or enum value,
 /// or a changed or removed field. A new optional field doesn't. There is no
 /// negotiation: the daemon accepts exactly its own version.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The client and daemon versions differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
