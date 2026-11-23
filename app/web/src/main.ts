@@ -1,5 +1,6 @@
 import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createTauriSpawnPort } from './ipc/spawn';
 import { createTauriClientStatePort, createTauriHostsPort, createTauriLayoutPort } from './ipc/tauri';
 import { App } from './shell/App';
 
@@ -10,5 +11,6 @@ createRoot(root).render(
     port: createTauriHostsPort(),
     clientStatePort: createTauriClientStatePort(),
     layoutPort: createTauriLayoutPort(),
+    spawnPort: createTauriSpawnPort(),
   }),
 );
