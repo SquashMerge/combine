@@ -185,6 +185,8 @@ pub(crate) struct World {
     attachments: BTreeMap<u64, Att>,
     subscribers: Vec<Subscriber>,
     calls: Vec<FakeCall>,
+    spawned: Vec<SpawnSpec>,
+    next_spawn_error: Option<BackendError>,
     filtered_events: usize,
 }
 
@@ -212,6 +214,8 @@ impl World {
             attachments: BTreeMap::new(),
             subscribers: Vec::new(),
             calls: Vec::new(),
+            spawned: Vec::new(),
+            next_spawn_error: None,
             filtered_events: 0,
         }
     }
@@ -298,6 +302,10 @@ impl World {
     }
 
     pub(crate) fn spawn(&mut self, spec: SpawnSpec) -> BackendResult<TermId> {
+        self.spawned.push(spec.clone());
+        if let Some(error) = self.next_spawn_error.take() {
+            return Err(error);
+        }
         if spec.cols == 0 || spec.rows == 0 {
             return Err(BackendError::InvalidRequest(
                 "a terminal needs at least one column and one row".to_string(),
@@ -1122,6 +1130,14 @@ impl World {
 
     pub(crate) fn calls(&self) -> Vec<FakeCall> {
         self.calls.clone()
+    }
+
+    pub(crate) fn spawn_specs(&self) -> Vec<SpawnSpec> {
+        self.spawned.clone()
+    }
+
+    pub(crate) fn fail_next_spawn(&mut self, error: BackendError) {
+        self.next_spawn_error = Some(error);
     }
 
     pub(crate) fn attachments_of(&self, term: &TermId) -> Vec<FakeAttachmentRef> {

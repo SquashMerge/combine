@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, HostId, Layout, RequestId,
+    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, HostId, Layout, RequestId, TermId,
 };
-use futures::stream::BoxStream;
+use futures::future::BoxFuture;
+use futures::stream::{BoxStream, FuturesUnordered};
 use futures::StreamExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -27,10 +28,11 @@ use super::socket::BoundSocket;
 use super::{ServeOptions, ServerParts, ServerStats};
 use crate::core::{
     layout_snapshot, ops_from_wire, ConnectionId, Driver, LayoutEffect, LayoutRead, LayoutWritten,
-    Layouts, MutateError, TerminalList, WatchError, LAYOUT_FILE, LAYOUT_MAX_BYTES,
+    Layouts, MutateError, PanelRead, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError,
+    LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
 use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent};
-use crate::ports::{FileChange, FileStore};
+use crate::ports::{BackendResult, FileChange, FileStore};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
@@ -83,6 +85,8 @@ struct ConnState {
     layout_out: VecDeque<LayoutOut>,
     /// The space the connection watches changed since its last layout message.
     layout_stale: bool,
+    /// Replies to `list_templates` and `spawn_terminal`, in the order they arose.
+    spawn_out: VecDeque<DaemonMessage>,
     /// The connection's last message is queued and its input is ignored. It still counts
     /// toward `max_connections` until its writer reports the socket closed.
     closing: bool,
@@ -103,11 +107,13 @@ enum Wake {
     File(Option<FileChange>),
     Flush,
     Layout,
+    Spawned(SpawnTicket, BackendResult<TermId>),
     Housekeeping,
 }
 
 type Watch = BoxStream<'static, TermEvent>;
 type Changes = BoxStream<'static, FileChange>;
+type Spawning = FuturesUnordered<BoxFuture<'static, (SpawnTicket, BackendResult<TermId>)>>;
 
 struct Server {
     driver: Driver,
@@ -130,6 +136,8 @@ struct Server {
     flush_armed: bool,
     layout_timer: Pin<Box<Sleep>>,
     layout_armed: bool,
+    spawns: Spawns,
+    spawning: Spawning,
     housekeeping: Interval,
 }
 
@@ -156,6 +164,7 @@ pub async fn serve(
         clock,
         file_store,
         layout_timing,
+        project_dirs,
     } = parts;
     let backend = Arc::clone(driver.backend());
     let watch = backend
@@ -193,6 +202,8 @@ pub async fn serve(
         flush_armed: false,
         layout_timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
         layout_armed: false,
+        spawns: Spawns::new(project_dirs),
+        spawning: FuturesUnordered::new(),
         housekeeping,
     };
     let result = server.run(shutdown).await;
@@ -224,6 +235,7 @@ impl Server {
                 item = next_item(&mut self.changes), if self.changes.is_some() => Wake::File(item),
                 () = &mut self.flush_timer, if self.flush_armed => Wake::Flush,
                 () = &mut self.layout_timer, if self.layout_armed => Wake::Layout,
+                Some((ticket, result)) = self.spawning.next(), if !self.spawning.is_empty() => Wake::Spawned(ticket, result),
                 _ = self.housekeeping.tick() => Wake::Housekeeping,
             };
             match wake {
@@ -264,6 +276,7 @@ impl Server {
                         FlushAt::At(at) => self.arm(at),
                     }
                 }
+                Wake::Spawned(ticket, result) => self.spawns.apply_spawned(ticket, result),
                 Wake::Housekeeping => self.driver.core_mut().tick(self.clock.now()),
             }
             self.settle().await?;
@@ -312,6 +325,7 @@ impl Server {
                 stale: false,
                 layout_out: VecDeque::new(),
                 layout_stale: false,
+                spawn_out: VecDeque::new(),
                 closing: false,
             },
         );
@@ -341,12 +355,30 @@ impl Server {
                     }
                     ClientMessage::UnwatchLayout(_) => self.layouts.unwatch(conn, now),
                     ClientMessage::MutateLayout(mutate) => self.mutate_layout(conn, mutate, now),
+                    ClientMessage::ListTemplates(list) => {
+                        let space = SpaceId(list.space);
+                        let listed = self.terminals.space_listed(&space);
+                        self.spawns
+                            .list_templates(conn, list.request, space, listed);
+                    }
+                    ClientMessage::SpawnTerminal(spawn) => {
+                        let space = SpaceId(spawn.space);
+                        let listed = self.terminals.space_listed(&space);
+                        self.spawns.spawn_terminal(
+                            conn,
+                            spawn.request,
+                            space,
+                            spawn.source,
+                            listed,
+                        );
+                    }
                     message => self.driver.core_mut().client_message(conn, message, now),
                 }
             }
             ConnEvent::Malformed(conn, text) => {
                 self.driver.core_mut().disconnect(conn, now);
                 self.layouts.unwatch(conn, now);
+                self.spawns.disconnect(conn);
                 let Some(state) = self.conns.get_mut(&conn) else {
                     return;
                 };
@@ -359,6 +391,7 @@ impl Server {
                 state.stale = false;
                 state.layout_out.clear();
                 state.layout_stale = false;
+                state.spawn_out.clear();
                 let error = DaemonMessage::Error(ErrorMessage {
                     code: ErrorCode::Malformed,
                     message: format!("malformed frame: {text}"),
@@ -486,10 +519,28 @@ impl Server {
         }
     }
 
+    /// Queues a template or spawn reply for `conn`, and disconnects it when it has left more
+    /// than `watch_answer_limit` of them unread.
+    fn queue_spawn_out(&mut self, conn: ConnectionId, message: DaemonMessage) {
+        let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) else {
+            return;
+        };
+        state.spawn_out.push_back(message);
+        if state.spawn_out.len() > self.options.watch_answer_limit {
+            eprintln!(
+                "combined: connection {} left more than {} spawn replies unread; disconnecting",
+                conn.0, self.options.watch_answer_limit
+            );
+            self.driver.core_mut().disconnect(conn, self.clock.now());
+            self.remove(conn);
+        }
+    }
+
     /// Forgets the connection and closes its socket, which ends both its threads. It does
     /// nothing for a connection already removed.
     fn remove(&mut self, conn: ConnectionId) {
         self.layouts.unwatch(conn, self.clock.now());
+        self.spawns.disconnect(conn);
         if let Some(state) = self.conns.remove(&conn) {
             self.stats.removed();
             let _ = state.socket.shutdown(Shutdown::Both);
@@ -517,6 +568,7 @@ impl Server {
                 || state.stale
                 || !state.layout_out.is_empty()
                 || state.layout_stale
+                || !state.spawn_out.is_empty()
         })
     }
 
@@ -573,6 +625,55 @@ impl Server {
         }
     }
 
+    /// Runs the file store and backend work the spawns asked for. A spawn is started and not
+    /// awaited here: its outcome arrives as `Wake::Spawned`. This is the only place the daemon
+    /// starts a terminal, and only a `spawn_terminal` request leads here.
+    async fn run_spawn_effects(&mut self) {
+        loop {
+            let effects = self.spawns.take_effects();
+            if effects.is_empty() {
+                return;
+            }
+            for effect in effects {
+                match effect {
+                    SpawnEffect::ListPanels { ticket, space } => {
+                        let listing = self
+                            .store
+                            .list_dir(&space, PANELS_DIR, PANEL_LIST_MAX)
+                            .await;
+                        self.spawns.apply_listing(ticket, listing);
+                    }
+                    SpawnEffect::ReadPanels {
+                        ticket,
+                        space,
+                        panels,
+                    } => {
+                        let limit = usize::try_from(PANEL_MAX_BYTES).unwrap_or(usize::MAX);
+                        let mut reads = Vec::with_capacity(panels.len());
+                        for panel in panels {
+                            let path = format!("{PANELS_DIR}/{panel}/{PANEL_FILE}");
+                            let read = self.store.read(&space, &path, limit).await;
+                            reads.push((panel, PanelRead::from(read)));
+                        }
+                        self.spawns.apply_panels(ticket, reads);
+                    }
+                    SpawnEffect::Spawn { ticket, spec } => {
+                        let backend = Arc::clone(self.driver.backend());
+                        self.spawning
+                            .push(Box::pin(async move { (ticket, backend.spawn(spec).await) }));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Queues the replies the spawns owe.
+    fn queue_spawn_replies(&mut self) {
+        for (conn, message) in self.spawns.take_replies() {
+            self.queue_spawn_out(conn, message);
+        }
+    }
+
     /// Arms the layout timer for the earliest write due.
     fn arm_layouts(&mut self) {
         match self.layouts.next_deadline() {
@@ -592,6 +693,8 @@ impl Server {
             self.driver.run_effects(self.clock.now()).await;
             self.run_layout_effects().await;
             self.queue_layouts();
+            self.run_spawn_effects().await;
+            self.queue_spawn_replies();
             self.arm_layouts();
             for conn in self.driver.take_disconnects() {
                 self.remove(conn);
@@ -663,6 +766,7 @@ impl Server {
                     .and_then(|space| layout_message(&self.layouts, space, None));
                 batch.extend(push);
             }
+            batch.extend(state.spawn_out.drain(..));
             batch.extend(self.driver.core_mut().pull(conn, max_bytes, now));
             if batch.is_empty() {
                 continue;
