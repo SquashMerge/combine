@@ -144,6 +144,7 @@ export class AttachmentMachine {
   private stale = false;
   private applied: Cursor | null = null;
   private received: Cursor | null = null;
+  private replayThrough: Cursor | null = null;
   private acked: Cursor | null = null;
   private ackScheduled = false;
   private readonly queue = new EventQueue();
@@ -163,7 +164,13 @@ export class AttachmentMachine {
     this.effects = [];
     this.step(input);
     this.advance();
+    this.maybeResume();
     return this.effects;
+  }
+
+  /** True while `cursor` is at or before the resumed attachment's `replay_through`. */
+  isReplay(cursor: Cursor): boolean {
+    return this.replayThrough !== null && !cursorAfter(cursor, this.replayThrough);
   }
 
   view(): PanelView {
@@ -192,6 +199,16 @@ export class AttachmentMachine {
       canTakeInput: this.phase === 'live' && this.connected && !isOwner,
       canReattach: this.phase === 'ended' && this.status?.kind === 'lost',
     };
+  }
+
+  private resumable(): boolean {
+    return (
+      this.instance !== null &&
+      !this.stale &&
+      this.applied !== null &&
+      this.attachment !== null &&
+      this.applied.attachment === this.attachment
+    );
   }
 
   private isOwner(): boolean {
@@ -223,12 +240,13 @@ export class AttachmentMachine {
       case 'timer':
         if (input.timer === 'ack') this.onAckTimer();
         return;
+      case 'reattach':
+        return this.reattach();
       case 'userInput':
       case 'automaticReply':
       case 'focusReport':
       case 'domFocus':
       case 'takeInput':
-      case 'reattach':
         return;
     }
   }
@@ -264,6 +282,12 @@ export class AttachmentMachine {
           this.phase = 'detaching';
         }
         return;
+      case 'resuming':
+        this.dropInstance();
+        this.attachment = null;
+        this.detachWhenNamed = true;
+        this.phase = 'detaching';
+        return;
       case 'live':
         this.dropInstance();
         if (this.attachment !== null) this.startDetach(this.attachment);
@@ -274,7 +298,6 @@ export class AttachmentMachine {
         this.phase = 'hidden';
         return;
       case 'hidden':
-      case 'resuming':
       case 'detaching':
         return;
     }
@@ -296,6 +319,7 @@ export class AttachmentMachine {
         if (event.request !== null) this.onRequestAnswerFailed(event.code);
         return;
       case 'resumed':
+        return this.onResumed(event.attachment, event.replay_through);
       case 'ownership':
         return;
       default:
@@ -306,7 +330,7 @@ export class AttachmentMachine {
   private onConnected(): void {
     if (this.connected) return;
     this.connected = true;
-    if (this.phase === 'waiting') this.attach();
+    if (this.phase === 'waiting' && !this.resumable()) this.attach();
   }
 
   private onDisconnected(): void {
@@ -324,6 +348,7 @@ export class AttachmentMachine {
         this.applying = null;
         this.phase = 'waiting';
         return;
+      case 'resuming':
       case 'live':
         this.phase = 'waiting';
         return;
@@ -334,7 +359,6 @@ export class AttachmentMachine {
         return;
       case 'hidden':
       case 'waiting':
-      case 'resuming':
       case 'ended':
         return;
     }
@@ -348,10 +372,21 @@ export class AttachmentMachine {
     }
   }
 
+  private onResumed(attachment: DecimalU64, replayThrough: Cursor | null): void {
+    if (this.phase === 'resuming' && attachment === this.attachment) {
+      this.phase = 'live';
+      this.replayThrough = replayThrough;
+    } else if (this.phase === 'detaching' && this.detachWhenNamed) {
+      this.startDetach(attachment);
+    }
+  }
+
   /** `gap{request}` and `error{request}`, which answer an attach or a resume. */
   private onRequestAnswerFailed(code?: string): void {
     if (this.phase === 'detaching' && this.detachWhenNamed) {
       this.afterDetach();
+    } else if (this.phase === 'resuming') {
+      this.finish();
     } else if (this.phase === 'attaching' && this.attachment === null && code !== undefined) {
       this.dropInstance();
       this.status = { kind: 'error', code };
@@ -366,12 +401,15 @@ export class AttachmentMachine {
   }
 
   private onSendFailed(op: 'attach' | 'resume', notConnected: boolean): void {
-    if (op !== 'attach') return;
-    const waitingForAttach = this.phase === 'attaching' && this.attachment === null;
+    const waitingForAttach =
+      op === 'attach' && this.phase === 'attaching' && this.attachment === null;
+    const waitingForResume = op === 'resume' && this.phase === 'resuming';
     const detachingUnnamed = this.phase === 'detaching' && this.detachWhenNamed;
-    if (!waitingForAttach && !detachingUnnamed) return;
+    if (!waitingForAttach && !waitingForResume && !detachingUnnamed) return;
     if (notConnected) {
       this.onDisconnected();
+    } else if (waitingForResume) {
+      this.finish();
     } else if (waitingForAttach) {
       this.dropInstance();
       this.status = { kind: 'error', code: 'send_failed' };
@@ -405,6 +443,9 @@ export class AttachmentMachine {
   private markApplied(cursor: Cursor): void {
     this.applying = null;
     this.applied = cursor;
+    if (this.replayThrough !== null && !cursorAfter(this.replayThrough, cursor)) {
+      this.replayThrough = null;
+    }
     if (this.connected && this.phase === 'live' && !this.ackScheduled) {
       this.effects.push({ kind: 'startTimer', timer: 'ack', ms: ACK_INTERVAL_MS });
       this.ackScheduled = true;
@@ -430,6 +471,10 @@ export class AttachmentMachine {
     while (this.applying === null) {
       const event = this.queue.shift();
       if (event === undefined) return;
+      if (event.type === 'closed' || event.type === 'lost') {
+        this.end(event);
+        return;
+      }
       if (event.type !== 'started') {
         const instance = this.instance;
         if (instance === null || this.stale || event.cursor.epoch !== instance.epoch) continue;
@@ -465,11 +510,48 @@ export class AttachmentMachine {
         case 'facts':
           this.markApplied(event.cursor);
           break;
-        case 'closed':
-        case 'lost':
-          break;
       }
     }
+  }
+
+  /** Resumes from the applied cursor once the queue has drained. */
+  private maybeResume(): void {
+    if (
+      this.phase !== 'waiting' ||
+      !this.visible ||
+      !this.connected ||
+      !this.resumable() ||
+      this.applying !== null ||
+      this.queue.length > 0 ||
+      this.applied === null
+    ) {
+      return;
+    }
+    this.effects.push({ kind: 'resume', cursor: this.applied });
+    this.phase = 'resuming';
+    this.received = this.applied;
+    this.replayThrough = null;
+  }
+
+  /** The attachment ended on the daemon: ack at once, and keep the screen. */
+  private end(event: StreamEvent & { type: 'closed' | 'lost' }): void {
+    this.cancelTimer('ack');
+    this.ackScheduled = false;
+    this.effects.push({ kind: 'ack', cursor: event.cursor });
+    this.status =
+      event.type === 'lost'
+        ? { kind: 'lost' }
+        : { kind: event.reason === 'exited' ? 'exited' : 'closed' };
+    this.resetStream();
+    this.attachment = null;
+    this.phase = 'ended';
+  }
+
+  private reattach(): void {
+    if (this.phase !== 'ended' || this.status?.kind !== 'lost') return;
+    this.status = null;
+    if (this.connected) this.attach();
+    else this.phase = 'waiting';
   }
 
   private attach(): void {
@@ -532,6 +614,7 @@ export class AttachmentMachine {
   private resetStream(): void {
     this.applied = null;
     this.received = null;
+    this.replayThrough = null;
     this.acked = null;
     this.ownership = null;
     this.queue.clear();
