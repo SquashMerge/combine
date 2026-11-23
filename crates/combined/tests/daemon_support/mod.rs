@@ -135,6 +135,57 @@ pub fn default_herdr_core_sockets(env: &DaemonEnv) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Panics unless `path` has the shape of an isolated lane's herdr-core socket,
+/// `/tmp/chc.*/run/herdr-core/*.sock` (optionally under `/private`), and is not herdr-core's
+/// default socket. Distinct from [`refuse_default_herdr_core`], which checks the scratch dir.
+pub fn refuse_non_lane_herdr_core_socket(path: &Path) {
+    assert!(path.is_absolute(), "{} is not absolute", path.display());
+    assert!(
+        !path.components().any(|part| part == Component::ParentDir),
+        "{} has a `..` component",
+        path.display()
+    );
+    let parts: Vec<&std::ffi::OsStr> = path
+        .components()
+        .filter(|part| *part != Component::RootDir)
+        .map(Component::as_os_str)
+        .collect();
+    let parts = match parts.first() {
+        Some(first) if *first == "private" => &parts[1..],
+        _ => &parts[..],
+    };
+    let lane_shape = match parts {
+        [tmp, root, run, core, socket] => {
+            let (root, socket) = (root.to_string_lossy(), socket.to_string_lossy());
+            *tmp == "tmp"
+                && root.starts_with("chc.")
+                && *run == "run"
+                && *core == "herdr-core"
+                && socket.ends_with(".sock")
+        }
+        _ => false,
+    };
+    assert!(
+        lane_shape,
+        "{} is not an isolated lane's herdr-core socket (/tmp/chc.*/run/herdr-core/*.sock)",
+        path.display()
+    );
+    for default in default_herdr_core_sockets(&DaemonEnv::from_process()) {
+        assert!(
+            path != default,
+            "{} is herdr-core's default socket",
+            path.display()
+        );
+    }
+    if let Some(home) = DaemonEnv::from_process().home {
+        assert!(
+            !path.starts_with(home.join(".local/state/herdr-core")),
+            "{} is under herdr-core's default state dir",
+            path.display()
+        );
+    }
+}
+
 /// The three paths a daemon needs, all inside the scratch dir.
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {
@@ -143,6 +194,8 @@ pub struct DaemonPaths {
     pub data_dir: PathBuf,
     pub socket: PathBuf,
     pub herdr_core_socket: PathBuf,
+    /// Whether `herdr_core_socket` is an isolated lane's socket, outside the scratch dir.
+    pub lane_herdr_core: bool,
 }
 
 impl DaemonPaths {
@@ -154,6 +207,7 @@ impl DaemonPaths {
             socket: data_dir.join("combined.sock"),
             data_dir,
             herdr_core_socket: base.join("no-hc.sock"),
+            lane_herdr_core: false,
         }
     }
 
@@ -176,6 +230,16 @@ impl DaemonPaths {
     ) -> DaemonPaths {
         refuse_default_herdr_core(&socket, scratch);
         self.herdr_core_socket = socket;
+        self.lane_herdr_core = false;
+        self
+    }
+
+    /// Points the daemon at an isolated lane's herdr-core socket, which is outside the scratch
+    /// dir.
+    pub fn with_lane_herdr_core_socket(mut self, lane_socket: PathBuf) -> DaemonPaths {
+        refuse_non_lane_herdr_core_socket(&lane_socket);
+        self.herdr_core_socket = lane_socket;
+        self.lane_herdr_core = true;
         self
     }
 }
@@ -183,8 +247,13 @@ impl DaemonPaths {
 /// Writes `<scratch>/<name>/daemon.json` with every field set, and returns its path. Two
 /// daemons with different names get different files.
 pub fn write_daemon_config(scratch: &ShortTempDir, paths: &DaemonPaths, backend: &str) -> PathBuf {
-    for path in [&paths.data_dir, &paths.socket, &paths.herdr_core_socket] {
+    for path in [&paths.data_dir, &paths.socket] {
         refuse_default_herdr_core(path, scratch);
+    }
+    if paths.lane_herdr_core {
+        refuse_non_lane_herdr_core_socket(&paths.herdr_core_socket);
+    } else {
+        refuse_default_herdr_core(&paths.herdr_core_socket, scratch);
     }
     let dir = scratch.path().join(&paths.name);
     fs::create_dir_all(&dir).unwrap();
@@ -358,13 +427,24 @@ pub fn fake_server(
     start_server(scratch, name, backend, host, options, None)
 }
 
+/// Starts a server in this process on any backend, such as a test's decorator over the fake.
+pub fn server_with_backend(
+    scratch: &ShortTempDir,
+    name: &str,
+    backend: Arc<dyn TerminalBackend>,
+    host: &str,
+    options: ServeOptions,
+) -> ServerHandle {
+    start_server(scratch, name, backend, host, options, None)
+}
+
 /// A store and timing for [`start_server`] to use instead of the defaults.
 type Layouts = (Arc<dyn FileStore>, LayoutTiming);
 
 fn start_server(
     scratch: &ShortTempDir,
     name: &str,
-    backend: Arc<FakeBackend>,
+    backend: Arc<dyn TerminalBackend>,
     host: &str,
     options: ServeOptions,
     layouts: Option<Layouts>,
@@ -388,7 +468,6 @@ fn start_server(
     rpc::spawn(
         socket,
         move || {
-            let backend: Arc<dyn TerminalBackend> = backend;
             // Each test serves its own data dir, so no other writer needs the lock.
             drop(data_dir);
             match layouts {
@@ -446,7 +525,7 @@ pub fn layout_server(
     let server = start_server(
         scratch,
         name,
-        Arc::clone(&backend),
+        backend.clone(),
         "host-a",
         ServeOptions::default(),
         Some((store, timing)),
@@ -593,6 +672,17 @@ impl DaemonProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    /// Sends the daemon SIGTERM, as a service manager would. It does not wait.
+    pub fn terminate(&mut self) {
+        assert!(self.is_running(), "the daemon has already exited");
+        let status = Command::new("/bin/kill")
+            .args(["-TERM", "--"])
+            .arg(self.child.id().to_string())
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -TERM failed: {status}");
+    }
 }
 
 impl Drop for DaemonProcess {
@@ -682,6 +772,11 @@ impl BridgeClient {
             Err(RecvTimeoutError::Timeout) => panic!("no message within {RECV_TIMEOUT:?}"),
             Err(RecvTimeoutError::Disconnected) => panic!("the bridge closed its stdout"),
         }
+    }
+
+    /// The next message, or `None` if none arrives within `wait` or the bridge closed.
+    pub fn recv_within(&self, wait: Duration) -> Option<DaemonMessage> {
+        self.frames.recv_timeout(wait).ok()
     }
 
     /// Closes the bridge's stdin: the bridge half-closes the socket.

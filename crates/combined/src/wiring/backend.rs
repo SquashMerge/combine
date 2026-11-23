@@ -8,6 +8,7 @@ use futures::future::BoxFuture;
 
 use super::config::HerdrCoreSource;
 use super::StartError;
+use crate::adapters::herdr_core::{HerdrCoreBackend, HerdrCoreConfig};
 use crate::ports::TerminalBackend;
 use crate::rpc::socket::MAX_SOCKET_PATH;
 
@@ -24,9 +25,19 @@ pub enum BackendChoice {
 pub type HerdrCoreFactory =
     fn(PathBuf) -> BoxFuture<'static, Result<Arc<dyn TerminalBackend>, String>>;
 
-/// The herdr-core adapter's constructor. `None` until `adapters::herdr_core` (S3, #3) is wired
-/// in; #23, or whichever of S3 and S4 merges second, sets it. Nothing else changes.
-pub const HERDR_CORE: Option<HerdrCoreFactory> = None;
+/// The herdr-core adapter's constructor (`adapters::herdr_core`, S3), wired in by #23.
+pub const HERDR_CORE: Option<HerdrCoreFactory> = Some(herdr_core_factory);
+
+fn herdr_core_factory(
+    socket: PathBuf,
+) -> BoxFuture<'static, Result<Arc<dyn TerminalBackend>, String>> {
+    Box::pin(async move {
+        HerdrCoreBackend::connect(HerdrCoreConfig::new(socket))
+            .await
+            .map(|backend| Arc::new(backend) as Arc<dyn TerminalBackend>)
+            .map_err(|error| error.to_string())
+    })
+}
 
 pub async fn build(choice: &BackendChoice) -> Result<Arc<dyn TerminalBackend>, StartError> {
     match choice {
@@ -40,9 +51,7 @@ pub async fn build(choice: &BackendChoice) -> Result<Arc<dyn TerminalBackend>, S
                     ))
                 }),
                 None => Err(StartError::Backend(
-                    "this build of combined has no herdr-core adapter \
-                     (crates/combined/src/adapters/herdr_core, #3); #23 wires it in"
-                        .to_string(),
+                    "combined was built without the herdr-core adapter".to_string(),
                 )),
             }
         }
