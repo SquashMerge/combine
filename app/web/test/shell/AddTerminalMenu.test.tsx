@@ -155,6 +155,17 @@ describe('AddTerminalMenu', () => {
     expect(port.listCalls()).toHaveLength(2);
   });
 
+  it('escape_closes_a_menu_opened_with_the_mouse', async () => {
+    const port = new MemorySpawnPort();
+    mount(port);
+    await open();
+    expect(menu()).not.toBeNull();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(menu()).toBeNull();
+    expect(button().getAttribute('aria-expanded')).toBe('false');
+    expect(port.spawnCalls()).toHaveLength(0);
+  });
+
   it('shell_click_sends_shell_source', async () => {
     const port = new MemorySpawnPort();
     mount(port);
@@ -221,6 +232,20 @@ describe('AddTerminalMenu', () => {
     expect(menu()).not.toBeNull();
     expect(onSpawned).not.toHaveBeenCalled();
     for (const item of items()) expect((item as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('space_change_drops_stale_spawn_reply', async () => {
+    const port = new MemorySpawnPort();
+    port.deferSpawn();
+    const { onSpawned, rerender } = mount(port);
+    await open();
+    await click(/^Shell/);
+    rerender(beta);
+    await act(async () => {
+      port.resolveSpawn('hc:t5' as TermId);
+    });
+    expect(onSpawned).not.toHaveBeenCalled();
+    expect(menu()).toBeNull();
   });
 
   it('disabled_when_host_disconnected', () => {

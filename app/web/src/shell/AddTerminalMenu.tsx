@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
 import type { SpawnPort } from '../ipc/port';
 import type { HostsSnapshot } from '../model/hosts';
 import type { TermId } from '../model/ids';
@@ -48,6 +47,19 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
     setSpawnError(null);
     setListing({ kind: 'loading' });
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!showMenu) return;
+    function onKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showMenu]);
 
   function close() {
     generation.current += 1;
@@ -100,19 +112,13 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
     );
   }
 
-  function onKeyDown(event: KeyboardEvent) {
-    if (event.key !== 'Escape' || !showMenu) return;
-    event.preventDefault();
-    close();
-  }
-
   const title =
     disabled && selected !== null && host !== undefined ? `${host.name} isn't connected` : undefined;
   const list = listing.kind === 'loaded' ? listing.list : null;
   const itemLabel = (key: string, label: string) => (starting === key ? 'Starting…' : label);
 
   return (
-    <div className="add-terminal" onKeyDown={onKeyDown}>
+    <div className="add-terminal">
       <button
         type="button"
         aria-haspopup="menu"
