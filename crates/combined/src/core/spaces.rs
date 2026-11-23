@@ -17,23 +17,33 @@ struct Placement {
 /// Assigns each terminal to a space the first time it is seen, and never moves it.
 pub struct Spaces {
     probe: Box<dyn GitProbe>,
-    placements: BTreeMap<String, Placement>,
+    placements: Vec<Placement>,
 }
 
 impl Spaces {
     pub fn new(probe: Box<dyn GitProbe>) -> Spaces {
         Spaces {
             probe,
-            placements: BTreeMap::new(),
+            placements: Vec::new(),
         }
     }
 
-    /// Assigns terminals not seen before and removes those missing from `list`.
+    /// Rebuilds the placements in `list`'s order. A terminal seen before keeps its space, a new
+    /// one is located, and the first of any duplicate IDs wins. Terminals missing from `list`
+    /// are dropped.
     pub fn apply_list(&mut self, list: &[TermInfo]) {
-        self.placements
-            .retain(|id, _| list.iter().any(|info| info.id.0 == *id));
+        let mut previous = std::mem::take(&mut self.placements);
         for info in list {
-            self.assign(info);
+            if self.contains_terminal(&info.id) {
+                continue;
+            }
+            match previous
+                .iter()
+                .position(|placement| placement.terminal == info.id)
+            {
+                Some(index) => self.placements.push(previous.swap_remove(index)),
+                None => self.place(info),
+            }
         }
     }
 
@@ -43,20 +53,31 @@ impl Spaces {
         match event {
             TermEvent::Created(info) | TermEvent::Changed(info) => self.assign(info),
             TermEvent::Lost { id } => {
-                self.placements.remove(&id.0);
+                self.placements
+                    .retain(|placement| placement.terminal != *id);
             }
             TermEvent::Exited { .. } | TermEvent::Restarted { .. } => {}
         }
     }
 
     pub fn space_of(&self, id: &TermId) -> Option<&SpaceId> {
-        self.placements.get(&id.0).map(|placement| &placement.space)
+        self.placements
+            .iter()
+            .find(|placement| placement.terminal == *id)
+            .map(|placement| &placement.space)
     }
 
-    /// The spaces that hold terminals, sorted by ID.
+    /// Whether any terminal is placed in `space`.
+    pub fn contains(&self, space: &SpaceId) -> bool {
+        self.placements
+            .iter()
+            .any(|placement| placement.space == *space)
+    }
+
+    /// The spaces that hold terminals, sorted by ID. Each space's terminals keep list order.
     pub fn spaces(&self) -> Vec<Space> {
         let mut grouped: BTreeMap<&SpaceId, Space> = BTreeMap::new();
-        for placement in self.placements.values() {
+        for placement in self.placements.iter() {
             grouped
                 .entry(&placement.space)
                 .or_insert_with(|| Space {
@@ -71,18 +92,24 @@ impl Spaces {
     }
 
     fn assign(&mut self, info: &TermInfo) {
-        if self.placements.contains_key(&info.id.0) {
-            return;
+        if !self.contains_terminal(&info.id) {
+            self.place(info);
         }
+    }
+
+    fn contains_terminal(&self, id: &TermId) -> bool {
+        self.placements
+            .iter()
+            .any(|placement| placement.terminal == *id)
+    }
+
+    fn place(&mut self, info: &TermInfo) {
         let (space, kind) = self.locate(&info.cwd);
-        self.placements.insert(
-            info.id.0.clone(),
-            Placement {
-                terminal: info.id.clone(),
-                space,
-                kind,
-            },
-        );
+        self.placements.push(Placement {
+            terminal: info.id.clone(),
+            space,
+            kind,
+        });
     }
 
     /// Walks the directory's lexical ancestors, nearest first, for a `.git` entry.

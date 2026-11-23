@@ -8,7 +8,7 @@ use combine_protocol::{
     TerminalState, WatchTerminals,
 };
 use combined::core::{Core, CoreConfig, TerminalList};
-use combined::model::{Millis, TermEvent, TermInfo, TermState};
+use combined::model::{Millis, SpaceId, TermEvent, TermInfo, TermState};
 use combined::ports::Capabilities;
 use common::FakeGitProbe;
 
@@ -43,7 +43,7 @@ fn ids(list: &TerminalList) -> Vec<String> {
 }
 
 #[test]
-fn list_then_snapshot_reports_terminals_and_spaces_sorted() {
+fn list_then_snapshot_reports_terminals_and_spaces_in_list_order() {
     let mut list = list();
     list.apply_list(&[
         info("fake:b", "/work/repo/src"),
@@ -52,7 +52,7 @@ fn list_then_snapshot_reports_terminals_and_spaces_sorted() {
     ]);
     let snapshot = list.snapshot(Some(RequestId(7)));
     assert_eq!(snapshot.request, Some(RequestId(7)));
-    assert_eq!(ids(&list), ["fake:a", "fake:b", "fake:c"]);
+    assert_eq!(ids(&list), ["fake:b", "fake:a", "fake:c"]);
     assert_eq!(
         snapshot.spaces,
         [
@@ -64,12 +64,139 @@ fn list_then_snapshot_reports_terminals_and_spaces_sorted() {
             SpaceInfo {
                 id: "/work/repo".to_string(),
                 kind: SpaceKind::Repository,
-                terminals: vec![id("fake:a"), id("fake:b")],
+                terminals: vec![id("fake:b"), id("fake:a")],
             },
         ]
     );
     assert_eq!(snapshot.terminals[0].state, TerminalState::Running);
     assert_eq!(snapshot.terminals[0].exit_code, None);
+}
+
+#[test]
+fn order_is_not_id_order() {
+    let mut list = list();
+    list.apply_list(&[
+        info("fake:t2", "/work/repo"),
+        info("fake:t10", "/work/repo"),
+        info("fake:t1", "/work/repo"),
+    ]);
+    assert_eq!(ids(&list), ["fake:t2", "fake:t10", "fake:t1"]);
+    assert_eq!(
+        list.snapshot(None).spaces[0].terminals,
+        [id("fake:t2"), id("fake:t10"), id("fake:t1")]
+    );
+}
+
+#[test]
+fn created_for_known_id_replaces_in_place() {
+    let mut list = list();
+    list.apply_list(&[
+        info("fake:b", "/work/repo"),
+        info("fake:a", "/work/repo"),
+        info("fake:c", "/work/repo"),
+    ]);
+    let mut again = info("fake:a", "/work/repo");
+    again.cols = 100;
+    list.apply_event(&TermEvent::Created(again));
+    let snapshot = list.snapshot(None);
+    assert_eq!(ids(&list), ["fake:b", "fake:a", "fake:c"]);
+    assert_eq!(snapshot.terminals[1].cols, 100);
+    assert_eq!(
+        snapshot.spaces[0].terminals,
+        [id("fake:b"), id("fake:a"), id("fake:c")]
+    );
+}
+
+#[test]
+fn changed_keeps_place_and_unknown_changed_is_appended() {
+    let mut list = list();
+    list.apply_list(&[info("fake:b", "/work/repo"), info("fake:a", "/work/repo")]);
+    let mut resized = info("fake:b", "/work/repo");
+    resized.cols = 90;
+    list.apply_event(&TermEvent::Changed(resized));
+    list.apply_event(&TermEvent::Changed(info("fake:0", "/work/repo")));
+    let snapshot = list.snapshot(None);
+    assert_eq!(ids(&list), ["fake:b", "fake:a", "fake:0"]);
+    assert_eq!(snapshot.terminals[0].cols, 90);
+    assert_eq!(
+        snapshot.spaces[0].terminals,
+        [id("fake:b"), id("fake:a"), id("fake:0")]
+    );
+}
+
+#[test]
+fn exited_keeps_place_lost_removes_restarted_changes_nothing() {
+    let mut list = list();
+    list.apply_list(&[
+        info("fake:c", "/work/repo"),
+        info("fake:a", "/work/repo"),
+        info("fake:b", "/work/repo"),
+    ]);
+    list.take_changed();
+    list.apply_event(&TermEvent::Exited {
+        id: id("fake:a"),
+        exit_code: Some(1),
+    });
+    assert_eq!(ids(&list), ["fake:c", "fake:a", "fake:b"]);
+    assert_eq!(
+        list.snapshot(None).terminals[1].state,
+        TerminalState::Exited
+    );
+    assert!(list.take_changed());
+    list.apply_event(&TermEvent::Restarted { id: id("fake:c") });
+    assert!(!list.take_changed());
+    assert_eq!(ids(&list), ["fake:c", "fake:a", "fake:b"]);
+    list.apply_event(&TermEvent::Lost { id: id("fake:a") });
+    assert_eq!(ids(&list), ["fake:c", "fake:b"]);
+    assert_eq!(
+        list.snapshot(None).spaces[0].terminals,
+        [id("fake:c"), id("fake:b")]
+    );
+}
+
+#[test]
+fn recreated_after_lost_is_appended() {
+    let mut list = list();
+    list.apply_list(&[info("fake:b", "/work/repo"), info("fake:a", "/work/repo")]);
+    list.apply_event(&TermEvent::Lost { id: id("fake:b") });
+    list.apply_event(&TermEvent::Created(info("fake:b", "/work/repo")));
+    assert_eq!(ids(&list), ["fake:a", "fake:b"]);
+    assert_eq!(
+        list.snapshot(None).spaces[0].terminals,
+        [id("fake:a"), id("fake:b")]
+    );
+}
+
+#[test]
+fn duplicate_ids_in_a_list_keep_the_first() {
+    let mut list = list();
+    let mut second = info("fake:a", "/tmp/scratch");
+    second.cols = 111;
+    list.apply_list(&[
+        info("fake:a", "/work/repo"),
+        info("fake:b", "/work/repo"),
+        second,
+    ]);
+    let snapshot = list.snapshot(None);
+    assert_eq!(ids(&list), ["fake:a", "fake:b"]);
+    assert_eq!(snapshot.terminals[0].cols, 80);
+    assert_eq!(snapshot.spaces.len(), 1);
+    assert_eq!(snapshot.spaces[0].id, "/work/repo");
+    assert_eq!(snapshot.spaces[0].terminals, [id("fake:a"), id("fake:b")]);
+}
+
+#[test]
+fn space_listed_tracks_placements() {
+    let mut list = list();
+    let repo = SpaceId("/work/repo".to_string());
+    assert!(!list.space_listed(&repo));
+    list.apply_list(&[info("fake:1", "/work/repo/src")]);
+    assert!(list.space_listed(&repo));
+    assert!(!list.space_listed(&SpaceId("/elsewhere".to_string())));
+    list.apply_event(&TermEvent::Lost { id: id("fake:1") });
+    assert!(!list.space_listed(&repo));
+    list.apply_event(&TermEvent::Created(info("fake:2", "/work/repo")));
+    assert!(list.space_listed(&repo));
 }
 
 #[test]
