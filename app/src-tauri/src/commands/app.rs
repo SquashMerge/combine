@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
-use super::terminals::TauriTerminalSink;
+use super::terminals::{self, TauriTerminalSink};
 use super::{hosts, layout, state};
 use crate::hosts::service::{HostsService, ServiceDeps};
 use crate::state::service::ClientStates;
@@ -57,7 +57,19 @@ pub fn run() {
             layout::mutate_layout,
             state::client_state,
             state::set_client_space_state,
-            state::set_last_space
+            state::set_last_space,
+            terminals::terminal_open_stream,
+            terminals::terminal_close_stream,
+            terminals::terminal_attach,
+            terminals::terminal_resume,
+            terminals::terminal_detach,
+            terminals::terminal_ack,
+            terminals::terminal_resize,
+            terminals::terminal_focus,
+            terminals::terminal_set_display,
+            terminals::terminal_request_ownership,
+            terminals::terminal_input,
+            terminals::terminal_automatic_reply
         ])
         .build(tauri::generate_context!())
         .expect("Combine failed to start")

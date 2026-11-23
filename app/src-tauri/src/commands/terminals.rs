@@ -1,16 +1,28 @@
-//! The terminal panel event sink. Every message the attachment router delivers to a panel
-//! stream goes down that stream's channel: output as a raw binary frame, everything else as a
-//! JSON event. Every protocol counter in the JSON crosses as a decimal string.
+//! The terminal panel event sink and the terminal commands. Every message the attachment router
+//! delivers to a panel stream goes down that stream's channel: output as a raw binary frame,
+//! everything else as a JSON event. Every protocol counter crosses as a decimal string, in the
+//! events, in the command arguments and in the raw-body headers. Every command goes through
+//! `Attachments`; none writes to the outbound queue directly.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use combine_protocol::{CloseReason, Cursor, DaemonMessage, Data, Display, ErrorCode, Fidelity};
+use combine_protocol::{
+    Ack, AttachRequestOptions, AttachmentId, AutomaticReply, ClientMessage, CloseReason, Cursor,
+    DaemonMessage, Data, Detach, Display, Epoch, ErrorCode, Fidelity, Focus, HostId, Input,
+    OwnershipGeneration, RequestOwnership, Resize, SetDisplay, TermId,
+};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tauri::ipc::{Channel, InvokeResponseBody};
+use serde_json::Value;
+use tauri::http::HeaderMap;
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
+use tauri::State;
 
-use crate::hosts::attachments::{StreamDelivery, StreamId, TerminalSink};
+use crate::hosts::attachments::{ForwardError, StreamDelivery, StreamId, TerminalSink};
 use crate::hosts::model::{DecimalU64, IpcCursor};
+use crate::hosts::service::HostsService;
 
 /// The bytes before the payload of a data frame: attachment, epoch and seq, each a big-endian
 /// `u64`.
@@ -165,14 +177,34 @@ fn body(delivery: &StreamDelivery<'_>) -> Option<InvokeResponseBody> {
 }
 
 /// Sends the router's deliveries down the channel each panel stream opened.
-#[derive(Default)]
 pub struct TauriTerminalSink {
+    next: AtomicU64,
     channels: Mutex<BTreeMap<u64, Channel<InvokeResponseBody>>>,
+}
+
+impl Default for TauriTerminalSink {
+    fn default() -> Self {
+        TauriTerminalSink {
+            next: AtomicU64::new(1),
+            channels: Mutex::default(),
+        }
+    }
 }
 
 impl TauriTerminalSink {
     fn channels(&self) -> MutexGuard<'_, BTreeMap<u64, Channel<InvokeResponseBody>>> {
         self.channels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Names a new panel stream and keeps its channel.
+    fn register(&self, channel: Channel<InvokeResponseBody>) -> StreamId {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.channels().insert(id, channel);
+        StreamId(id)
+    }
+
+    fn unregister(&self, stream: StreamId) {
+        self.channels().remove(&stream.0);
     }
 
     /// Drops every channel: the webview that held them reloaded or closed.
@@ -190,6 +222,250 @@ impl TerminalSink for TauriTerminalSink {
             let _ = channel.send(body);
         }
     }
+}
+
+const NOT_CONNECTED: &str = "not connected";
+const UNKNOWN_STREAM: &str = "unknown stream";
+const UNKNOWN_ATTACHMENT: &str = "unknown attachment";
+const TOO_LARGE: &str = "too large";
+const MALFORMED: &str = "malformed";
+
+const STREAM_HEADER: &str = "Combine-Stream";
+const ATTACHMENT_HEADER: &str = "Combine-Attachment";
+const EPOCH_HEADER: &str = "Combine-Epoch";
+const OWNERSHIP_GENERATION_HEADER: &str = "Combine-Ownership-Generation";
+
+fn forward_error(error: ForwardError) -> String {
+    match error {
+        ForwardError::NotConnected => NOT_CONNECTED,
+        ForwardError::UnknownStream => UNKNOWN_STREAM,
+        ForwardError::UnknownAttachment => UNKNOWN_ATTACHMENT,
+        ForwardError::TooLarge => TOO_LARGE,
+        ForwardError::Invalid => MALFORMED,
+    }
+    .to_string()
+}
+
+fn parse_decimal(text: &str) -> Result<u64, String> {
+    serde_json::from_value::<DecimalU64>(Value::String(text.to_string()))
+        .map(|value| value.0)
+        .map_err(|_| MALFORMED.to_string())
+}
+
+fn stream_id(text: &str) -> Result<StreamId, String> {
+    parse_decimal(text).map(StreamId)
+}
+
+/// A structured argument, read here so that a bad one gets `malformed` rather than the IPC
+/// layer's own text.
+fn structured<T: DeserializeOwned>(value: Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|_| MALFORMED.to_string())
+}
+
+fn header(headers: &HeaderMap, name: &str) -> Result<u64, String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| MALFORMED.to_string())
+        .and_then(parse_decimal)
+}
+
+fn raw_body(body: &InvokeBody) -> Result<Vec<u8>, String> {
+    match body {
+        InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        InvokeBody::Json(_) => Err(MALFORMED.to_string()),
+    }
+}
+
+/// The stream and the message of a raw-body `terminal_input` request.
+fn input_message(
+    headers: &HeaderMap,
+    body: &InvokeBody,
+) -> Result<(StreamId, ClientMessage), String> {
+    let stream = StreamId(header(headers, STREAM_HEADER)?);
+    let attachment = AttachmentId(header(headers, ATTACHMENT_HEADER)?);
+    let bytes = raw_body(body)?;
+    Ok((stream, ClientMessage::Input(Input { attachment, bytes })))
+}
+
+/// The stream and the message of a raw-body `terminal_automatic_reply` request.
+fn automatic_reply_message(
+    headers: &HeaderMap,
+    body: &InvokeBody,
+) -> Result<(StreamId, ClientMessage), String> {
+    let stream = StreamId(header(headers, STREAM_HEADER)?);
+    let reply = AutomaticReply {
+        attachment: AttachmentId(header(headers, ATTACHMENT_HEADER)?),
+        epoch: Epoch(header(headers, EPOCH_HEADER)?),
+        ownership_generation: OwnershipGeneration(header(headers, OWNERSHIP_GENERATION_HEADER)?),
+        bytes: raw_body(body)?,
+    };
+    Ok((stream, ClientMessage::AutomaticReply(reply)))
+}
+
+fn send(service: &HostsService, stream: StreamId, message: ClientMessage) -> Result<(), String> {
+    service
+        .attachments()
+        .forward(&service.outbound(), stream, message)
+        .map_err(forward_error)
+}
+
+/// Opens a panel stream on `host_id` and returns its ID, a decimal string.
+#[tauri::command]
+pub fn terminal_open_stream(
+    service: State<'_, HostsService>,
+    sink: State<'_, Arc<TauriTerminalSink>>,
+    host_id: String,
+    channel: Channel<InvokeResponseBody>,
+) -> String {
+    let stream = sink.register(channel);
+    service.attachments().open_stream(stream, HostId(host_id));
+    stream.0.to_string()
+}
+
+#[tauri::command]
+pub fn terminal_close_stream(
+    service: State<'_, HostsService>,
+    sink: State<'_, Arc<TauriTerminalSink>>,
+    stream: String,
+) -> Result<(), String> {
+    let stream = stream_id(&stream)?;
+    service
+        .attachments()
+        .close_stream(&service.outbound(), stream);
+    sink.unregister(stream);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn terminal_attach(
+    service: State<'_, HostsService>,
+    stream: String,
+    terminal: String,
+    options: Value,
+) -> Result<(), String> {
+    let stream = stream_id(&stream)?;
+    let options: AttachRequestOptions = structured(options)?;
+    service
+        .attachments()
+        .attach(&service.outbound(), stream, TermId(terminal), options)
+        .map_err(forward_error)
+}
+
+#[tauri::command]
+pub fn terminal_resume(
+    service: State<'_, HostsService>,
+    stream: String,
+    cursor: Value,
+) -> Result<(), String> {
+    let stream = stream_id(&stream)?;
+    let cursor: IpcCursor = structured(cursor)?;
+    service
+        .attachments()
+        .resume(&service.outbound(), stream, cursor.into())
+        .map_err(forward_error)
+}
+
+#[tauri::command]
+pub fn terminal_detach(
+    service: State<'_, HostsService>,
+    stream: String,
+    attachment: String,
+) -> Result<(), String> {
+    let message = ClientMessage::Detach(Detach {
+        attachment: AttachmentId(parse_decimal(&attachment)?),
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+#[tauri::command]
+pub fn terminal_ack(
+    service: State<'_, HostsService>,
+    stream: String,
+    cursor: Value,
+) -> Result<(), String> {
+    let cursor: IpcCursor = structured(cursor)?;
+    let message = ClientMessage::Ack(Ack {
+        cursor: cursor.into(),
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+#[tauri::command]
+pub fn terminal_resize(
+    service: State<'_, HostsService>,
+    stream: String,
+    attachment: String,
+    cols: u16,
+    rows: u16,
+    ownership_generation: String,
+) -> Result<(), String> {
+    let message = ClientMessage::Resize(Resize {
+        attachment: AttachmentId(parse_decimal(&attachment)?),
+        cols,
+        rows,
+        ownership_generation: OwnershipGeneration(parse_decimal(&ownership_generation)?),
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+#[tauri::command]
+pub fn terminal_focus(
+    service: State<'_, HostsService>,
+    stream: String,
+    attachment: String,
+) -> Result<(), String> {
+    let message = ClientMessage::Focus(Focus {
+        attachment: AttachmentId(parse_decimal(&attachment)?),
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+#[tauri::command]
+pub fn terminal_set_display(
+    service: State<'_, HostsService>,
+    stream: String,
+    attachment: String,
+    display: Value,
+) -> Result<(), String> {
+    let message = ClientMessage::SetDisplay(SetDisplay {
+        attachment: AttachmentId(parse_decimal(&attachment)?),
+        display: structured::<Display>(display)?,
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+#[tauri::command]
+pub fn terminal_request_ownership(
+    service: State<'_, HostsService>,
+    stream: String,
+    attachment: String,
+) -> Result<(), String> {
+    let message = ClientMessage::RequestOwnership(RequestOwnership {
+        attachment: AttachmentId(parse_decimal(&attachment)?),
+    });
+    send(&service, stream_id(&stream)?, message)
+}
+
+/// Typed input: the body is the bytes, and the headers name the stream and the attachment.
+#[tauri::command]
+pub fn terminal_input(
+    service: State<'_, HostsService>,
+    request: Request<'_>,
+) -> Result<(), String> {
+    let (stream, message) = input_message(request.headers(), request.body())?;
+    send(&service, stream, message)
+}
+
+/// An emulator's reply to a terminal query: the body is the bytes, and the headers name the
+/// stream, the attachment, the epoch and the ownership generation.
+#[tauri::command]
+pub fn terminal_automatic_reply(
+    service: State<'_, HostsService>,
+    request: Request<'_>,
+) -> Result<(), String> {
+    let (stream, message) = automatic_reply_message(request.headers(), request.body())?;
+    send(&service, stream, message)
 }
 
 #[cfg(test)]
@@ -354,5 +630,210 @@ mod tests {
         sink.clear();
         sink.deliver(StreamId(5), StreamDelivery::Connection { connected: false });
         assert!(rx.try_recv().is_err());
+    }
+
+    const MAX: &str = "18446744073709551615";
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                tauri::http::HeaderName::from_bytes(name.as_bytes()).expect("a header name"),
+                tauri::http::HeaderValue::from_str(value).expect("a header value"),
+            );
+        }
+        map
+    }
+
+    fn raw(bytes: &[u8]) -> InvokeBody {
+        InvokeBody::Raw(bytes.to_vec())
+    }
+
+    #[test]
+    fn command_names_match_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../web/test/fixtures/ipc-contract.json"
+        );
+        let text = std::fs::read_to_string(path).expect("fixture is readable");
+        let fixture: Value = serde_json::from_str(&text).expect("fixture is JSON");
+        let commands = &fixture["commands"];
+        let ours = [
+            ("terminalOpenStream", "terminal_open_stream"),
+            ("terminalCloseStream", "terminal_close_stream"),
+            ("terminalAttach", "terminal_attach"),
+            ("terminalResume", "terminal_resume"),
+            ("terminalDetach", "terminal_detach"),
+            ("terminalAck", "terminal_ack"),
+            ("terminalResize", "terminal_resize"),
+            ("terminalFocus", "terminal_focus"),
+            ("terminalSetDisplay", "terminal_set_display"),
+            ("terminalRequestOwnership", "terminal_request_ownership"),
+            ("terminalInput", "terminal_input"),
+            ("terminalAutomaticReply", "terminal_automatic_reply"),
+        ];
+        for (key, name) in ours {
+            assert_eq!(commands[key], name, "{key}");
+        }
+        let terminal_keys = commands
+            .as_object()
+            .expect("commands")
+            .keys()
+            .filter(|key| key.starts_with("terminal"))
+            .count();
+        assert_eq!(terminal_keys, ours.len());
+    }
+
+    #[test]
+    fn stream_ids_start_at_one_and_cross_as_decimal_strings() {
+        let sink = TauriTerminalSink::default();
+        let first = sink.register(Channel::new(|_| Ok(())));
+        let second = sink.register(Channel::new(|_| Ok(())));
+        assert_eq!((first, second), (StreamId(1), StreamId(2)));
+        sink.unregister(first);
+        assert!(!sink.channels().contains_key(&1));
+        assert!(sink.channels().contains_key(&2));
+        assert_eq!(stream_id(&second.0.to_string()), Ok(second));
+        assert_eq!(stream_id(MAX), Ok(StreamId(u64::MAX)));
+    }
+
+    #[test]
+    fn input_dtos_cross_as_decimal_strings() {
+        let cursor: IpcCursor = structured(json!({
+            "attachment": MAX, "epoch": MAX, "seq": "9007199254740993"
+        }))
+        .expect("a cursor");
+        let cursor = Cursor::from(cursor);
+        assert_eq!(
+            (cursor.attachment.0, cursor.epoch.0, cursor.seq.0),
+            (u64::MAX, u64::MAX, 9_007_199_254_740_993)
+        );
+        let number: Result<IpcCursor, _> =
+            structured(json!({ "attachment": 1, "epoch": "1", "seq": "1" }));
+        assert_eq!(number.map(|_| ()), Err("malformed".to_string()));
+
+        let (stream, message) = automatic_reply_message(
+            &headers(&[
+                ("Combine-Stream", MAX),
+                ("Combine-Attachment", MAX),
+                ("Combine-Epoch", "9007199254740993"),
+                ("Combine-Ownership-Generation", "3"),
+            ]),
+            &raw(b"\x1b[0n"),
+        )
+        .expect("a reply");
+        assert_eq!(stream, StreamId(u64::MAX));
+        assert_eq!(
+            message,
+            ClientMessage::AutomaticReply(AutomaticReply {
+                attachment: AttachmentId(u64::MAX),
+                epoch: Epoch(9_007_199_254_740_993),
+                ownership_generation: OwnershipGeneration(3),
+                bytes: b"\x1b[0n".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_decimal_gets_malformed() {
+        for bad in [
+            "",
+            "01",
+            "-1",
+            "+1",
+            " 1",
+            "1.5",
+            "1e3",
+            "18446744073709551616",
+            "x",
+        ] {
+            assert_eq!(parse_decimal(bad), Err("malformed".to_string()), "{bad:?}");
+            assert_eq!(stream_id(bad), Err("malformed".to_string()), "{bad:?}");
+        }
+        assert_eq!(parse_decimal("0"), Ok(0));
+        let bad = headers(&[("Combine-Stream", "1"), ("Combine-Attachment", "01")]);
+        assert_eq!(
+            input_message(&bad, &raw(b"a")).map(|_| ()),
+            Err("malformed".to_string())
+        );
+    }
+
+    #[test]
+    fn input_reads_its_headers_and_raw_body() {
+        let good = headers(&[("Combine-Stream", "7"), ("Combine-Attachment", "9")]);
+        let (stream, message) = input_message(&good, &raw(b"ls\r")).expect("input");
+        assert_eq!(stream, StreamId(7));
+        assert_eq!(
+            message,
+            ClientMessage::Input(Input {
+                attachment: AttachmentId(9),
+                bytes: b"ls\r".to_vec(),
+            })
+        );
+        let missing = headers(&[("Combine-Stream", "7")]);
+        assert_eq!(
+            input_message(&missing, &raw(b"a")).map(|_| ()),
+            Err("malformed".to_string())
+        );
+        assert_eq!(
+            input_message(&good, &InvokeBody::Json(json!([1, 2]))).map(|_| ()),
+            Err("malformed".to_string())
+        );
+    }
+
+    #[test]
+    fn automatic_reply_needs_all_four_headers() {
+        let all = [
+            ("Combine-Stream", "1"),
+            ("Combine-Attachment", "2"),
+            ("Combine-Epoch", "3"),
+            ("Combine-Ownership-Generation", "4"),
+        ];
+        assert!(automatic_reply_message(&headers(&all), &raw(b"r")).is_ok());
+        for skipped in 0..all.len() {
+            let partial: Vec<_> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skipped)
+                .map(|(_, pair)| *pair)
+                .collect();
+            assert_eq!(
+                automatic_reply_message(&headers(&partial), &raw(b"r")).map(|_| ()),
+                Err("malformed".to_string()),
+                "without {}",
+                all[skipped].0
+            );
+        }
+    }
+
+    #[test]
+    fn errors_use_the_documented_strings() {
+        let texts = [
+            (ForwardError::NotConnected, "not connected"),
+            (ForwardError::UnknownStream, "unknown stream"),
+            (ForwardError::UnknownAttachment, "unknown attachment"),
+            (ForwardError::TooLarge, "too large"),
+            (ForwardError::Invalid, "malformed"),
+        ];
+        for (error, text) in texts {
+            assert_eq!(forward_error(error), text);
+        }
+    }
+
+    #[test]
+    fn display_and_options_deserialize_from_the_web_shape() {
+        let display = json!({
+            "foreground": "#ffffff", "background": "#000000", "cursor_color": "#ff0000",
+            "cell_width": 8, "cell_height": 16
+        });
+        assert!(structured::<Display>(display.clone()).is_ok());
+        let options = json!({
+            "cols": 80, "rows": 24, "display": display, "observe": false, "history": 100
+        });
+        assert!(structured::<AttachRequestOptions>(options).is_ok());
+        assert_eq!(
+            structured::<Display>(json!({ "foreground": 1 })).map(|_| ()),
+            Err("malformed".to_string())
+        );
     }
 }
