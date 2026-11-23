@@ -112,15 +112,12 @@ impl RouterState {
             let mut finished = Vec::new();
             for (attachment, route) in state.routes.iter_mut().filter(|(_, r)| owned(&r.target)) {
                 route.target = Target::Orphan;
-                if route.detached {
-                    continue;
-                }
                 if let Some(cursor) = route.final_event {
                     // The final event was delivered but never acked. The ack finishes the
-                    // attachment on the daemon, and a detach would not.
+                    // attachment on the daemon, and a detach would not, detached or not.
                     let _ = outbound.send_untracked(&host_id, ClientMessage::Ack(Ack { cursor }));
                     finished.push(*attachment);
-                } else {
+                } else if !route.detached {
                     let detach = ClientMessage::Detach(Detach {
                         attachment: AttachmentId(*attachment),
                     });
@@ -987,7 +984,48 @@ mod tests {
         rig.forward(S1, sent_by_the_panel.clone()).expect("detach");
         assert_eq!(rig.sent(), [sent_by_the_panel.clone(), sent_by_the_panel]);
         rig.router.close_stream(&rig.outbound, S1);
-        assert!(rig.sent().is_empty());
+        // Amended with the driver's authorization (driver-authorization-b-delivery.md): the
+        // final event was delivered and never acked, so closing the stream sends the final ack.
+        assert_eq!(
+            rig.sent(),
+            [ClientMessage::Ack(Ack {
+                cursor: cursor(10, 2)
+            })]
+        );
+    }
+
+    #[test]
+    fn closing_after_detach_and_final_event_sends_the_final_ack_and_no_second_detach() {
+        for close_all in [false, true] {
+            let rig = Rig::with_streams();
+            rig.attached(S1, 10);
+            rig.forward(
+                S1,
+                ClientMessage::Detach(Detach {
+                    attachment: AttachmentId(10),
+                }),
+            )
+            .expect("detach");
+            assert!(rig
+                .route(DaemonMessage::Closed(Closed {
+                    cursor: cursor(10, 1),
+                    reason: CloseReason::Detached,
+                }))
+                .is_none());
+            rig.sent();
+            if close_all {
+                rig.router.close_all_streams(&rig.outbound);
+            } else {
+                rig.router.close_stream(&rig.outbound, S1);
+            }
+            assert_eq!(
+                rig.sent(),
+                [ClientMessage::Ack(Ack {
+                    cursor: cursor(10, 1)
+                })]
+            );
+            assert!(rig.router.state().host(&rig.host).routes.is_empty());
+        }
     }
 
     #[test]
