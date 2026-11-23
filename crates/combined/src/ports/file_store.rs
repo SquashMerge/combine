@@ -77,6 +77,30 @@ pub fn valid_store_path(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+/// What a directory entry is, by its own type: a symlink is never followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+/// One entry of a listed folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+/// The entries of a folder, sorted by name in byte order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirListing {
+    pub entries: Vec<ListedEntry>,
+    /// True when the folder had more entries than the caller's `max_entries`.
+    pub truncated: bool,
+}
+
 /// Files under a space's `.workspace/` directory.
 #[async_trait]
 pub trait FileStore: Send + Sync {
@@ -96,6 +120,20 @@ pub trait FileStore: Send + Sync {
         bytes: Vec<u8>,
     ) -> Result<WriteOutcome, StoreError>;
     async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError>;
+    /// Lists the folder `path`, relative to `<space>/.workspace/` and checked as for
+    /// [`FileStore::read`]: an invalid path is [`StoreError::InvalidPath`]. `Ok(None)` when
+    /// `.workspace`, a folder on the way or the folder itself doesn't exist. A symlink at any of
+    /// those is [`StoreError::Unavailable`]. Names that aren't UTF-8 are left out. The listing
+    /// holds at most `max_entries` entries, sorted by name in byte order, and `truncated` is true
+    /// when more than `max_entries` UTF-8 entries were seen; the entries kept are then whichever
+    /// the store saw first. Each kind is the entry's own. It never consults the fallback copy:
+    /// it lists only the project's folder.
+    async fn list_dir(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Option<DirListing>, StoreError>;
     /// Starts reporting changes under the space's `.workspace/` on [`FileStore::changes`].
     async fn watch(&self, space: &SpaceId) -> Result<(), StoreError>;
     /// The stream of changes in the spaces being watched. The first call gets it; later calls
