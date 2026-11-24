@@ -377,6 +377,43 @@ class Bridge:
             self.bytes_in += len(chunk)
             self.decoder.feed(chunk)
 
+    def await_ready(self, marker, timeout_s):
+        """Discards bridge output up to and including the line `marker`, before any frame.
+
+        For a bridge that runs through a remote pty (`ssh -tt`), the remote side prints the
+        marker once `stty raw -echo` has run, so the hello isn't echoed or cooked by a line
+        discipline still in its default mode. Bytes after the marker go to the decoder."""
+        want = marker.encode() + b"\n"
+        seen = bytearray()
+        deadline = time.monotonic() + timeout_s
+        while True:
+            at = seen.find(want)
+            if at >= 0:
+                rest = bytes(seen[at + len(want):])
+                if rest:
+                    self.bytes_in += len(rest)
+                    self.decoder.feed(rest)
+                return
+            if self.eof:
+                raise HarnessError("the bridge ended before printing %r; %s"
+                                   % (marker, self.closed_message()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Timeout("the bridge didn't print %r in time" % marker)
+            readable, _, _ = select.select([self.out_fd], [], [], remaining)
+            if not readable:
+                continue
+            try:
+                chunk = os.read(self.out_fd, 1 << 16)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                self.eof = True
+                continue
+            seen += chunk
+            if len(seen) > 1 << 16:
+                raise HarnessError("over 64 KiB of bridge output before %r" % marker)
+
     def close(self, timeout_s=5.0):
         """Closes stdin so the bridge ends, waits, then terminates and at last kills it."""
         try:
@@ -700,6 +737,8 @@ def run(args, argv, log):
     try:
         bridge = Bridge(argv)
         session = Session(bridge, args, log)
+        if args.ready_line:
+            bridge.await_ready(args.ready_line, args.connect_timeout_s)
         session.handshake()
         result["daemon_host_id"] = session.host_id
         session.pick_terminal()
@@ -844,6 +883,9 @@ def parse_args(argv):
     parser.add_argument("--settle-ms", type=int, default=300,
                         help="quiet time after attaching before sampling (default 300)")
     parser.add_argument("--max-consecutive-timeouts", type=int, default=10)
+    parser.add_argument("--ready-line", metavar="MARKER",
+                        help="before the handshake, skip bridge output up to a line MARKER "
+                             "(for an `ssh -tt` bridge that runs `stty raw -echo` first)")
     parser.add_argument("--cols", type=int, help="attach size; default: the terminal's own")
     parser.add_argument("--rows", type=int)
     parser.add_argument("--history", type=int, default=0,
