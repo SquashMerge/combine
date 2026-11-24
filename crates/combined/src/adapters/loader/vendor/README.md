@@ -24,7 +24,7 @@ The package README says, at line 87 of `package/README.md`: "Pele targets Mermai
 ## Re-verifying
 
 ```sh
-npm view pele@1.13.0 dist.integrity dist.tarball time.modified license
+npm view pele@1.13.0 version time.1.13.0 repository.url dist.integrity dist.tarball license
 S=$(mktemp -d)
 npm pack pele@1.13.0 --ignore-scripts --pack-destination "$S"
 printf 'sha512-%s\n' "$(openssl dgst -sha512 -binary "$S/pele-1.13.0.tgz" | openssl base64 -A)"
@@ -36,7 +36,7 @@ grep -n 'Mermaid' "$S/pkg/package/README.md"
 grep -c '12\.1' pele-1.13.0.global.js
 ```
 
-The first checksum line must equal the integrity above (and equal what `npm view` prints), and the vendored files must hash as in the table and have the sizes in it. The README line that names Mermaid is line 87, and the last `grep -c` must print 0.
+The first checksum line must equal the integrity above (and equal what `npm view` prints), and the vendored files must hash as in the table and have the sizes in it. The README `grep` prints lines 3, 5 and 87; the 12.1.0 claim is on line 87. The last `grep -c` must print 0.
 
 ## Updating
 
