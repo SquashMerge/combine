@@ -445,6 +445,16 @@ class GuardTest(unittest.TestCase):
             },
         )
 
+    def test_factory_run_state_and_sandboxes_are_skipped(self):
+        # Slice worktrees and sandbox clones are whole copies of the tree, including the one place
+        # a JS engine may live; reading them would flag that file again under a foreign path.
+        self.assertFlags(
+            {
+                ".factory/worktrees/46/a1/crates/combined/src/core/x.rs": "use rquickjs::Runtime;\nuse std::fs;\n",
+                ".factory-sandboxes/46/crates/combined/src/core/y.rs": "use std::process::Command;\n",
+            },
+        )
+
     # --- Review 2: frontend lexing
 
     def test_imports_inside_strings_templates_and_regexes_are_not_imports(self):
