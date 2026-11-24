@@ -14,12 +14,12 @@ Run #45, 2026-11-24, base 6a074ce. Machine Mac17,16 (Apple M5 Pro), macOS 27.2, 
 | Memory | Met: R200 is 19 MiB, under the 64 MiB cap | P9: the smallest cap at which the 200 KB diagram answers `SUCCESS` is 19 MiB |
 | "Loaded once" (R9) | The bundle is evaluated once per runtime; `Module::load` is `unsafe`, so no bytecode is loaded | P13; rquickjs-core `value/module.rs:339` is `pub unsafe fn load` |
 | Fallback | None | G3 to G5 are go |
-| Test inputs | `slow_input()` is `fan_out(226)`; `memory_input()` is `fan_out(226)`; W = 9 MiB, h = 1 MiB. Both picks need the amendments A1 and A2 below | "Test inputs" |
+| Test inputs | As decided at checkpoint A: `slow_input()` is `class_diagram_of_bytes(204_800)`; `memory_input()` is `fan_out(226)`; W = 9 MiB, h = 1 MiB. The memory pick needs A1 | "Test inputs"; "Checkpoint A decisions" |
 | Anchors needed | `broken-unknown-type` and `broken-front-matter`: Pele gives them no line (0) and no column (0). The other three get their position from Pele | P5; "Headless render and positions" |
 
 **Amendments for s2-3-adapter** (the spike found them; the brief's text is wrong or incomplete on these points):
 - **A1, a thrown `null` is an out-of-memory.** When QuickJS can't allocate even the error object, the JS `catch` sees the value `null` (`typeof` is `"object"`; `e === null`), not an `InternalError`. It happens at most caps (10 MiB and 12 MiB for the 200 KB diagram, 70 and 100 MiB for `fan_out(226)`), and the engine heap read after the call is only about 4 MB because the failed call has been unwound, so `heap_near_limit` is false. With the brief's `classify` rule 2 as written, the check at W + h answers `NoVerdict("null")`, not `MemoryLimit` (run 1 below). Rule 2 must also match a thrown value that is `null` (not an object, with no Pele `code`). Pele never throws `null` itself, and the source is a string argument, so the match is safe. With that rule, the probe confirms `MemoryLimit` at W + h.
-- **A2, `fan_out(226)` as the time input dies of memory at the default caps.** With `time_limit` at 10 s and a 64 MiB heap, it ends in `MemoryLimit` after about 115 ms (the thrown `null` of A1), not in `Success`. It is `TimeLimit` only when the time cap is well below that, as at the 10 ms of P8 (interrupted after 10.6 ms). The rule of the brief (the first candidate with t_slow_min >= 80 ms and >= 80 x max(t_class, t_first)) picks it. `class_diagram_of_bytes(204_800)` also meets the rule (t_slow_min 138.4 ms) and runs to `Success` in pure compute, so it is the more robust slow input if s2-3's time test needs a verdict that doesn't depend on the memory cap. The driver can choose at checkpoint A; the numbers support both.
+- **A2, `fan_out(226)` as the time input dies of memory at the default caps.** With `time_limit` at 10 s and a 64 MiB heap, it ends in `MemoryLimit` after about 115 ms (the thrown `null` of A1), not in `Success`. It is `TimeLimit` only when the time cap is well below that, as at the 10 ms of P8 (interrupted after 10.6 ms). The rule of the brief (the first candidate with t_slow_min >= 80 ms and >= 80 x max(t_class, t_first)) picks it. `class_diagram_of_bytes(204_800)` also meets the rule (t_slow_min 138.4 ms) and runs to `Success` in pure compute, so it is the more robust slow input if s2-3's time test needs a verdict that doesn't depend on the memory cap. The driver chose at checkpoint A: see "Checkpoint A decisions".
 
 ## Gates
 
@@ -33,7 +33,7 @@ Run #45, 2026-11-24, base 6a074ce. Machine Mac17,16 (Apple M5 Pro), macOS 27.2, 
 | G6 positions | go | `broken-syntax`, `broken-unclosed-block` and `broken-relation` get a line and a column from Pele; `broken-unknown-type` and `broken-front-matter` get theirs from `pele::anchor`. Variant A of every category fails with a position, so no variant B is committed |
 | G7 Mermaid version | go | The README says 12.1.0; SPEC `:656` and `:1038` stay |
 | G8 bytecode | go (recorded) | `Module::load` is `unsafe`; the bundle is evaluated once per runtime |
-| G9 test inputs | go, with A1 and A2 | `slow_input()` and `memory_input()` are picked by the brief's rules; W = 9 MiB and h = 1 MiB (at most 16); `memory_input()` answers `MemoryLimit` at W + h only with amendment A1 |
+| G9 test inputs | go, given A1 (and the A2 decision) | `slow_input()` and `memory_input()` are picked by the brief's rules; W = 9 MiB and h = 1 MiB (at most 16); `memory_input()` answers `MemoryLimit` at W + h only with amendment A1 |
 
 ## Pele artifact
 
@@ -67,7 +67,17 @@ Run #45, 2026-11-24, base 6a074ce. Machine Mac17,16 (Apple M5 Pro), macOS 27.2, 
 - **Signals:**
   - interrupt: an `InternalError` with message `interrupted`, and the flag of the handler is set;
   - out of memory: an `InternalError` with message `out of memory`, or, when even the error object can't be allocated, the value `null` (amendment A1). Pele doesn't wrap either: a `PeleError` has a `code`, and neither of these has one;
-  - stack overflow: a `RangeError` with message `Maximum call stack size exceeded`, also with no Pele code.
+  - stack overflow: two answers, depending on where it happens.
+    - Inside `render()` or `parse()`, Pele wraps it. Both entry points run their work through `Pm` (`render: Ym`, `parse: Gm`, each `return Pm(()=>...)`), and `Fm` does the same with the diagram type attached (bundle line 43):
+
+      ```js
+      function Pm(e){try{return e()}catch(t){throw t instanceof RangeError?new Qe("Diagram is nested too deeply.","limit"):t}}
+      function Fm(e,t){try{return t()}catch(n){if(n instanceof RangeError)throw new Qe("Diagram is nested too deeply.","limit",e);...
+      ```
+
+      So a stack overflow inside Pele arrives as a `PeleError` with code `limit` and message `Diagram is nested too deeply.`. `classify` reaches rule 5 (Keep, `Limit`, Pele's message), not rule 3 (Discard, the adapter's message).
+    - Only the bare engine eval (P10's `f(1e6)`, which never enters Pele) gives a `RangeError` with message `Maximum call stack size exceeded` and no Pele code.
+    - `Pm` and `Fm` rethrow anything that isn't a `RangeError` unchanged, so the out-of-memory `InternalError`, the thrown `null` (A1) and the interrupt are not wrapped.
 - **Regex interruptibility (P8):** `/(a+)+$/.test('a'.repeat(25)+'!')` under a 200 ms deadline stops after 200.1 ms with `interrupted`; run to the end under a 60 s cap it takes 642 ms. A running regex is interrupted. There is no Known limit and no watchdog issue.
 - **20 cap-and-rebuild cycles (P11):** alternating the busy loop (1 s cap) and the allocation loop, each followed by a rebuild and a `class.mmd` render: no abort, and all 20 renders answer `Success`. The busy loops end `Time` at 1,000 ms; the allocation loops end `Mem` in 16 to 18 ms. Process RSS: 225,744 KiB at the start, 269,648 KiB at the end (it includes the earlier phases of the same process, up to a 512 MiB heap).
 - **Threads and stacks:** the probe runs everything on an 8 MiB thread, with a 1 MiB JS stack; `f(1e6)` ends in the `RangeError` above and the process survives.
@@ -85,7 +95,7 @@ Run #45, 2026-11-24, base 6a074ce. Machine Mac17,16 (Apple M5 Pro), macOS 27.2, 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `broken-syntax` | A | `PeleError` / `syntax` | 6 / 3 | no | 6 | 3 | `  @@@ not a statement\n--^` | `Lexical error on line 6. Unrecognized text.\n  @@@ not a statement\n--^` |
 | `broken-unknown-type` | A | `PeleError` / `unsupported-diagram` | 0 / 0 | yes, rule 2 (unsupported diagram, no front matter, first non-blank non-comment line is line 1) | 1 | 1 | `notADiagram` | `No diagram type detected for the given text.` |
-| `broken-unclosed-block` | A | `PeleError` / `syntax` | 5 / 18 | no | 5 | 18 | `  Animal <|-- Dog\n-----------------^` | `Parse error on line 5:\n  Animal <\|-- Dog\n-----------------^\nExpecting 'STRUCT_ST` |
+| `broken-unclosed-block` | A | `PeleError` / `syntax` | 5 / 18 | no | 5 | 18 | `  Animal <\|-- Dog\n-----------------^` | `Parse error on line 5:\n  Animal <\|-- Dog\n-----------------^\nExpecting 'STRUCT_ST` |
 | `broken-relation` | A | `PeleError` / `syntax` | 4 / 12 | no | 4 | 12 | `  Animal <\|-x- Dog\n-----------^` | `Parse error on line 4:\n  Animal <\|-x- Dog\n-----------^\nExpecting 'AGGREGATION', ` |
 | `broken-front-matter` | A | `PeleError` / `syntax` | 0 / 0 | yes, rule 1 (front matter closed at line 3, and the message holds "front matter" and "yaml") | 1 | 1 | `---` | `Front matter is not valid YAML. YAML: unexpected end of the stream within a flow` |
 
@@ -108,18 +118,20 @@ function Rw(e){let t=0;for(;t<e.length&&au(e[t])&&!Ja(e[t]);)t++;let n=e.slice(0
 
 `tc` calls it only when the text contains `---`, after normalising `\r\n` and `\r` to `\n`. Its rules:
 - **Opener:** the text starts with zero or more whitespace characters that aren't a newline (JS `\s`: it includes U+FEFF, U+00A0 and the Unicode spaces, and not U+0085), then `---`, then only whitespace up to a newline. The leading run is the indent `n`. A blank first line, or any text after `---` on its line, means no front matter.
-- **Closer:** a newline, then exactly the opener's indent `n` (character for character), then `---`, then only whitespace that includes at least one newline (so `---` at the very end of the text, with no newline after it, is not a closer). Trailing whitespace and blank lines after the closer belong to the front matter. The first such closer after the opener closes it.
+- **Closer:** a newline, then exactly the opener's indent `n` (character for character), then `---`, then only whitespace that includes at least one newline (so `---` at the very end of the text, with no newline after it, is not a closer). Trailing whitespace and blank lines after the closer belong to the front matter.
+- **Line 2 never closes** (loop condition `h>r[0]`, where `r[0]` is the first newline after the opener's `---`): the closer's leading newline must lie strictly after `r[0]`, so the line right after the opener is never a closer. A `---` on line 2 is skipped, and the first qualifying closer from line 3 on closes the front matter, provided one exists; if none exists, there is no front matter. Examples: `---` / `---` / `notADiagram` is not front matter; `---` / blank / `---` is, with an empty body; `---` / `---` / `---` closes at line 3 with the body `---`.
 
-**Whether the anchor's rule matches `Rw`.** The brief's rule ("the opener is the first non-blank line; it opens iff `trim_ws == "---"`; it closes at the next later line whose `trim_ws == "---"`") does not. Differences, each seen through Pele (probe P5):
+**Whether the anchor's rule matches `Rw`.** The brief's rule ("the opener is the first non-blank line; it opens iff `trim_ws == "---"`; it closes at the next later line whose `trim_ws == "---"`") does not. Differences 1 to 5 were seen through Pele (probe P5); 6 is described under it:
 1. **No blank line before the opener.** `Rw` needs the opener on line 1. With `\n---\ntitle: [x\n---\nclassDiagram` Pele sees no front matter (`unsupported-diagram`). The anchor must open front matter only on line 1 (N3).
 2. **The closer repeats the opener's indent,** BOM and tabs included. `  \t---` / `  \t---` is front matter (invalid YAML reported); `  \t---` / `---` is not. A BOM counts as indent: `\u{feff}---` closed by a plain `---` is not front matter, while `\u{feff}---` closed by `\u{feff}---` is. The anchor must compare the closer's prefix with the opener's prefix, not trim.
 3. **A closer needs a newline after it.** `---\ntitle: [x\n---` with no final newline isn't closed (`unsupported-diagram`). The anchor's "closed" must require a newline after the closer.
 4. **Trailing text on the opener** (`--- x`) is not an opener; trailing whitespace on either line is fine (`---   ` closes).
 5. The same JS `\s` set decides all of it, with U+0085 not whitespace (N4): `\u{85}notADiagram` is still an unsupported diagram.
+6. **A closer on line 2 never counts** (see "Line 2 never closes" above). The brief's rule and N3's wording ("the next newline followed by the opener's exact indent, then `---`") would call `---` / `---` / `classDiagram` closed front matter with an empty body; `Rw` does not. Confirmed through Pele (run under node, 2026-11-24): `---` / `---` / `classDiagram` / `  class A` answers `unsupported-diagram`, while `---` / blank / `---` / `classDiagram` / `  class A` renders (`type` `class`), and so does `---` / `---` / `---` / `classDiagram` / `  class A` (closed at line 3). The case of a line-2 `---` followed by a later closer (the front matter closes at the later one, with the line-2 `---` in its body) is derived from the quoted code (`h>r[0]` skips the line-2 newline; the forward scan then finds the later closer), not run through Pele. Under `Rw`, `---` / `---` / `notADiagram` has no front matter, so the anchor does not take its rule 1 for it; it takes the rule for an unsupported diagram without front matter, whose first non-blank, non-comment line is line 1 (`---`), which gives line 1, column 1, snippet `---`.
 
 The committed fixtures behave identically under both rules; the differences matter for the anchor tests in s2-3-adapter (they follow `Rw`, and the anchor's definitions in the brief are adjusted as above).
 
-**Nested outcome (P10):** `nested_subgraphs(1_000)` at the default caps (and the adapter's options) answers `Success` in 19 to 27 ms (`svg.length` 283,701), so no depth reduction is needed. `function f(n){return n?f(n-1)+1:0};f(1e6)` throws `RangeError: Maximum call stack size exceeded`; no native crash, and `class.mmd` renders afterwards.
+**Nested outcome (P10):** `nested_subgraphs(1_000)` at the default caps (and the adapter's options) answers `Success` in 19 to 27 ms (`svg.length` 283,701), so no depth reduction is needed. `function f(n){return n?f(n-1)+1:0};f(1e6)` evaluated bare (outside Pele) throws `RangeError: Maximum call stack size exceeded`; no native crash, and `class.mmd` renders afterwards.
 
 **No carried-over state (P12):** on one runtime, `class.mmd`, the 5 broken fixtures and `class.mmd` again give identical results; a second pass over the 5 broken fixtures gives identical results; each equals its result on a fresh runtime.
 
@@ -128,7 +140,7 @@ The committed fixtures behave identically under both rules; the differences matt
 - **204,800 bytes** (200 KiB). Pele's `limit` counts UTF-16 units of the JS string, which is never more than the source's UTF-8 byte length, so `limit: 204800` admits every source the byte limit admits. P6: `pad_to(class.mmd, 204_800, 'x')` (204,800 units) answers `limit` ("Diagram source is longer than the limit of 50000 characters.") without options, and renders (`svg.length` 4,158) with `limit: 204800`. With `é` as the fill the source is 204,800 bytes but 102,526 units; it answers the same `limit` error without options and renders with `limit: 204800`.
 - **`PELE_MAX_EDGES` 51,200.** `fan_out(226)` spells 51,076 edges, under it.
 - **`PELE_OUTPUT_LIMIT` 4,000,000,** Pele's default. The largest SVG seen is 1,826,043 characters (the 200 KB diagram). `fan_out(226)`, given enough memory, answers `limit` "Diagram output is longer than the limit of 4000000 characters." after about 6 s in QuickJS (checked: 6.1 to 6.4 s at 132 to 512 MiB).
-- **Time-cap overshoot:** the busy loop with a 1 s deadline stops after 1,000.0 ms (overshoot under 0.1 ms); `fan_out(226)` with a 10 ms deadline stops after 10.6 ms (and after 11.4 ms in a dev run), the 200 KB diagram after 10.1 ms, the regex after 200.1 ms.
+- **Time-cap overshoot:** the busy loop with a 1 s deadline stops after 1,000.0 ms (overshoot under 0.1 ms); `fan_out(226)` with a 10 ms deadline stops after 10.6 ms, the 200 KB diagram after 10.1 ms, the regex after 200.1 ms.
 - **R10:** the cap is the QuickJS heap, measured with `memory_usage().malloc_size`; process RSS (225,744 KiB before the cycles, 269,648 KiB after) is for information only.
 
 ## Performance (probe; preliminary, the authoritative numbers are in docs/m2-s2-bench.md)
@@ -162,7 +174,9 @@ Generators are those of the brief's `diagram_support` (`class_diagram`, `class_d
 | `fan_out(226)` | 111.8, 121.0, 118.9 (each ending in a thrown `null`, an out of memory: amendment A2) | 111.8 ms | yes: **the pick** |
 | `class_diagram_of_bytes(204_800)` | 140.6, 138.4, 139.2 (all `Success`) | 138.4 ms | yes (not picked: the first candidate that meets the rule wins) |
 
-**P8** with the pick: `fan_out(226)` under a 10 ms deadline is interrupted after 10.6 ms: `InternalError`, message `interrupted`, flag set.
+The brief's rule picked `fan_out(226)` here. Checkpoint A amended it (a time candidate must end in `Success` at the default caps) and chose `class_diagram_of_bytes(204_800)`: see "Checkpoint A decisions".
+
+**P8** with `fan_out(226)`: `fan_out(226)` under a 10 ms deadline is interrupted after 10.6 ms: `InternalError`, message `interrupted`, flag set.
 
 **P9, the memory input.**
 - W = 9 MiB (the warm-up fails at 8 MiB). h = 1 MiB: a fresh runtime capped at W + h = 10 MiB answers `Success` for `class.mmd` as its first check.
@@ -209,3 +223,16 @@ A throwaway binary crate under `/tmp/c45s/probe`, outside the checkout: `name = 
 Every runtime was built as the adapter will build it: on an 8 MiB thread, `set_memory_limit(64 MiB)` (or the cap under test), `set_max_stack_size(1 MiB)`, an interrupt handler that compares a deadline in nanoseconds since the runtime's origin and sets a flag, `Context::full`, the bundle evaluated with `eval_with_options` (`global = true`, `strict = true`), a check that `pele.render` and `pele.parse` are functions, and `run_gc`. Thrown values were read as in M11. Pele was called as `render(source, { limit, maxEdges, outputLimit })` with the source as a string argument.
 
 Steps: P1 timed the build; P2 built 5 runtimes and read `memory_usage()` before and after `run_gc`; P3 evaluated `Object.keys(pele)` and the `typeof` checks and counted the global names in the bundle; P4 and P5 called `render` and `parse` on `class.mmd`, the five fixtures, variant B of two of them and a set of probes of the front-matter detector and the column unit; P6 padded `class.mmd` to 204,800 bytes with `x` and `é`; P7 timed warm runs, t_class, t_first and the two time candidates; P8 ran a busy loop, the slow inputs and a catastrophic regex under short deadlines; P9 ran an allocation loop, bisected W, stepped h, bisected R per candidate and R50 and R200, and confirmed the memory input at W + h; P10 rendered `nested_subgraphs(1_000)` and a runaway recursion; P11 ran 20 cap-and-rebuild cycles; P12 compared results across a fixture sequence on one runtime and on fresh ones; P13 set an interrupt handler that captures an `Rc<Cell<u64>>` (it compiles, so `set_interrupt_handler` has no `Send` bound without `parallel`) and noted that `Module::load` is `unsafe`. A short diagnostic run caught the exception inside JS to show that the out-of-memory value is `null`. Quick correctness runs of the cheap phases were made without the lease and none of their timings is recorded here. The probe's source was not kept; it and the build directory were deleted at the end.
+
+## Checkpoint A decisions
+
+The driver decided these after reading the spike. The adapter slice (s2-3) cites this section.
+
+- **A1 adopted.** `classify` rule 2 also maps a thrown JS `null` to `MemoryLimit` (Discard, the runtime is rebuilt). It is detected from the value being null, with a flag such as `Thrown.thrown_null` set where the thrown value is read, and never by matching the coerced text "null" (a thrown string `"null"` stays `NoVerdict("null")`). Rule 2 applies only when thrown is `Some` (N5), so a returned call is never `MemoryLimit`, whatever the heap reads. Both memory candidates throw `null` at W + h, so the memory test depends on A1.
+- **A2 and N1 adopted.** `slow_input()` is `class_diagram_of_bytes(204_800)`. P7 is amended: a time candidate qualifies only if its warm runs at the default caps end in `Success`. `memory_input()` stays `fan_out(226)`: it answers `MemoryLimit` at W + h, relying on A1. Supporting numbers:
+  - the 200 KB diagram has t_slow_min 138.4 ms (140.6, 138.4, 139.2, all `Success`) and R 19 MiB, so at the 64 MiB cap it can only end in `Success` or `TimeLimit`;
+  - `fan_out(226)` has t_slow_min 111.8 ms, but each warm run ends in a thrown `null` (an out of memory after about 112 ms, which measures the time to exhaust the heap, not compute), and its R is 132 MiB. That makes it the memory input, not the time input.
+- **Anchors follow `Rw` exactly as this document records it:** the opener only on line 1; the closer repeats the opener's indent character for character; a closer needs a newline after it; a closer on line 2 never counts; a BOM is indent (not trimmed); whitespace is JS `\s` without U+0085; a lone carriage return is a newline, as Pele normalises it before `Rw` runs.
+- **Stack overflow inside Pele classifies by rule 5** (Keep, `Limit`) with Pele's message `Diagram is nested too deeply.`; the adapter's own message (rule 3) applies only to a `RangeError` that reaches `classify` unwrapped.
+- **P8:** a running regex is interruptible (200.1 ms against a 200 ms deadline), so there is no known limit and no watchdog issue.
+- **G9 is go,** given A1.
