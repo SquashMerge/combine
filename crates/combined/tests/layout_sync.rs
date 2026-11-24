@@ -1301,3 +1301,89 @@ fn write_outcome_during_failed_read_keeps_the_read_error_and_the_block() {
     sim.layouts.unwatch(MAIN, Millis(600));
     assert!(write_effects(&sim.layouts.take_effects()).is_empty());
 }
+
+// #34: the hash the server compares before every write, and a write that found an outside edit
+
+#[test]
+fn known_hash_tracks_reads_and_writes() {
+    let mut sim = Sim::open(&two_tiles());
+    let main = space("main");
+    assert_eq!(sim.layouts.known_hash(&space("other")), None);
+    assert_eq!(
+        sim.layouts.known_hash(&main),
+        Some(hash(&bytes_of(&two_tiles())))
+    );
+
+    sim.mutate(alternate(1), Millis(0)).unwrap();
+    sim.layouts.tick(Millis(500));
+    sim.settle(Millis(500));
+    let written = sim.writes[0].1.clone();
+    assert_eq!(sim.layouts.known_hash(&main), Some(hash(&written)));
+
+    let outside = bytes_of(&with_ratio(&two_tiles(), 0.3));
+    sim.outside_write(outside.clone(), Millis(600));
+    assert_eq!(sim.layouts.known_hash(&main), Some(hash(&outside)));
+
+    let mut missing = Sim::new(LayoutTiming::default());
+    missing.watch(MAIN, "main", Millis(0));
+    assert_eq!(missing.layouts.known_hash(&main), None);
+}
+
+fn found(bytes: &[u8]) -> LayoutRead {
+    LayoutRead::Found {
+        hash: hash(bytes),
+        bytes: bytes.to_vec(),
+        read_only: false,
+    }
+}
+
+#[test]
+fn apply_write_conflict_keeps_pending_ops_and_reads_the_edit() {
+    let mut sim = Sim::open(&two_tiles());
+    let main = space("main");
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.layouts.tick(Millis(500));
+    let effects = sim.layouts.take_effects();
+    assert_eq!(write_effects(&effects), [("main".to_string(), 1)]);
+    let before = sim.revision("main");
+
+    let outside = bytes_of(&with_ratio(&two_tiles(), 0.3));
+    sim.layouts
+        .apply_write_conflict(&main, found(&outside), Millis(500));
+
+    assert_eq!(sim.layouts.known_hash(&main), Some(hash(&outside)));
+    let now = sim.current("main");
+    assert_eq!(root_ratio(&now), 0.3);
+    assert_eq!(active_of(&now, "a").as_deref(), Some("p3"));
+    assert!(sim.revision("main") > before);
+    assert!(sim.layouts.status(&main).unwrap().dropped.is_none());
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(1_000)));
+
+    sim.layouts.tick(Millis(1_000));
+    sim.settle(Millis(1_000));
+    assert_eq!(sim.written(), 1);
+    let stored = &sim.writes[0].1;
+    assert_eq!(stored, &sim.disk[&main]);
+    let text = String::from_utf8(stored.clone()).unwrap();
+    assert!(text.contains("0.3") && text.contains("\"p3\""), "{text}");
+}
+
+#[test]
+fn apply_write_conflict_drops_ops_that_clash_with_the_edit() {
+    let mut sim = Sim::open(&two_tiles());
+    let main = space("main");
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.layouts.tick(Millis(500));
+    assert_eq!(sim.layouts.take_effects().len(), 1);
+
+    let outside = bytes_of(&with_active(&two_tiles(), "a", "p1"));
+    sim.layouts
+        .apply_write_conflict(&main, found(&outside), Millis(500));
+
+    let status = sim.layouts.status(&main).unwrap();
+    assert_eq!(status.dropped.map(|batch| batch.op_count), Some(1));
+    assert_eq!(active_of(&status.layout, "a").as_deref(), Some("p1"));
+    assert_eq!(sim.layouts.next_deadline(), None);
+    sim.layouts.tick(Millis(10_000));
+    assert!(sim.layouts.take_effects().is_empty());
+}

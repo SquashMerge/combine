@@ -882,6 +882,253 @@ fn store_contract_read_only_routes_to_fallback() {
 }
 
 #[test]
+fn write_project_never_uses_the_fallback() {
+    const PATH: &str = "panels/p/panel.json";
+    let scratch = ShortTempDir::new();
+    let root = scratch.path().join("spaces");
+
+    // A writable project gets the bytes, and a fallback copy already there is left alone.
+    let open = space(&scratch, "open");
+    let store = FsFileStore::with_fallback(&root);
+    let copy = root.join(hex_sha256(&open.0)).join(PATH);
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::write(&copy, b"aside").unwrap();
+    let outcome = block_on(store.write_project(&open, PATH, b"project".to_vec())).unwrap();
+    assert!(!outcome.read_only);
+    assert_eq!(outcome.hash, sha256(b"project"));
+    let file = Path::new(&open.0).join(".workspace").join(PATH);
+    assert_eq!(fs::read(&file).unwrap(), b"project");
+    assert_eq!(fs::read(&copy).unwrap(), b"aside");
+
+    // A project that can't be written is refused, and nothing goes to the fallback.
+    let locked = space(&scratch, "locked");
+    fs::create_dir_all(&locked.0).unwrap();
+    if lock_down(Path::new(&locked.0)) {
+        let refused = block_on(store.write_project(&locked, PATH, b"x".to_vec()));
+        unlock(Path::new(&locked.0));
+        assert!(
+            matches!(refused, Err(StoreError::ReadOnly(_))),
+            "{refused:?}"
+        );
+        assert!(!root.join(hex_sha256(&locked.0)).exists());
+    } else {
+        eprintln!("skipped: this user can write a 0o555 folder");
+    }
+
+    // The memory store refuses a read-only space whatever its fallback setting.
+    let memory = MemoryFileStore::new();
+    let held = SpaceId("/held".to_owned());
+    memory.set_read_only(&held, true);
+    let refused = block_on(memory.write_project(&held, PATH, b"x".to_vec()));
+    assert!(
+        matches!(refused, Err(StoreError::ReadOnly(_))),
+        "{refused:?}"
+    );
+    assert_eq!(memory.write_count(&held, PATH), 0);
+    assert_eq!(memory.fallback_bytes(&held, PATH), None);
+    assert_eq!(memory.bytes(&held, PATH), None);
+}
+
+/// Sets a folder's mode to 0o000, and restores 0o755 when dropped.
+struct ZeroMode<'a>(&'a Path);
+
+impl<'a> ZeroMode<'a> {
+    /// `None` when this user can still read the folder, as root can.
+    fn new(folder: &'a Path) -> Option<Self> {
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o000)).unwrap();
+        let guard = ZeroMode(folder);
+        if fs::read_dir(folder).is_ok() {
+            eprintln!("skipped: this user can read a 0o000 folder");
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+impl Drop for ZeroMode<'_> {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn zero_mode_workspace_write_goes_to_the_fallback() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let workspace = Path::new(&space.0).join(".workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&root);
+    let Some(_guard) = ZeroMode::new(&workspace) else {
+        return;
+    };
+    let outcome = block_on(store.write(&space, LAYOUT, b"kept aside".to_vec())).unwrap();
+    assert!(outcome.read_only);
+    let copy = root.join(hex_sha256(&space.0)).join(LAYOUT);
+    assert_eq!(fs::read(&copy).unwrap(), b"kept aside");
+}
+
+#[test]
+fn zero_mode_workspace_write_project_is_read_only() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let workspace = Path::new(&space.0).join(".workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&root);
+    let Some(_guard) = ZeroMode::new(&workspace) else {
+        return;
+    };
+    let refused = block_on(store.write_project(&space, "panels/p/panel.json", b"x".to_vec()));
+    assert!(
+        matches!(refused, Err(StoreError::ReadOnly(_))),
+        "{refused:?}"
+    );
+    assert!(!root.exists());
+}
+
+#[test]
+fn zero_mode_workspace_read_still_fails() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let workspace = Path::new(&space.0).join(".workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    let Some(_guard) = ZeroMode::new(&workspace) else {
+        return;
+    };
+    let read = block_on(store.read(&space, LAYOUT, ANY_SIZE));
+    assert!(matches!(read, Err(StoreError::Unavailable(_))), "{read:?}");
+    let listed = block_on(store.list_dir(&space, "panels", 10));
+    assert!(
+        matches!(listed, Err(StoreError::Unavailable(_))),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn remove_file_and_remove_dir() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let fallback = scratch.path().join("spaces");
+    let store = FsFileStore::with_fallback(&fallback);
+    let folder = Path::new(&space.0).join(".workspace/panels/p");
+    block_on(store.write_project(&space, "panels/p/panel.json", b"{}".to_vec())).unwrap();
+    let copy = fallback
+        .join(hex_sha256(&space.0))
+        .join("panels/p/panel.json");
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::write(&copy, b"aside").unwrap();
+
+    // A non-empty folder stays, and a missing folder or file is Ok.
+    block_on(store.remove_dir(&space, "panels/p")).unwrap();
+    assert!(folder.is_dir());
+    block_on(store.remove_file(&space, "panels/p/panel.json")).unwrap();
+    assert!(!folder.join("panel.json").exists());
+    block_on(store.remove_file(&space, "panels/p/panel.json")).unwrap();
+    block_on(store.remove_file(&space, "panels/missing/panel.json")).unwrap();
+    block_on(store.remove_dir(&space, "panels/p")).unwrap();
+    assert!(!folder.exists());
+    block_on(store.remove_dir(&space, "panels/p")).unwrap();
+
+    // Neither touches the fallback copy.
+    assert_eq!(fs::read(&copy).unwrap(), b"aside");
+
+    assert_eq!(
+        block_on(store.remove_file(&space, "../x")),
+        Err(StoreError::InvalidPath)
+    );
+    assert_eq!(
+        block_on(store.remove_dir(&space, "a//b")),
+        Err(StoreError::InvalidPath)
+    );
+}
+
+#[test]
+fn denied_remove_file_and_remove_dir_give_read_only() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    let panels = Path::new(&space.0).join(".workspace/panels");
+    let folder = panels.join("p");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("panel.json"), b"{}").unwrap();
+    fs::create_dir_all(panels.join("empty")).unwrap();
+
+    // The file's folder is read-only, so unlinking the file is denied.
+    if !lock_down(&folder) {
+        eprintln!("skipped: this user can write a 0o555 folder");
+        return;
+    }
+    let file_result = block_on(store.remove_file(&space, "panels/p/panel.json"));
+    unlock(&folder);
+    assert!(
+        matches!(file_result, Err(StoreError::ReadOnly(_))),
+        "{file_result:?}"
+    );
+    assert!(folder.join("panel.json").exists());
+
+    // The empty folder's parent is read-only, so removing the folder is denied.
+    lock_down(&panels);
+    let dir_result = block_on(store.remove_dir(&space, "panels/empty"));
+    unlock(&panels);
+    assert!(
+        matches!(dir_result, Err(StoreError::ReadOnly(_))),
+        "{dir_result:?}"
+    );
+    assert!(panels.join("empty").is_dir());
+}
+
+#[test]
+fn removes_refuse_a_symlinked_path_and_leave_the_target_alone() {
+    use std::os::unix::fs::symlink;
+    for escape in [Escape::Workspace, Escape::Folder, Escape::File] {
+        let scratch = ShortTempDir::new();
+        let (space, path, sentinel) = escaping_space(&scratch, &escape);
+        let store = FsFileStore::new();
+        let outside = sentinel.parent().unwrap().to_path_buf();
+        let result = block_on(store.remove_file(&space, path));
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "remove_file {path}: {result:?}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), SENTINEL);
+
+        // remove_dir through the same symlinks: an empty folder outside must stay.
+        let victim_dir = outside.join("victim_dir");
+        fs::create_dir(&victim_dir).unwrap();
+        let dir_path = match escape {
+            Escape::File => {
+                // `.workspace/link` is a symlink to an outside folder; the path names it.
+                symlink(&victim_dir, Path::new(&space.0).join(".workspace/link")).unwrap();
+                "link".to_string()
+            }
+            _ => path.replace("victim", "victim_dir"),
+        };
+        let result = block_on(store.remove_dir(&space, &dir_path));
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "remove_dir {dir_path}: {result:?}"
+        );
+        assert!(victim_dir.is_dir(), "{dir_path}: the outside folder stays");
+    }
+}
+
+#[test]
+fn remove_file_removes_a_ds_store() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let store = FsFileStore::new();
+    let folder = Path::new(&space.0).join(".workspace/panels/p");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join(".DS_Store"), b"finder").unwrap();
+    block_on(store.remove_file(&space, "panels/p/.DS_Store")).unwrap();
+    assert!(!folder.join(".DS_Store").exists());
+    block_on(store.remove_dir(&space, "panels/p")).unwrap();
+    assert!(!folder.exists());
+}
+
+#[test]
 fn store_contract_read_only_without_fallback_is_read_only_error() {
     let memory = MemoryFileStore::new().without_fallback();
     let space = SpaceId("/repo".to_string());

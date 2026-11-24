@@ -76,6 +76,14 @@ fn found(bytes: Vec<u8>) -> PanelRead {
     }
 }
 
+/// What the store gives for a fallback copy holding `bytes`.
+fn fallback_found(bytes: Vec<u8>) -> PanelRead {
+    PanelRead::FallbackFound {
+        hash: hash_of(&bytes),
+        bytes,
+    }
+}
+
 fn panel_json(cwd: &str) -> Vec<u8> {
     json!({
         "version": 1,
@@ -552,6 +560,117 @@ fn changed_template_is_refused_and_never_spawned() {
     spawns.spawn_terminal(CONN, req(3), space(), template_for("dev", &now), true);
     let ticket = ticket_of(&spawns.take_effects());
     spawns.apply_panels(ticket, vec![("dev".to_owned(), found(now))]);
+    let (_, spec) = spawn_effect(spawns.take_effects());
+    assert_eq!(spec.argv, ["sh", "-c", "echo unreviewed"]);
+}
+
+/// A template the store served from the fallback copy is listed and spawned like any other, and
+/// one too large for the bound is skipped like any other.
+#[test]
+fn a_fallback_template_is_still_a_template() {
+    let shown = panel_json("sub");
+    let (mut spawns, _) = setup();
+    spawns.list_templates(CONN, req(1), space(), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_listing(
+        ticket,
+        listing(
+            vec![
+                entry("big", EntryKind::Directory),
+                entry("dev", EntryKind::Directory),
+            ],
+            false,
+        ),
+    );
+    spawns.take_effects();
+    spawns.apply_panels(
+        ticket,
+        vec![
+            (
+                "big".to_owned(),
+                PanelRead::FallbackTooLarge { size: 9_000 },
+            ),
+            ("dev".to_owned(), fallback_found(shown.clone())),
+        ],
+    );
+    let templates = templates_of(only_reply(&mut spawns));
+    assert_eq!(templates.templates.len(), 1);
+    assert_eq!(templates.templates[0].panel, "dev");
+    assert_eq!(templates.templates[0].hash, hash_of(&shown).to_hex());
+    assert_eq!(templates.skipped.len(), 1);
+    assert_eq!(templates.skipped[0].panel, "big");
+
+    spawns.spawn_terminal(CONN, req(2), space(), template_for("dev", &shown), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), fallback_found(shown))]);
+    let (_, spec) = spawn_effect(spawns.take_effects());
+    assert_eq!(spec.argv, ["claude"]);
+    assert_eq!(spec.cwd, "/p/sub");
+}
+
+/// The hash check at spawn covers a template read from the fallback copy too.
+#[test]
+fn a_fallback_template_that_changed_after_listing_is_refused_and_never_spawned() {
+    let shown = panel_json("");
+    let now = json!({
+        "version": 1,
+        "content": {
+            "type": "terminal",
+            "slot": "main",
+            "template": { "argv": ["sh", "-c", "echo unreviewed"] }
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let (mut spawns, _) = setup();
+    spawns.list_templates(CONN, req(1), space(), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_listing(
+        ticket,
+        listing(vec![entry("dev", EntryKind::Directory)], false),
+    );
+    spawns.take_effects();
+    spawns.apply_panels(
+        ticket,
+        vec![("dev".to_owned(), fallback_found(shown.clone()))],
+    );
+    let templates = templates_of(only_reply(&mut spawns));
+    assert_eq!(templates.templates.len(), 1);
+    assert_eq!(templates.templates[0].hash, hash_of(&shown).to_hex());
+
+    spawns.spawn_terminal(CONN, req(2), space(), template_for("dev", &shown), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_panels(
+        ticket,
+        vec![("dev".to_owned(), fallback_found(now.clone()))],
+    );
+    assert!(spawns.take_effects().is_empty());
+    let (code, message, request) = error_of(&only_reply(&mut spawns));
+    assert_eq!(code, ErrorCode::TemplateChanged);
+    assert_eq!(
+        message,
+        "the panel dev changed since it was listed; review it and choose again"
+    );
+    assert_eq!(request, Some(req(2)));
+
+    // The store's hash is what counts.
+    spawns.spawn_terminal(CONN, req(3), space(), template_for("dev", &shown), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    let read = PanelRead::FallbackFound {
+        bytes: shown.clone(),
+        hash: hash_of(&now),
+    };
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), read)]);
+    assert!(spawns.take_effects().is_empty());
+    assert_eq!(
+        error_of(&only_reply(&mut spawns)).0,
+        ErrorCode::TemplateChanged
+    );
+
+    // Choosing again with the new hash runs the new definition.
+    spawns.spawn_terminal(CONN, req(4), space(), template_for("dev", &now), true);
+    let ticket = ticket_of(&spawns.take_effects());
+    spawns.apply_panels(ticket, vec![("dev".to_owned(), fallback_found(now))]);
     let (_, spec) = spawn_effect(spawns.take_effects());
     assert_eq!(spec.argv, ["sh", "-c", "echo unreviewed"]);
 }

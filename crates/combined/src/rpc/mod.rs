@@ -9,20 +9,22 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use combine_protocol::HostId;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::core::{Driver, LayoutTiming, TerminalList};
+use crate::core::{Driver, LayoutTiming, PanelTiming, TerminalList};
 use crate::model::Millis;
-use crate::ports::{FileStore, ProjectDirs};
+use crate::ports::{DiagramCheck, FileStore, ProjectDirs, ScratchStore, WallClock};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
 pub mod connect;
 mod connection;
 pub mod flush;
+mod panel_calls;
 mod server;
 pub mod socket;
 
+pub use panel_calls::{PanelCall, PanelHandle};
 pub use server::{serve, serve_watched, watch_backend, ServeError, Watched};
 pub use socket::BoundSocket;
 
@@ -85,6 +87,15 @@ pub struct ServerParts {
     pub layout_timing: LayoutTiming,
     /// Checks the folders a spawn would start in.
     pub project_dirs: Box<dyn ProjectDirs>,
+    /// Validates the Mermaid source of panels.
+    pub diagram_check: Arc<dyn DiagramCheck>,
+    /// The time of day, for the scratch panels' stamps.
+    pub wall_clock: Arc<dyn WallClock>,
+    /// Where scratch panels live.
+    pub scratch: Arc<dyn ScratchStore>,
+    pub panel_timing: PanelTiming,
+    /// Calls to the panel API. `spawn` fills it; `combined serve` has none.
+    pub panel_calls: Option<mpsc::Receiver<PanelCall>>,
 }
 
 /// Counters the server keeps for whoever started it.
@@ -148,11 +159,17 @@ impl Default for ServerStats {
 /// A server running on its own thread and runtime, for tests and embedding.
 pub struct ServerHandle {
     stats: Arc<ServerStats>,
+    panels: PanelHandle,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<Result<(), ServeError>>>,
 }
 
 impl ServerHandle {
+    /// A handle for calling the panel API of this server.
+    pub fn panels(&self) -> PanelHandle {
+        self.panels.clone()
+    }
+
     pub fn stats(&self) -> Arc<ServerStats> {
         Arc::clone(&self.stats)
     }
@@ -187,6 +204,7 @@ pub fn spawn(
     let stats = Arc::new(ServerStats::new());
     let (stop, stopped) = oneshot::channel::<()>();
     let serving = Arc::clone(&stats);
+    let (calls, panel_calls) = mpsc::channel(64);
     let thread = thread::Builder::new()
         .name("combined-rpc".to_string())
         .spawn(move || {
@@ -196,7 +214,8 @@ pub fn spawn(
                 .build()
                 .map_err(ServeError::Io)?;
             let _entered = runtime.enter();
-            let parts = make_parts();
+            let mut parts = make_parts();
+            parts.panel_calls = Some(panel_calls);
             runtime.block_on(serve(
                 socket,
                 parts,
@@ -209,6 +228,7 @@ pub fn spawn(
         })?;
     Ok(ServerHandle {
         stats,
+        panels: PanelHandle::new(calls),
         stop: Some(stop),
         thread: Some(thread),
     })

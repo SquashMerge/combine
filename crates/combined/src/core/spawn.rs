@@ -46,16 +46,43 @@ pub enum PanelRead {
         size: u64,
     },
     Failed(String),
+    /// As `Found`, but read from the fallback copy (`StoredFile::read_only`).
+    FallbackFound {
+        bytes: Vec<u8>,
+        hash: ContentHash,
+    },
+    /// As `TooLarge`, but read from the fallback copy (`StoredFile::read_only`).
+    FallbackTooLarge {
+        size: u64,
+    },
+}
+
+impl PanelRead {
+    /// Whether the store served the read from the fallback copy.
+    pub fn is_fallback(&self) -> bool {
+        matches!(
+            self,
+            PanelRead::FallbackFound { .. } | PanelRead::FallbackTooLarge { .. }
+        )
+    }
 }
 
 impl From<Result<Option<StoredFile>, StoreError>> for PanelRead {
     fn from(result: Result<Option<StoredFile>, StoreError>) -> PanelRead {
         match result {
             Ok(None) => PanelRead::Missing,
+            Ok(Some(file)) if file.read_only => PanelRead::FallbackFound {
+                bytes: file.bytes,
+                hash: file.hash,
+            },
             Ok(Some(file)) => PanelRead::Found {
                 bytes: file.bytes,
                 hash: file.hash,
             },
+            Err(StoreError::TooLarge {
+                size,
+                read_only: true,
+            }) => PanelRead::FallbackTooLarge { size },
             Err(StoreError::TooLarge { size, .. }) => PanelRead::TooLarge { size },
             Err(other) => PanelRead::Failed(store_error_detail(other)),
         }
@@ -340,17 +367,21 @@ impl Spawns {
                     .into_iter()
                     .find(|(name, _)| *name == panel)
                     .map_or(PanelRead::Missing, |(_, read)| read);
-                if let PanelRead::Found {
-                    hash: read_hash, ..
-                } = &read
-                {
-                    if read_hash.to_hex() != hash {
-                        let message = format!(
-                            "the panel {panel} changed since it was listed; review it and choose again"
-                        );
-                        self.fail(ticket, ErrorCode::TemplateChanged, message);
-                        return;
+                let read_hash = match &read {
+                    PanelRead::Found { hash, .. } | PanelRead::FallbackFound { hash, .. } => {
+                        Some(hash)
                     }
+                    PanelRead::Missing
+                    | PanelRead::TooLarge { .. }
+                    | PanelRead::FallbackTooLarge { .. }
+                    | PanelRead::Failed(_) => None,
+                };
+                if read_hash.is_some_and(|read_hash| read_hash.to_hex() != hash) {
+                    let message = format!(
+                        "the panel {panel} changed since it was listed; review it and choose again"
+                    );
+                    self.fail(ticket, ErrorCode::TemplateChanged, message);
+                    return;
                 }
                 // The bytes have the hash the client was shown: the spec comes from them alone.
                 match self.template_of(&space, &panel, read) {
@@ -504,9 +535,13 @@ impl Spawns {
     ) -> Result<(TerminalTemplate, ContentHash), PanelSkip> {
         let (bytes, hash) = match read {
             PanelRead::Missing => return Err(PanelSkip::NoFile),
-            PanelRead::TooLarge { size } => return Err(PanelSkip::TooLarge { size }),
+            PanelRead::TooLarge { size } | PanelRead::FallbackTooLarge { size } => {
+                return Err(PanelSkip::TooLarge { size })
+            }
             PanelRead::Failed(detail) => return Err(PanelSkip::ReadFailed(detail)),
-            PanelRead::Found { bytes, hash } => (bytes, hash),
+            PanelRead::Found { bytes, hash } | PanelRead::FallbackFound { bytes, hash } => {
+                (bytes, hash)
+            }
         };
         let template = parse_terminal_panel(panel, &bytes)?;
         match self.dirs.check_dir(space, &template.cwd) {

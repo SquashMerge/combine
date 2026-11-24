@@ -1,6 +1,6 @@
 //! The server loop: one task owns the driver and every connection's state, and waits on the
-//! listener, the connections' inbox, the backend, the terminal watch, the file store's changes
-//! and three timers.
+//! listener, the connections' inbox, the backend, the terminal watch, the file store's changes,
+//! the panel API's calls, the diagram checks that run beside it, and four timers.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -19,20 +19,26 @@ use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::StreamExt;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 
 use super::connection::{self, ConnEvent, WriterCmd};
 use super::flush::{FlushAt, FlushSchedule};
+use super::panel_calls::PanelCall;
 use super::socket::BoundSocket;
 use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
-    layout_snapshot, ops_from_wire, ConnectionId, Driver, LayoutEffect, LayoutRead, LayoutWritten,
-    Layouts, MutateError, PanelRead, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError,
-    LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
+    layout_snapshot, ops_from_wire, panel_file_bound, ConnectionId, Driver, LayoutEffect,
+    LayoutRead, LayoutWritten, Layouts, MutateError, PanelApiError, PanelEffect, PanelFolder,
+    PanelList, PanelRead, PanelStore, PanelView, SaveEnd, SaveReport, SpawnEffect, SpawnTicket,
+    Spawns, TerminalList, WatchError, DS_STORE, LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR,
+    PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES, SCRATCH_FILE, SCRATCH_LIST_MAX,
 };
-use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
-use crate::ports::{BackendResult, FileChange, FileStore, TerminalBackend};
+use crate::model::{ContentHash, LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
+use crate::ports::{
+    BackendResult, DiagramCheck, DiagramCheckError, DiagramVerdict, FileChange, FileMark,
+    FileStore, ScratchStore, StoreError, TerminalBackend, WallClock,
+};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
@@ -108,12 +114,51 @@ enum Wake {
     Flush,
     Layout,
     Spawned(SpawnTicket, BackendResult<TermId>),
+    Checked(CheckDone),
+    Panel,
+    PanelCall(Option<PanelCall>),
     Housekeeping,
+}
+
+/// A diagram check that finished, for the panel it was started for.
+struct CheckDone {
+    space: SpaceId,
+    panel: String,
+    revision: u64,
+    result: Result<DiagramVerdict, DiagramCheckError>,
+}
+
+/// A reply to a panel call, held until the call's file work has run.
+enum PanelAnswer {
+    View(
+        oneshot::Sender<Result<PanelView, PanelApiError>>,
+        Result<PanelView, PanelApiError>,
+    ),
+    List(
+        oneshot::Sender<Result<PanelList, PanelApiError>>,
+        Result<PanelList, PanelApiError>,
+    ),
+    Get(
+        oneshot::Sender<Result<(PanelView, String), PanelApiError>>,
+        Result<(PanelView, String), PanelApiError>,
+    ),
+}
+
+impl PanelAnswer {
+    /// The caller may have stopped waiting, which is not an error.
+    fn send(self) {
+        match self {
+            PanelAnswer::View(reply, result) => drop(reply.send(result)),
+            PanelAnswer::List(reply, result) => drop(reply.send(result)),
+            PanelAnswer::Get(reply, result) => drop(reply.send(result)),
+        }
+    }
 }
 
 type Watch = BoxStream<'static, TermEvent>;
 type Changes = BoxStream<'static, FileChange>;
 type Spawning = FuturesUnordered<BoxFuture<'static, (SpawnTicket, BackendResult<TermId>)>>;
+type Checking = FuturesUnordered<BoxFuture<'static, CheckDone>>;
 
 struct Server {
     driver: Driver,
@@ -138,6 +183,16 @@ struct Server {
     layout_armed: bool,
     spawns: Spawns,
     spawning: Spawning,
+    panels: PanelStore,
+    scratch: Arc<dyn ScratchStore>,
+    diagram_check: Arc<dyn DiagramCheck>,
+    wall: Arc<dyn WallClock>,
+    /// Diagram checks that run beside the loop, never awaited inline.
+    checking: Checking,
+    panel_timer: Pin<Box<Sleep>>,
+    panel_armed: bool,
+    panel_calls: Option<BoxStream<'static, PanelCall>>,
+    panel_answers: Vec<PanelAnswer>,
     housekeeping: Interval,
 }
 
@@ -202,10 +257,17 @@ pub async fn serve_watched(
         file_store,
         layout_timing,
         project_dirs,
+        diagram_check,
+        wall_clock,
+        scratch,
+        panel_timing,
+        panel_calls,
     } = parts;
     let Watched { watch, list } = watched;
     terminals.apply_list(&list);
     terminals.take_changed();
+    let panel_calls = panel_calls
+        .map(|mut calls| futures::stream::poll_fn(move |cx| calls.poll_recv(cx)).boxed());
 
     let (inbox_tx, inbox) = mpsc::channel(INBOX);
     let mut housekeeping = tokio::time::interval(options.housekeeping);
@@ -233,11 +295,35 @@ pub async fn serve_watched(
         layout_armed: false,
         spawns: Spawns::new(project_dirs),
         spawning: FuturesUnordered::new(),
+        panels: PanelStore::new(panel_timing),
+        scratch,
+        diagram_check,
+        wall: wall_clock,
+        checking: FuturesUnordered::new(),
+        panel_timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
+        panel_armed: false,
+        panel_calls,
+        panel_answers: Vec::new(),
         housekeeping,
     };
-    let result = server.run(shutdown).await;
-    server.layouts.flush_all(server.clock.now());
-    server.run_layout_effects().await;
+    let mut shutdown = std::pin::pin!(shutdown);
+    let now = server.clock.now();
+    server.panels.start(now);
+    server.add_terminal_spaces(now);
+    // The start-up load runs before the first wake, so the timers are armed and a call that
+    // arrives first finds the spaces loading or loaded.
+    let result = match until_shutdown(shutdown.as_mut(), server.settle()).await {
+        None => Ok(()),
+        Some(Err(error)) => Err(error),
+        Some(Ok(())) => server.run(shutdown.as_mut()).await,
+    };
+    // A write that found an outside edit is rebased by the conflict and written by the second
+    // pass. Panels have nothing to flush: a save retry still held here is lost, and a call
+    // still queued is dropped with the receiver, which its handle reports as a stopped server.
+    for _ in 0..2 {
+        server.layouts.flush_all(server.clock.now());
+        server.run_layout_effects().await;
+    }
     server.close_all();
     drop(lock);
     result
@@ -265,6 +351,9 @@ impl Server {
                 () = &mut self.flush_timer, if self.flush_armed => Wake::Flush,
                 () = &mut self.layout_timer, if self.layout_armed => Wake::Layout,
                 Some((ticket, result)) = self.spawning.next(), if !self.spawning.is_empty() => Wake::Spawned(ticket, result),
+                Some(done) = self.checking.next(), if !self.checking.is_empty() => Wake::Checked(done),
+                () = &mut self.panel_timer, if self.panel_armed => Wake::Panel,
+                item = next_item(&mut self.panel_calls), if self.panel_calls.is_some() => Wake::PanelCall(item),
                 _ = self.housekeeping.tick() => Wake::Housekeeping,
             };
             match wake {
@@ -282,6 +371,7 @@ impl Server {
                         for state in self.conns.values_mut().filter(|state| state.watching) {
                             state.stale = true;
                         }
+                        self.add_terminal_spaces(self.clock.now());
                     }
                 }
                 Wake::Watch(None) => {
@@ -290,6 +380,11 @@ impl Server {
                 Wake::File(Some(change)) => {
                     if change.path == LAYOUT_FILE {
                         self.layouts.apply_change(&change.space);
+                    } else if change.path == PANELS_DIR
+                        || change.path.starts_with(&format!("{PANELS_DIR}/"))
+                    {
+                        self.panels
+                            .apply_change(&change.space, &change.path, self.clock.now());
                     }
                 }
                 Wake::File(None) => self.changes = None,
@@ -306,6 +401,19 @@ impl Server {
                     }
                 }
                 Wake::Spawned(ticket, result) => self.spawns.apply_spawned(ticket, result),
+                Wake::Checked(done) => self.panels.apply_check(
+                    &done.space,
+                    &done.panel,
+                    done.revision,
+                    done.result,
+                    self.clock.now(),
+                ),
+                Wake::Panel => {
+                    self.panel_armed = false;
+                    self.panels.tick(self.clock.now(), self.wall.now_unix_ms());
+                }
+                Wake::PanelCall(Some(call)) => self.panel_call(call).await,
+                Wake::PanelCall(None) => self.panel_calls = None,
                 Wake::Housekeeping => self.driver.core_mut().tick(self.clock.now()),
             }
             self.settle().await?;
@@ -626,6 +734,20 @@ impl Server {
                         self.layouts.apply_read(&space, read, self.clock.now());
                     }
                     LayoutEffect::Write { space, bytes, .. } => {
+                        // The file must still be what the daemon last saw. The window between
+                        // this read and the write's rename can't be closed: an outside write
+                        // landing in it is overwritten.
+                        let expected = FileMark::from(self.layouts.known_hash(&space));
+                        let current = self.store.read(&space, LAYOUT_FILE, LAYOUT_MAX_BYTES).await;
+                        if !expected.matches(&current) {
+                            let read = match current {
+                                Ok(file) => LayoutRead::from(file),
+                                Err(error) => LayoutRead::from(error),
+                            };
+                            self.layouts
+                                .apply_write_conflict(&space, read, self.clock.now());
+                            continue;
+                        }
                         let written = match self.store.write(&space, LAYOUT_FILE, bytes).await {
                             Ok(outcome) => LayoutWritten::from(outcome),
                             Err(error) => LayoutWritten::from(error),
@@ -715,6 +837,287 @@ impl Server {
         }
     }
 
+    /// Adds every space the terminal list names to the panels. Spaces are never dropped.
+    fn add_terminal_spaces(&mut self, now: Millis) {
+        for space in self.terminals.space_ids() {
+            self.panels.add_space(&space, now);
+        }
+    }
+
+    /// Runs one call of the panel API. A new space's listing and first reads are applied before
+    /// a create runs, so the first create in a space doesn't find it loading. The answer waits
+    /// in `panel_answers` until `settle` has run the call's file work.
+    async fn panel_call(&mut self, call: PanelCall) {
+        let now = self.clock.now();
+        let wall_ms = self.wall.now_unix_ms();
+        let answer = match call {
+            PanelCall::Create {
+                space,
+                create,
+                reply,
+            } => {
+                self.panels.add_space(&space, now);
+                self.run_panel_effects().await;
+                let result =
+                    self.panels
+                        .create(&space, create, now, wall_ms, self.driver.core_mut());
+                PanelAnswer::View(reply, result)
+            }
+            PanelCall::Update {
+                space,
+                id,
+                update,
+                reply,
+            } => {
+                let result =
+                    self.panels
+                        .update(&space, &id, update, now, wall_ms, self.driver.core_mut());
+                PanelAnswer::View(reply, result)
+            }
+            PanelCall::Remove { space, id, reply } => {
+                PanelAnswer::View(reply, self.panels.remove(&space, &id, now))
+            }
+            PanelCall::Close { space, id, reply } => {
+                PanelAnswer::View(reply, self.panels.close(&space, &id, now))
+            }
+            PanelCall::Pin { space, id, reply } => {
+                PanelAnswer::View(reply, self.panels.pin(&space, &id, now))
+            }
+            PanelCall::List { space, reply } => PanelAnswer::List(reply, self.panels.list(&space)),
+            PanelCall::Get { space, id, reply } => {
+                let result = self
+                    .panels
+                    .get(&space, &id)
+                    .map(|(view, source)| (view, source.to_owned()));
+                PanelAnswer::Get(reply, result)
+            }
+        };
+        self.panel_answers.push(answer);
+    }
+
+    fn send_panel_answers(&mut self) {
+        for answer in std::mem::take(&mut self.panel_answers) {
+            answer.send();
+        }
+    }
+
+    /// Arms the panel timer for the earliest deadline the panels have.
+    fn arm_panels(&mut self) {
+        match self.panels.next_deadline() {
+            Some(at) => {
+                let deadline = Instant::from_std(self.clock.instant_at(at));
+                self.panel_timer.as_mut().reset(deadline);
+                self.panel_armed = true;
+            }
+            None => self.panel_armed = false,
+        }
+    }
+
+    /// Runs the file store, scratch store and check work the panels asked for, until they ask
+    /// for none. Each outcome is reported before the next effect runs, so the store applies
+    /// reads in the order they were asked and knows the hashes of its own writes before their
+    /// echoes arrive. A check is started and not awaited: its verdict arrives as
+    /// `Wake::Checked`, so a slow diagram never holds terminal output.
+    async fn run_panel_effects(&mut self) {
+        loop {
+            let effects = self.panels.take_effects();
+            if effects.is_empty() {
+                return;
+            }
+            for effect in effects {
+                match effect {
+                    PanelEffect::Watch { space } => {
+                        if let Err(error) = self.store.watch(&space).await {
+                            eprintln!("combined: cannot watch {}: {error}", space.0);
+                        }
+                    }
+                    PanelEffect::ListWorkspace { space } => {
+                        let listing = self
+                            .store
+                            .list_dir(&space, PANELS_DIR, PANEL_LIST_MAX)
+                            .await;
+                        self.panels.apply_listing(&space, listing, self.clock.now());
+                    }
+                    PanelEffect::ListScratch => {
+                        let listing = self.scratch.list(SCRATCH_LIST_MAX).await;
+                        self.panels.apply_scratch_listing(listing, self.clock.now());
+                    }
+                    PanelEffect::Read { at, file } => {
+                        let bound = panel_file_bound(file);
+                        let read = match &at {
+                            PanelFolder::Workspace { space, panel } => {
+                                let path = format!("{PANELS_DIR}/{panel}/{file}");
+                                self.store.read(space, &path, bound).await
+                            }
+                            PanelFolder::Scratch(dir) => self.scratch.read(dir, file, bound).await,
+                        };
+                        self.panels.apply_read(
+                            &at,
+                            file,
+                            PanelRead::from(read),
+                            self.clock.now(),
+                            self.driver.core_mut(),
+                        );
+                    }
+                    PanelEffect::Save { ticket, at, files } => {
+                        let report = self.run_save(&at, files).await;
+                        self.panels.apply_saved(ticket, report, self.clock.now());
+                    }
+                    PanelEffect::Delete { ticket, at, files } => {
+                        let report = self.run_delete(&at, files).await;
+                        self.panels.apply_deleted(ticket, report, self.clock.now());
+                    }
+                    PanelEffect::Check {
+                        space,
+                        panel,
+                        revision,
+                        source,
+                    } => {
+                        let check = Arc::clone(&self.diagram_check);
+                        self.checking.push(Box::pin(async move {
+                            CheckDone {
+                                space,
+                                panel,
+                                revision,
+                                result: check.check(&source).await,
+                            }
+                        }));
+                    }
+                    PanelEffect::Log { text } => eprintln!("combined: {text}"),
+                }
+            }
+        }
+    }
+
+    /// Writes a save's files in order and stops at the first failure or conflict.
+    ///
+    /// A workspace save writes only into the project, never the fallback copy, and compares
+    /// each file with what the store last saw right before it writes it. A create or pin lists
+    /// the content file first, so `panel.json` is compared up front: nothing is written into a
+    /// folder that already holds one. The window between a compare and the rename stays open:
+    /// an outside write landing in it is overwritten (at create and pin it runs from the
+    /// up-front compare to the content write). A transient error in the up-front read counts
+    /// as a conflict. A scratch save is not compared, because only the daemon writes there.
+    async fn run_save(&self, at: &PanelFolder, files: Vec<crate::core::FileWrite>) -> SaveReport {
+        let mut written: Vec<(&'static str, ContentHash)> = Vec::new();
+        match at {
+            PanelFolder::Scratch(dir) => {
+                for file in files {
+                    match self.scratch.write(dir, file.file, file.bytes).await {
+                        Ok(outcome) => written.push((file.file, outcome.hash)),
+                        Err(error) => {
+                            return SaveReport {
+                                written,
+                                end: SaveEnd::Failed {
+                                    file: file.file,
+                                    error,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            PanelFolder::Workspace { space, panel } => {
+                let checks_first = files.first().is_some_and(|w| w.file != PANEL_FILE)
+                    && files.iter().any(|w| {
+                        w.file == PANEL_FILE && matches!(w.expected, Some(FileMark::Missing))
+                    });
+                if checks_first {
+                    let path = format!("{PANELS_DIR}/{panel}/{PANEL_FILE}");
+                    let read = self
+                        .store
+                        .read(space, &path, panel_file_bound(PANEL_FILE))
+                        .await;
+                    if !FileMark::Missing.matches_project(&read) {
+                        return SaveReport {
+                            written,
+                            end: SaveEnd::Conflict { file: PANEL_FILE },
+                        };
+                    }
+                }
+                for file in files {
+                    let path = format!("{PANELS_DIR}/{panel}/{}", file.file);
+                    if let Some(expected) = file.expected {
+                        let read = self
+                            .store
+                            .read(space, &path, panel_file_bound(file.file))
+                            .await;
+                        if !expected.matches_project(&read) {
+                            return SaveReport {
+                                written,
+                                end: SaveEnd::Conflict { file: file.file },
+                            };
+                        }
+                    }
+                    match self.store.write_project(space, &path, file.bytes).await {
+                        Ok(outcome) => written.push((file.file, outcome.hash)),
+                        Err(error) => {
+                            return SaveReport {
+                                written,
+                                end: SaveEnd::Failed {
+                                    file: file.file,
+                                    error,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SaveReport {
+            written,
+            end: SaveEnd::Done,
+        }
+    }
+
+    /// Removes a panel's files. A workspace delete compares every listed file first and removes
+    /// nothing when one differs; then it removes them in order, then Finder's `.DS_Store`
+    /// (uncompared, and a failure is only logged), then the folder if it is empty. A folder
+    /// that stays behind with no `panel.json` is no panel, so that failure is only logged too.
+    async fn run_delete(
+        &self,
+        at: &PanelFolder,
+        files: Vec<(&'static str, FileMark)>,
+    ) -> SaveReport {
+        let done = |end| SaveReport {
+            written: Vec::new(),
+            end,
+        };
+        match at {
+            PanelFolder::Scratch(dir) => match self.scratch.remove(dir).await {
+                Ok(()) => done(SaveEnd::Done),
+                Err(error) => done(SaveEnd::Failed {
+                    file: SCRATCH_FILE,
+                    error,
+                }),
+            },
+            PanelFolder::Workspace { space, panel } => {
+                for (file, expected) in &files {
+                    let path = format!("{PANELS_DIR}/{panel}/{file}");
+                    let read = self.store.read(space, &path, panel_file_bound(file)).await;
+                    if !expected.matches_project(&read) {
+                        return done(SaveEnd::Conflict { file });
+                    }
+                }
+                for (file, _) in &files {
+                    let path = format!("{PANELS_DIR}/{panel}/{file}");
+                    if let Err(error) = self.store.remove_file(space, &path).await {
+                        return done(SaveEnd::Failed { file, error });
+                    }
+                }
+                let path = format!("{PANELS_DIR}/{panel}/{DS_STORE}");
+                if let Err(error) = self.store.remove_file(space, &path).await {
+                    log_remove_failure(&path, &error);
+                }
+                let folder = format!("{PANELS_DIR}/{panel}");
+                if let Err(error) = self.store.remove_dir(space, &folder).await {
+                    log_remove_failure(&folder, &error);
+                }
+                done(SaveEnd::Done)
+            }
+        }
+    }
+
     /// Runs core's effects, drops what it disconnected, keeps the ID reservation ahead, and
     /// flushes or arms the flush timer when output is waiting.
     async fn settle(&mut self) -> Result<(), ServeError> {
@@ -724,7 +1127,12 @@ impl Server {
             self.queue_layouts();
             self.run_spawn_effects().await;
             self.queue_spawn_replies();
+            self.run_panel_effects().await;
+            // Nothing consumes the events yet.
+            drop(self.panels.take_events());
+            self.send_panel_answers();
             self.arm_layouts();
+            self.arm_panels();
             for conn in self.driver.take_disconnects() {
                 self.remove(conn);
             }
@@ -824,4 +1232,8 @@ fn layout_message(
             attachment: None,
         }),
     })
+}
+
+fn log_remove_failure(path: &str, error: &StoreError) {
+    eprintln!("combined: cannot remove .workspace/{path}: {error}");
 }

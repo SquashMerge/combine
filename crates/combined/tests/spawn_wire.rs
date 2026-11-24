@@ -310,6 +310,12 @@ fn list_skips_invalid_oversized_and_view_panels_others_load() {
             "content": { "type": "view", "slot": "main" }
         })),
     );
+    write_panel_memory(
+        &store,
+        &rig.space,
+        "diagram",
+        &panel_json_of(json!({ "version": 1, "renderer": "mermaid" })),
+    );
 
     let mut client = rig.client();
     let templates = rig.list(&mut client, 1);
@@ -320,8 +326,13 @@ fn list_skips_invalid_oversized_and_view_panels_others_load() {
         .collect();
     assert_eq!(names, ["good"]);
     let skipped: Vec<&str> = templates.skipped.iter().map(|s| s.panel.as_str()).collect();
-    assert_eq!(skipped, ["broken", "huge", "viewer"]);
+    assert_eq!(skipped, ["broken", "diagram", "huge", "viewer"]);
     assert!(templates.skipped.iter().all(|s| !s.reason.is_empty()));
+    let diagram = templates.skipped.iter().find(|s| s.panel == "diagram");
+    assert_eq!(
+        diagram.map(|s| s.reason.as_str()),
+        Some("not a terminal panel")
+    );
 }
 
 #[test]

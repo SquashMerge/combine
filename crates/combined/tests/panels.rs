@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 
 use combined::core::{
     normalize_cwd, parse_terminal_panel, shell_spec, template_info, template_spec,
-    valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS, DEFAULT_ROWS,
-    REASON_MAX_BYTES,
+    valid_panel_folder, CwdRefusal, PanelRead, PanelSkip, TerminalTemplate, DEFAULT_COLS,
+    DEFAULT_ROWS, REASON_MAX_BYTES,
 };
 use combined::model::{ContentHash, SpaceId};
-use combined::ports::DirRefusal;
+use combined::ports::{DirRefusal, StoreError, StoreRevision, StoredFile};
 use serde_json::{json, Value};
 
 fn panel(content: Value) -> Value {
@@ -90,6 +90,16 @@ fn view_panel_is_not_a_terminal_panel() {
     assert!(field("content")(
         &parse(&json!({ "version": 1 })).unwrap_err()
     ));
+}
+
+#[test]
+fn a_view_panel_json_is_not_a_terminal_panel() {
+    let view = json!({ "version": 1, "renderer": "mermaid", "title": "Flow" });
+    assert_eq!(parse(&view), Err(PanelSkip::NotTerminal));
+    assert_eq!(PanelSkip::NotTerminal.to_string(), "not a terminal panel");
+    assert_eq!(PanelSkip::NotView.to_string(), "not a view panel");
+    let with_content = json!({ "version": 1, "renderer": "markdown", "content": {} });
+    assert_eq!(parse(&with_content), Err(PanelSkip::NotTerminal));
 }
 
 #[test]
@@ -287,4 +297,55 @@ fn template_and_shell_specs() {
     assert_eq!(info.cwd, "sub/dir");
     assert_eq!(info.title, None);
     let _: BTreeMap<String, String> = info.env;
+}
+
+fn stored(read_only: bool) -> StoredFile {
+    StoredFile {
+        bytes: b"{}".to_vec(),
+        revision: StoreRevision(3),
+        hash: ContentHash([7; 32]),
+        read_only,
+    }
+}
+
+#[test]
+fn panel_read_keeps_the_fallback_flag() {
+    let project = PanelRead::from(Ok(Some(stored(false))));
+    assert_eq!(
+        project,
+        PanelRead::Found {
+            bytes: b"{}".to_vec(),
+            hash: ContentHash([7; 32])
+        }
+    );
+    assert!(!project.is_fallback());
+
+    let fallback = PanelRead::from(Ok(Some(stored(true))));
+    assert_eq!(
+        fallback,
+        PanelRead::FallbackFound {
+            bytes: b"{}".to_vec(),
+            hash: ContentHash([7; 32])
+        }
+    );
+    assert!(fallback.is_fallback());
+
+    let large = |read_only| PanelRead::from(Err(StoreError::TooLarge { size: 9, read_only }));
+    assert_eq!(large(false), PanelRead::TooLarge { size: 9 });
+    assert!(!large(false).is_fallback());
+    assert_eq!(large(true), PanelRead::FallbackTooLarge { size: 9 });
+    assert!(large(true).is_fallback());
+
+    assert_eq!(PanelRead::from(Ok(None)), PanelRead::Missing);
+    assert!(!PanelRead::Missing.is_fallback());
+    let failed = PanelRead::from(Err(StoreError::Unavailable("x".into())));
+    match &failed {
+        PanelRead::Failed(message) => assert!(message.contains('x'), "{message}"),
+        PanelRead::Missing
+        | PanelRead::Found { .. }
+        | PanelRead::TooLarge { .. }
+        | PanelRead::FallbackFound { .. }
+        | PanelRead::FallbackTooLarge { .. } => panic!("expected Failed, got {failed:?}"),
+    }
+    assert!(!failed.is_fallback());
 }

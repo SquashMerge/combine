@@ -8,6 +8,8 @@ mod layout_sync;
 mod log;
 mod machine;
 mod ownership;
+mod panel_file;
+mod panel_store;
 mod panels;
 mod spaces;
 mod spawn;
@@ -29,6 +31,18 @@ pub use layout_sync::{
 pub use log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats, ResumeError};
 pub use machine::{Core, OwnershipState};
 pub use ownership::{OwnershipChange, TerminalOwnership};
+pub use panel_file::{
+    clip_text, content_file, created_by_refusal, encode_scratch_meta, encode_view_panel,
+    panel_file_bound, panel_reply_len, parse_scratch_meta, parse_view_panel, valid_idempotency_key,
+    valid_slot, valid_title, ScratchMeta, CONTENT_READ_MAX_BYTES, DS_STORE,
+    IDEMPOTENCY_KEY_MAX_BYTES, MARKDOWN_FILE, MERMAID_FILE, PANEL_ERROR_TEXT_MAX, SCRATCH_FILE,
+    SCRATCH_FILE_MAX_BYTES, SOURCE_MAX_BYTES, TITLE_MAX_BYTES,
+};
+pub use panel_store::{
+    FileWrite, IdSource, PanelApiError, PanelCreate, PanelEffect, PanelEvent, PanelFolder,
+    PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd, SaveReport, SaveTicket,
+    MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
+};
 pub use panels::{
     normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,
     template_spec, valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS,

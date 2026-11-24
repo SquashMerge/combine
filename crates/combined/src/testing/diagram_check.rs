@@ -3,6 +3,7 @@
 //! runs no threads and reads no clock.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -23,6 +24,17 @@ struct FakeState {
 /// A [`DiagramCheck`] that answers from a script and records what it was asked.
 pub struct FakeDiagramCheck {
     state: Mutex<FakeState>,
+    in_flight: AtomicUsize,
+    peak_in_flight: AtomicUsize,
+}
+
+/// Counts one check as in flight until it is dropped.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for FakeDiagramCheck {
@@ -41,6 +53,8 @@ impl FakeDiagramCheck {
                 holds: HashMap::new(),
                 calls: Vec::new(),
             }),
+            in_flight: AtomicUsize::new(0),
+            peak_in_flight: AtomicUsize::new(0),
         }
     }
 
@@ -68,6 +82,16 @@ impl FakeDiagramCheck {
     /// Every source checked so far, in call order.
     pub fn calls(&self) -> Vec<String> {
         self.state().calls.clone()
+    }
+
+    /// How many checks have started and not yet answered.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// The most checks that were in flight at once.
+    pub fn peak_in_flight(&self) -> usize {
+        self.peak_in_flight.load(Ordering::SeqCst)
     }
 }
 
@@ -97,6 +121,9 @@ impl DiagramCheck for FakeDiagramCheck {
             state.calls.push(source.to_owned());
             state.holds.get(source).cloned()
         };
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _counted = InFlight(&self.in_flight);
         if let Some(mut released) = hold {
             // `Ok`: the hold was released. `Err`: its sender is gone, which only happens once
             // the hold is dropped, so that releases the check too.
@@ -205,6 +232,28 @@ mod tests {
         settle().await;
         assert!(task.is_finished());
         assert_eq!(task.await.unwrap(), Ok(failure()));
+    }
+
+    #[tokio::test]
+    async fn counts_checks_in_flight_and_their_peak() {
+        let fake = Arc::new(FakeDiagramCheck::new());
+        assert_eq!((fake.in_flight(), fake.peak_in_flight()), (0, 0));
+        let hold = fake.hold("slow");
+        let tasks: Vec<_> = (0..2)
+            .map(|_| {
+                let fake = fake.clone();
+                tokio::spawn(async move { fake.check("slow").await })
+            })
+            .collect();
+        settle().await;
+        assert_eq!((fake.in_flight(), fake.peak_in_flight()), (2, 2));
+        assert_eq!(fake.check("fast").await, Ok(DiagramVerdict::Validated));
+        assert_eq!((fake.in_flight(), fake.peak_in_flight()), (2, 3));
+        hold.release();
+        for task in tasks {
+            let _ = task.await;
+        }
+        assert_eq!((fake.in_flight(), fake.peak_in_flight()), (0, 3));
     }
 
     #[tokio::test]

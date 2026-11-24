@@ -15,16 +15,18 @@ use crate::adapters::fs::file_store::FsFileStore;
 use crate::adapters::fs::git_probe::FsGitProbe;
 use crate::adapters::fs::host_id;
 use crate::adapters::fs::project_dirs::FsProjectDirs;
+use crate::adapters::fs::scratch_store::FsScratchStore;
 use crate::adapters::loader::DiagramLimits;
-use crate::core::{Core, CoreConfig, Driver, LayoutTiming, TerminalList};
+use crate::core::{Core, CoreConfig, Driver, LayoutTiming, PanelTiming, TerminalList};
 use crate::ports::{FileStore, TerminalBackend};
 use crate::rpc::socket::{self, BindError};
 use crate::rpc::{self, ServeError, ServeOptions, ServerParts, ServerStats};
 use cli::Command;
-use clock::MonotonicClock;
+use clock::{MonotonicClock, SystemWallClock};
 use combine_protocol::HostId;
 use config::{DaemonConfigError, DaemonEnv};
 use ids::IdReservation;
+use panels::PanelParts;
 use tokio::signal::unix::{signal, SignalKind};
 
 pub mod backend;
@@ -33,6 +35,7 @@ pub mod clock;
 pub mod config;
 pub mod diagram;
 pub mod ids;
+pub mod panels;
 
 /// Why the daemon did not start or stopped.
 #[derive(Debug)]
@@ -181,6 +184,28 @@ pub fn server_parts_with(
     file_store: Arc<dyn FileStore>,
     layout_timing: LayoutTiming,
 ) -> Result<ServerParts, StartError> {
+    server_parts_with_panels(
+        backend,
+        id_base,
+        host_id,
+        ids,
+        file_store,
+        layout_timing,
+        panels::default_parts(),
+    )
+}
+
+/// [`server_parts_with`] with the panel parts named, for `run_serve` and for tests that need
+/// their own diagram check, scratch store or clock.
+pub fn server_parts_with_panels(
+    backend: Arc<dyn TerminalBackend>,
+    id_base: u64,
+    host_id: HostId,
+    ids: IdReservation,
+    file_store: Arc<dyn FileStore>,
+    layout_timing: LayoutTiming,
+    panels: PanelParts,
+) -> Result<ServerParts, StartError> {
     let core = Core::new(
         CoreConfig {
             id_base,
@@ -198,6 +223,11 @@ pub fn server_parts_with(
         file_store,
         layout_timing,
         project_dirs: Box::new(FsProjectDirs),
+        diagram_check: panels.diagram_check,
+        wall_clock: panels.wall_clock,
+        scratch: panels.scratch,
+        panel_timing: panels.timing,
+        panel_calls: None,
     })
 }
 
@@ -286,21 +316,26 @@ fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
                 _ = interrupt.recv() => {}
             }
         });
-        // Pele's warm runtime builds now, beside the backend, and lives as long as the daemon;
-        // M2-S3 hands it to the panels through ServerParts.
-        let _diagram_check = diagram::build(DiagramLimits::default());
+        // Pele's warm runtime builds now, beside the backend, and lives as long as the daemon.
+        let diagram_check = diagram::build(DiagramLimits::default());
         let Some(backend) =
             rpc::until_shutdown(shutdown.as_mut(), backend::build(&resolved.backend)).await
         else {
             return Ok(Served::Cancelled);
         };
-        let parts = server_parts_with(
+        let parts = server_parts_with_panels(
             backend?,
             id_base,
             host_id,
             ids,
             Arc::new(FsFileStore::with_fallback(layouts_dir)),
             LayoutTiming::default(),
+            PanelParts {
+                diagram_check,
+                wall_clock: Arc::new(SystemWallClock),
+                scratch: Arc::new(FsScratchStore::new(data_dir.scratch())),
+                timing: PanelTiming::default(),
+            },
         )?;
         serve_after_build(
             parts,

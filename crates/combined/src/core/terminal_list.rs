@@ -71,6 +71,15 @@ impl TerminalList {
         self.spaces.contains(space)
     }
 
+    /// The IDs of the listed spaces, sorted.
+    pub fn space_ids(&self) -> Vec<SpaceId> {
+        self.spaces
+            .spaces()
+            .into_iter()
+            .map(|space| space.id)
+            .collect()
+    }
+
     /// A full snapshot: terminals in the backend's list order, and the spaces that hold them
     /// sorted by ID.
     pub fn snapshot(&self, request: Option<RequestId>) -> Terminals {

@@ -1,11 +1,13 @@
-//! Reports changes to each watched space's `.workspace/layout.json`.
+//! Reports changes to each watched space's `.workspace/layout.json` and to its panel files.
 //!
-//! The watcher covers `<space>` and `<space>/.workspace/`, both non-recursively, so it sees the
-//! file being written, renamed over or removed, and the folder being created after the watch
-//! began. [`classify`] turns a raw notify event into the changes the daemon cares about;
-//! everything else, including the writer's own temp files, is dropped.
+//! The watcher covers `<space>` non-recursively and `<space>/.workspace/` recursively, so it
+//! sees the file being written, renamed over or removed, panel folders and files below it, and
+//! the folder being created after the watch began. [`classify`] turns a raw notify event into
+//! the changes the daemon cares about; everything else, including the writer's own temp files,
+//! is dropped. The scratch area is the daemon's own and is not watched.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 
@@ -18,6 +20,8 @@ use crate::ports::FileChange;
 
 const LAYOUT_FILE: &str = "layout.json";
 const WORKSPACE: &str = ".workspace";
+const PANELS_DIR: &str = "panels";
+const PANEL_FILES: [&str; 3] = ["panel.json", "diagram.mmd", "content.md"];
 
 struct WatchedSpace {
     space: SpaceId,
@@ -71,19 +75,22 @@ impl WatchRoots {
     }
 }
 
-/// The `layout.json` changes in `event`: the exact name, directly under a watched space's
-/// `.workspace/`. A name starting with `.` is a temp file and is never reported. Every event
-/// kind counts (a rename onto the file and a removal included) except the ones that only
-/// observe a read, which the daemon's own reads would otherwise feed back. An event that asks
-/// for a rescan (events were lost) gives a change for every watched space, since a re-read
-/// that finds the same bytes is ignored.
+/// The changes in `event`, for the paths under a watched space's `.workspace/`:
+/// - `layout.json` reports `layout.json`;
+/// - `panels` and `panels/<id>` (a panel folder created, removed, renamed or replaced) report
+///   `panels`;
+/// - `panels/<id>/<file>` for `panel.json`, `diagram.mmd` and `content.md` reports
+///   `panels/<id>/<file>`.
+///
+/// A path with any segment starting with `.` (a temp file, `.DS_Store`, a folder renamed away)
+/// is never reported, and neither is anything else. Every event kind counts (a rename onto the
+/// file and a removal included) except the ones that only observe a read, which the daemon's own
+/// reads would otherwise feed back. An event that asks for a rescan (events were lost) gives
+/// `layout.json` and `panels` for every watched space, since a re-read that finds the same
+/// bytes is ignored.
 pub fn classify(event: &Event, roots: &WatchRoots) -> Vec<FileChange> {
     if event.need_rescan() {
-        return roots
-            .spaces
-            .iter()
-            .map(|watched| layout_change(&watched.space))
-            .collect();
+        return all_changes(roots);
     }
     if matches!(
         event.kind,
@@ -95,28 +102,47 @@ pub fn classify(event: &Event, roots: &WatchRoots) -> Vec<FileChange> {
     }
     let mut changes = Vec::new();
     for path in &event.paths {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') || name != LAYOUT_FILE {
-            continue;
-        }
-        let Some(parent) = path.parent() else {
-            continue;
-        };
-        let Some(watched) = roots
-            .spaces
-            .iter()
-            .find(|watched| watched.names_workspace(parent))
-        else {
-            continue;
-        };
-        let change = layout_change(&watched.space);
-        if !changes.contains(&change) {
-            changes.push(change);
+        for watched in &roots.spaces {
+            let Some(relative) = watched
+                .workspaces
+                .iter()
+                .find_map(|workspace| path.strip_prefix(workspace).ok())
+            else {
+                continue;
+            };
+            let Some(change) = panel_or_layout_change(&watched.space, relative) else {
+                continue;
+            };
+            if !changes.contains(&change) {
+                changes.push(change);
+            }
         }
     }
     changes
+}
+
+/// The change for `relative`, a path below a space's `.workspace/`, if it is one to report.
+fn panel_or_layout_change(space: &SpaceId, relative: &Path) -> Option<FileChange> {
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return None;
+        };
+        let segment = segment.to_str()?;
+        if segment.starts_with('.') {
+            return None;
+        }
+        segments.push(segment);
+    }
+    match segments[..] {
+        [LAYOUT_FILE] => Some(layout_change(space)),
+        [PANELS_DIR] | [PANELS_DIR, _] => Some(panels_change(space)),
+        [PANELS_DIR, id, file] if PANEL_FILES.contains(&file) => Some(FileChange {
+            space: space.clone(),
+            path: format!("{PANELS_DIR}/{id}/{file}"),
+        }),
+        _ => None,
+    }
 }
 
 fn layout_change(space: &SpaceId) -> FileChange {
@@ -126,16 +152,64 @@ fn layout_change(space: &SpaceId) -> FileChange {
     }
 }
 
+fn panels_change(space: &SpaceId) -> FileChange {
+    FileChange {
+        space: space.clone(),
+        path: PANELS_DIR.to_string(),
+    }
+}
+
+/// `layout.json` then `panels` for one space.
+fn space_changes(space: &SpaceId) -> [FileChange; 2] {
+    [layout_change(space), panels_change(space)]
+}
+
+fn all_changes(roots: &WatchRoots) -> Vec<FileChange> {
+    roots
+        .spaces
+        .iter()
+        .flat_map(|watched| space_changes(&watched.space))
+        .collect()
+}
+
 /// What the event handler and the re-arm thread share. It never owns the notify watcher: the
 /// handler runs on the watcher's own thread, and dropping a watcher from there would hang.
 struct Shared {
     roots: Mutex<WatchRoots>,
     changes: UnboundedSender<FileChange>,
+    /// The number of successful [`arm`] calls.
+    arms: AtomicU64,
+    /// The paths registered with the notify watcher, each once.
+    registered: Mutex<Vec<PathBuf>>,
 }
 
 impl Shared {
     fn roots(&self) -> MutexGuard<'_, WatchRoots> {
         self.roots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn registered(&self) -> MutexGuard<'_, Vec<PathBuf>> {
+        self.registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers `path` with `watcher`. A path that is already registered is unwatched first,
+    /// so it never counts twice.
+    fn register(
+        &self,
+        watcher: &mut RecommendedWatcher,
+        path: &Path,
+        mode: RecursiveMode,
+    ) -> notify::Result<()> {
+        let mut registered = self.registered();
+        if let Some(index) = registered.iter().position(|known| known == path) {
+            let _ = watcher.unwatch(path);
+            registered.remove(index);
+        }
+        watcher.watch(path, mode)?;
+        registered.push(path.to_path_buf());
+        Ok(())
     }
 }
 
@@ -157,8 +231,8 @@ fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> bool {
             _ => return false,
         }
     };
-    if watcher
-        .watch(&workspace, RecursiveMode::NonRecursive)
+    if shared
+        .register(watcher, &workspace, RecursiveMode::Recursive)
         .is_err()
     {
         return false;
@@ -171,6 +245,7 @@ fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> bool {
     {
         watched.armed = true;
     }
+    shared.arms.fetch_add(1, Ordering::SeqCst);
     true
 }
 
@@ -185,6 +260,8 @@ impl SpaceWatcher {
         let shared = Arc::new(Shared {
             roots: Mutex::new(WatchRoots::new()),
             changes,
+            arms: AtomicU64::new(0),
+            registered: Mutex::new(Vec::new()),
         });
         let (rearm, requests) = mpsc::channel();
         let handler_shared = Arc::clone(&shared);
@@ -212,7 +289,10 @@ impl SpaceWatcher {
         let watched = {
             let mut guard = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_mut() {
-                Some(watcher) => watcher.watch(Path::new(&space.0), RecursiveMode::NonRecursive),
+                Some(watcher) => {
+                    self.shared
+                        .register(watcher, Path::new(&space.0), RecursiveMode::NonRecursive)
+                }
                 None => Ok(()),
             }
         };
@@ -223,10 +303,30 @@ impl SpaceWatcher {
         arm(&self.shared, &self.watcher, space);
         Ok(())
     }
+
+    /// True while `space`'s `.workspace/` is being watched.
+    pub fn is_armed(&self, space: &SpaceId) -> bool {
+        self.shared
+            .roots()
+            .spaces
+            .iter()
+            .any(|watched| &watched.space == space && watched.armed)
+    }
+
+    /// The number of times a `.workspace/` watch has been set up. A re-arm is counted before
+    /// its synthetic changes are sent.
+    pub fn arms(&self) -> u64 {
+        self.shared.arms.load(Ordering::SeqCst)
+    }
+
+    /// The paths registered with the notify watcher, each once.
+    pub fn watched_paths(&self) -> Vec<PathBuf> {
+        self.shared.registered().clone()
+    }
 }
 
-/// Watches the `.workspace/` folders the handler saw appear, and reports `layout.json` for
-/// each, since the file may have been written before the watch began. Ends when the watcher
+/// Watches the `.workspace/` folders the handler saw appear, and reports `layout.json` and
+/// `panels` for each, since the files may have been written before the watch began. Ends when the watcher
 /// that owns the handler's sender is dropped.
 fn rearm_loop(shared: &Shared, cell: &Weak<WatcherCell>, requests: &mpsc::Receiver<SpaceId>) {
     for space in requests {
@@ -234,7 +334,9 @@ fn rearm_loop(shared: &Shared, cell: &Weak<WatcherCell>, requests: &mpsc::Receiv
             return;
         };
         if arm(shared, &cell, &space) {
-            let _ = shared.changes.send(layout_change(&space));
+            for change in space_changes(&space) {
+                let _ = shared.changes.send(change);
+            }
         }
     }
 }
@@ -244,11 +346,7 @@ fn handle(shared: &Shared, rearm: &mpsc::Sender<SpaceId>, result: notify::Result
     let changes = {
         let mut roots = shared.roots();
         let Ok(event) = &result else {
-            let all: Vec<_> = roots
-                .spaces
-                .iter()
-                .map(|watched| layout_change(&watched.space))
-                .collect();
+            let all = all_changes(&roots);
             drop(roots);
             for change in all {
                 let _ = shared.changes.send(change);
