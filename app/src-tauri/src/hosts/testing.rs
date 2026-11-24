@@ -34,8 +34,11 @@ use super::supervisor::{Clock, HostEvents, StopSignal, Wake};
 pub const HOST_A: &str = "6a1d3c9e-2f4b-4e8a-b7c5-1d0e9f8a7b6c";
 pub const HOST_B: &str = "0f8c2a6e-4b1d-4c5e-9a7b-3d2e1f0a9b8c";
 
-/// How long a test waits for something that should already be happening.
-pub const WAIT: Duration = Duration::from_secs(5);
+/// How long a test waits for something that should already be happening. It is only an upper
+/// bound, so a test fails instead of hanging; every wait returns as soon as its state arrives.
+/// It is generous because `./tools/verify` runs these tests beside the whole workspace on a busy
+/// machine, where a thread can go unscheduled for seconds (#27).
+pub const WAIT: Duration = Duration::from_secs(30);
 
 pub fn host_id(s: &str) -> HostId {
     HostId(s.to_string())
@@ -98,7 +101,8 @@ pub fn write_welcome_file(dir: &Path, id: &HostId) -> PathBuf {
 
 /// Receives the next value or fails the test after [`WAIT`].
 pub fn recv<T>(rx: &Receiver<T>) -> T {
-    rx.recv_timeout(WAIT).expect("nothing arrived within 5 s")
+    rx.recv_timeout(WAIT)
+        .unwrap_or_else(|_| panic!("nothing arrived within {WAIT:?}"))
 }
 
 /// True when the thread ends within `limit`. Nothing sleeps: a helper thread joins and signals.
