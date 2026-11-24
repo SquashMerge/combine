@@ -3291,3 +3291,138 @@ fn the_scratch_listing_error_emits_listing_when_it_starts_changes_and_clears() {
     );
     assert!(has_listing(&rig.ev()));
 }
+
+const HUNDRED: &str = "the space already has 100 panels; this folder isn't read";
+
+fn skip_of(rig: &Rig, id: &str) -> Option<String> {
+    skipped_of(rig)
+        .into_iter()
+        .find(|(panel, _)| panel == id)
+        .map(|(_, reason)| reason)
+}
+
+fn scratch_ids(count: usize) -> Vec<String> {
+    (0..count).map(|n| format!("s{n:03}")).collect()
+}
+
+#[test]
+fn a_listing_with_100_scratch_panels_admits_no_outside_folder() {
+    let ids = scratch_ids(100);
+    let items: Vec<(&str, u64)> = ids.iter().map(|id| (id.as_str(), T)).collect();
+    let mut rig = Rig::from_scratch(&items);
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 100);
+
+    rig.store
+        .apply_listing(&space(), listing(&["outside"]), rig.t());
+    assert!(reads(&rig.fx()).is_empty());
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 100);
+    assert_eq!(skip_of(&rig, "outside").as_deref(), Some(HUNDRED));
+}
+
+#[test]
+fn a_folder_event_with_100_scratch_panels_admits_nothing() {
+    let ids = scratch_ids(100);
+    let items: Vec<(&str, u64)> = ids.iter().map(|id| (id.as_str(), T)).collect();
+    let mut rig = Rig::from_scratch(&items);
+
+    rig.store
+        .apply_change(&space(), "panels/outside/panel.json", rig.t());
+    rig.tick(rig.timing.debounce_ms);
+    assert!(reads(&rig.fx()).is_empty());
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 100);
+    assert_eq!(skip_of(&rig, "outside").as_deref(), Some(HUNDRED));
+}
+
+#[test]
+fn a_restart_with_mixed_lifetimes_loads_exactly_100_and_keeps_the_rest_on_disk() {
+    let mut rig = Rig::new();
+    let mut store = started_store(rig.timing);
+    store.add_space(&space(), rig.t());
+    let scratch: Vec<String> = scratch_ids(60);
+    let workspace: Vec<String> = (0..60).map(|n| format!("w{n:03}")).collect();
+    store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: scratch.iter().map(|id| sdir(id)).collect(),
+            truncated: false,
+        }),
+        rig.t(),
+    );
+    for id in &scratch {
+        store.apply_read(
+            &PanelFolder::Scratch(sdir(id)),
+            "scratch.json",
+            found(&meta_json(T)),
+            rig.t(),
+            &mut rig.ids,
+        );
+    }
+    let names: Vec<&str> = workspace.iter().map(String::as_str).collect();
+    store.apply_listing(&space(), listing(&names), rig.t());
+    store.take_effects();
+    for id in &workspace {
+        store.apply_read(
+            &at(id),
+            "panel.json",
+            found(md_json()),
+            rig.t(),
+            &mut rig.ids,
+        );
+        store.apply_read(
+            &at(id),
+            "content.md",
+            found(id.as_bytes()),
+            rig.t(),
+            &mut rig.ids,
+        );
+    }
+    for id in &scratch {
+        let folder = PanelFolder::Scratch(sdir(id));
+        store.apply_read(
+            &folder,
+            "panel.json",
+            found(md_json()),
+            rig.t(),
+            &mut rig.ids,
+        );
+        store.apply_read(
+            &folder,
+            "content.md",
+            found(id.as_bytes()),
+            rig.t(),
+            &mut rig.ids,
+        );
+    }
+    let effects = store.take_effects();
+    let panels = store.list(&space()).unwrap().panels;
+    assert_eq!(panels.len(), 100);
+    let loaded_scratch = panels
+        .iter()
+        .filter(|view| view.lifetime == Lifetime::Scratch)
+        .count();
+    assert_eq!(loaded_scratch, 40);
+    assert!(panels.iter().any(|view| view.id == "s039"));
+    assert!(panels.iter().all(|view| view.id != "s040"));
+    assert!(scratch_deletes(&effects).is_empty(), "{effects:?}");
+}
+
+#[test]
+fn queued_first_sight_reads_completing_together_never_exceed_100() {
+    let names: Vec<String> = (0..99).map(|n| format!("p{n:03}")).collect();
+    let loaded: Vec<(&str, &str)> = names.iter().map(|id| (id.as_str(), "x")).collect();
+    let mut rig = Rig::with_folders(&loaded);
+    let fresh = ["n1", "n2", "n3", "n4", "n5"];
+    for id in fresh {
+        rig.store
+            .apply_change(&space(), &format!("panels/{id}/panel.json"), rig.t());
+    }
+    rig.tick(rig.timing.debounce_ms);
+    let asked = reads(&rig.fx());
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    for (id, _) in &asked {
+        rig.pair(id, found(md_json()), found(b"y"));
+    }
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 100);
+    for id in fresh.iter().filter(|id| **id != asked[0].0) {
+        assert_eq!(skip_of(&rig, id).as_deref(), Some(HUNDRED), "{id}");
+    }
+}

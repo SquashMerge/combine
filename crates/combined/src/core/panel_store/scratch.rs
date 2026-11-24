@@ -10,7 +10,7 @@ use super::{
     file_path, outside_source, split_read, too_large_source, unread_refusal, FileWrite,
     FolderState, Got, IdSource, Missing, OpKind, Out, PanelApiError, PanelEffect, PanelEvent,
     PanelFolder, PanelStore, PanelView, Record, SaveEnd, SaveReport, SaveTicket, ScratchGlobal,
-    ScratchLoad, SpaceState, Stamp, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
+    ScratchLoad, SpaceState, Stamp, MAX_PANELS, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
 };
 use crate::core::layout_sync::store_error_detail;
 use crate::core::panel_file::{
@@ -523,6 +523,16 @@ impl SpaceState {
             );
             return;
         }
+        if self.count() >= MAX_PANELS {
+            self.log(
+                out,
+                format!(
+                    "the scratch panel {id} of {} isn't loaded: the space already has {MAX_PANELS} panels; its scratch folder stays on disk and is deleted when it expires",
+                    self.id.0
+                ),
+            );
+            return;
+        }
         out.effects.push(PanelEffect::Read {
             at: PanelFolder::Scratch(dir.clone()),
             file: PANEL_FILE,
@@ -532,7 +542,9 @@ impl SpaceState {
     }
 
     pub(super) fn admit_waiting(&mut self, out: &mut Out) {
-        for dir in std::mem::take(&mut self.waiting_scratch) {
+        let mut waiting = std::mem::take(&mut self.waiting_scratch);
+        waiting.sort_by(|a, b| a.panel.cmp(&b.panel));
+        for dir in waiting {
             self.admit(out, dir);
         }
     }

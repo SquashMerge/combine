@@ -358,6 +358,37 @@ fn the_101st_create_is_refused_and_nothing_is_written() {
 }
 
 #[test]
+fn an_outside_folder_is_not_admitted_past_100_scratch_panels() {
+    let rig = PanelRig::new();
+    for n in 0..MAX_PANELS {
+        rig.create(named(&format!("p{n:03}"), scratch(markdown("x"))))
+            .unwrap();
+    }
+    assert_eq!(
+        rig.create(named("extra", scratch(markdown("x"))))
+            .unwrap_err(),
+        PanelApiError::PanelLimit {
+            count: MAX_PANELS,
+            limit: MAX_PANELS
+        }
+    );
+    rig.store
+        .write_quiet(&rig.space, &file_path("outside"), THEIRS_JSON.to_vec());
+    rig.store
+        .write_quiet(&rig.space, &content_path("outside"), b"theirs".to_vec());
+    rig.store.notify_outside(&rig.space, "panels");
+    let skipped = wait_until(WAIT, || {
+        let list = rig.panels.list(&rig.space).unwrap();
+        list.skipped.iter().any(|skip| skip.panel == "outside")
+    });
+    assert!(skipped, "the outside folder was never listed as skipped");
+    let ids = rig.list_ids();
+    assert_eq!(ids.len(), MAX_PANELS);
+    assert!(!ids.iter().any(|id| id == "outside"));
+    assert_eq!(rig.connections(), 0);
+}
+
+#[test]
 fn remove_deletes_the_panel_files_and_ds_store_and_frees_the_id() {
     let rig = PanelRig::new();
     rig.create(named("p", markdown("one"))).unwrap();

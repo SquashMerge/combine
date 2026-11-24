@@ -650,19 +650,31 @@ impl SpaceState {
         }
     }
 
-    /// The counted folders plus the live Scratch records, at least 100 when the listing had more.
-    fn count(&self) -> usize {
+    /// The panels the space holds or has promised to: folders holding a panel or being read
+    /// (an empty folder only while a read of it is out), symlinked folders, live Scratch records and Scratch folders being read. Every admission
+    /// path checks this one budget, so a read that is asked for but not yet answered already
+    /// takes its place.
+    fn held(&self) -> usize {
         let folders = self
             .folders
-            .values()
-            .filter(|state| matches!(state, FolderState::Panel | FolderState::Symlink))
+            .iter()
+            .filter(|(id, state)| match state {
+                FolderState::Panel | FolderState::Symlink | FolderState::Reading => true,
+                FolderState::Empty => self.reads_out.contains_key(id.as_str()),
+                FolderState::NotRead | FolderState::Shadowed { .. } => false,
+            })
             .count();
         let scratch = self
             .records
             .values()
             .filter(|rec| rec.lifetime == Lifetime::Scratch && rec.live())
             .count();
-        let count = folders + scratch;
+        folders + scratch + self.scratch_reading.len()
+    }
+
+    /// `held`, at least 100 when the listing had more.
+    fn count(&self) -> usize {
+        let count = self.held();
         if self.over_hundred {
             count.max(MAX_PANELS)
         } else {
@@ -1188,8 +1200,15 @@ impl SpaceState {
     }
 
     fn first_sight(&mut self, out: &mut Out, id: &str) {
-        if self.count() < MAX_PANELS {
+        self.admit_folder(out, id, self.count());
+    }
+
+    /// A folder the store doesn't read yet becomes `Reading` while the space holds fewer than
+    /// 100 panels, counting the reads already asked for. Otherwise it gets the 100-folder reason.
+    fn admit_folder(&mut self, out: &mut Out, id: &str, held: usize) {
+        if held < MAX_PANELS {
             self.folders.insert(id.to_owned(), FolderState::Reading);
+            self.skipped.remove(id);
             self.emit_read(out, id, PANEL_FILE);
         } else {
             self.folders.insert(id.to_owned(), FolderState::NotRead);
@@ -1749,7 +1768,7 @@ impl SpaceState {
                 self.skipped.remove(&name);
             }
         }
-        for (index, (name, kind)) in names.iter().enumerate() {
+        for (name, kind) in &names {
             if *kind == EntryKind::Symlink {
                 self.folders.insert(name.clone(), FolderState::Symlink);
                 self.skipped
@@ -1760,14 +1779,13 @@ impl SpaceState {
                 self.folders.remove(name);
                 self.skipped.remove(name);
             }
-            if self.folders.contains_key(name) || self.records.contains_key(name) {
-                continue;
-            }
-            if index < MAX_PANELS {
-                self.folders.insert(name.clone(), FolderState::Reading);
-                self.emit_read(out, name, PANEL_FILE);
-            } else {
-                self.folders.insert(name.clone(), FolderState::NotRead);
+            let known = self.records.contains_key(name)
+                || self
+                    .folders
+                    .get(name)
+                    .is_some_and(|state| *state != FolderState::NotRead);
+            if !known {
+                self.admit_folder(out, name, self.held());
             }
         }
         for (name, kind) in &shadowed {
