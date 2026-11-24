@@ -1,6 +1,8 @@
 //! The daemon's client-facing server: the socket, its connections and the flush loop.
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -21,8 +23,23 @@ pub mod flush;
 mod server;
 pub mod socket;
 
-pub use server::{serve, ServeError};
+pub use server::{serve, serve_watched, watch_backend, ServeError, Watched};
 pub use socket::BoundSocket;
+
+/// Runs `work` until it finishes or `shutdown` completes, whichever comes first: `None` means
+/// shutdown won. `shutdown` is borrowed, so one pinned future can guard each start-up step and
+/// then the server.
+pub async fn until_shutdown<S, W>(shutdown: Pin<&mut S>, work: W) -> Option<W::Output>
+where
+    S: Future<Output = ()>,
+    W: Future,
+{
+    tokio::select! {
+        biased;
+        () = shutdown => None,
+        output = work => Some(output),
+    }
+}
 
 /// Timing and size limits of the server.
 #[derive(Debug, Clone)]

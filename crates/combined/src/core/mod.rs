@@ -14,7 +14,7 @@ mod spawn;
 mod terminal_list;
 
 pub use config::{ConfigError, CoreConfig, EVENT_OVERHEAD};
-pub use driver::Driver;
+pub use driver::{Driver, MAX_QUEUED_COMMANDS};
 pub use effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 pub use layout::{
     apply_ops, default_layout, diff_fields, encode_layout, identity_origins, parse_layout,

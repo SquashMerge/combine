@@ -1,7 +1,7 @@
 #!/bin/sh
 # The herdr-core contract suite against an isolated core of its own.
 #
-#   sh tools/verify-herdr-core              the whole lane, with the 46-line audit
+#   sh tools/verify-herdr-core              the whole lane, with the 48-line audit
 #   sh tools/verify-herdr-core FILTER       only the tests whose names contain FILTER
 #   sh tools/verify-herdr-core --capture    refresh crates/combined/src/adapters/herdr_core/fixtures
 #
@@ -14,6 +14,9 @@
 # every `hc` call goes through lane_hc (one `env -i` allowlist), the only socket used is the
 # lane's own, and the only signals are the test binary's crash of the lane core (see
 # lane_safety.rs) and teardown's stop of the lane's own test binary (lane_check_own_child).
+# The daemon tests stop their own `combined serve` child with /bin/kill -TERM. They send SIGKILL,
+# through Child::kill, only to their own unreaped child (the daemon or a `combined connect`
+# bridge): when wait_exit times out, and when a failed test drops it.
 # Needs `hc` (COMBINE_HC_BIN, else the one on PATH) and python3. ./tools/verify needs neither.
 set -eu
 
@@ -51,7 +54,7 @@ if [ -z "$LANE_HC" ] || [ ! -x "$LANE_HC" ] || [ -z "$python" ]; then
 fi
 
 # Tests that restart or crash the core. Each runs alone against a core of its own.
-restart_tests="backend_crash_starts_one_new_inexact_epoch backend_restart_starts_one_new_exact_epoch inexact_terminal_stays_inexact program_exit_is_final stale_replies_are_dropped_silently watch_reports_real_core_changes"
+restart_tests="backend_crash_starts_one_new_inexact_epoch backend_restart_starts_one_new_exact_epoch inexact_terminal_stays_inexact program_exit_is_final stale_replies_are_dropped_silently two_panels_recover_across_a_herdr_core_restart watch_reports_real_core_changes"
 
 LANE_ROOT=
 LANE_SESSION=
@@ -267,8 +270,8 @@ SKIPS = {
 }
 lines = [l for l in open(sys.argv[1]).read().splitlines() if re.search(r"target=herdr-core-[0-9]", l)]
 problems = []
-if len(lines) != 46:
-    problems.append("expected 46 result lines, found %d" % len(lines))
+if len(lines) != 48:
+    problems.append("expected 48 result lines, found %d" % len(lines))
 seen = set()
 for line in lines:
     case = re.search(r"case=(\S+)", line).group(1)
@@ -289,7 +292,7 @@ if problems:
     for problem in problems:
         print("  " + problem)
     sys.exit(1)
-print("audit ok: 46 lines, 4 recorded skips, the rest pass")
+print("audit ok: 48 lines, 4 recorded skips, the rest pass")
 PY
 rm -f "$audit_log"
 if [ "$audit" -ne 0 ]; then

@@ -826,8 +826,42 @@ impl Core {
         self.command(BackendCommand::WriteAutomatic {
             attachment: id,
             generation: backend_generation,
+            ownership: reply.ownership_generation,
             bytes: reply.bytes,
         });
+    }
+
+    /// The ownership generation now current for the attachment's terminal.
+    fn ownership_generation(&self, id: AttachmentId) -> Option<OwnershipGeneration> {
+        self.attachments
+            .get(&id)
+            .and_then(|a| self.ownerships.get(&a.terminal.0))
+            .map(|ownership| ownership.state().generation)
+    }
+
+    /// Whether an automatic reply core forwarded under backend generation `generation` and
+    /// ownership generation `ownership` is still current: the attachment is bound, live under
+    /// the same backend generation (so the same epoch), still the owner under the same
+    /// ownership generation, and the backend still takes replies. The driver asks this before
+    /// it starts a reply that waited behind an earlier call, and drops the reply if it is false.
+    pub fn automatic_reply_current(
+        &self,
+        id: AttachmentId,
+        generation: BackendGeneration,
+        ownership: OwnershipGeneration,
+    ) -> bool {
+        let Some(attachment) = self.attachments.get(&id) else {
+            return false;
+        };
+        let live = matches!(
+            attachment.state,
+            State::Live { generation: current, .. } if current == generation
+        );
+        live && attachment.connection.is_some()
+            && !attachment.watch_only
+            && self.ownership_generation(id) == Some(ownership)
+            && self.is_owner(id)
+            && self.capabilities.automatic_replies
     }
 
     // ---- backend inputs ----

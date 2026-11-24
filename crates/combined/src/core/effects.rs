@@ -15,18 +15,22 @@ pub enum BackendCommand {
         terminal: TermId,
         options: AttachOptions,
     },
-    /// `ownership` on this and the next three variants is the generation core authorized the
-    /// command under. The adapter uses it to tell a stale deferred request from a current one.
+    /// `ownership` on this variant and on `Resize`, `Focus` and `SetDisplay` is the generation
+    /// core authorized the command under. The adapter uses it to tell a stale deferred request
+    /// from a current one.
     Write {
         attachment: AttachmentId,
         ownership: OwnershipGeneration,
         bytes: Vec<u8>,
     },
     /// `generation` is the backend generation of the `Started` that opened the reply's epoch.
-    /// The adapter drops the reply if the pair has been rebuilt since.
+    /// The adapter drops the reply if the pair has been rebuilt since. `ownership` is the
+    /// ownership generation core checked the reply against when it authorized it; the driver
+    /// checks it again before it starts a reply that waited in its queue.
     WriteAutomatic {
         attachment: AttachmentId,
         generation: BackendGeneration,
+        ownership: OwnershipGeneration,
         bytes: Vec<u8>,
     },
     Resize {

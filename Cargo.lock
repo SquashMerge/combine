@@ -379,6 +379,8 @@ name = "combine-app"
 version = "0.0.0"
 dependencies = [
  "combine-protocol",
+ "combined",
+ "futures",
  "serde",
  "serde_json",
  "tauri",

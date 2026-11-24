@@ -5,10 +5,13 @@
 //! never needs `hc`.
 
 mod common;
+mod daemon_support;
 #[macro_use]
 mod contract;
 #[path = "contract/cases/basics.rs"]
 mod basics;
+#[path = "contract/daemon_lane.rs"]
+mod daemon_lane;
 #[path = "contract/herdr_core_target.rs"]
 mod herdr_core_target;
 #[path = "contract/lane_safety.rs"]
@@ -240,6 +243,28 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[test]
+fn combined_connect_attach_replay_resume_on_herdr_core() {
+    if herdr_core_target::lane().is_err() {
+        return;
+    }
+    daemon_lane::run(
+        "combined_connect_attach_replay_resume_on_herdr_core",
+        daemon_lane::connect_attach_replay_resume,
+    );
+}
+
+#[test]
+fn two_panels_recover_across_a_herdr_core_restart() {
+    if herdr_core_target::lane().is_err() {
+        return;
+    }
+    daemon_lane::run(
+        "two_panels_recover_across_a_herdr_core_restart",
+        daemon_lane::two_panels_across_a_restart,
+    );
 }
 
 #[test]
