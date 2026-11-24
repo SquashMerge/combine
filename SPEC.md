@@ -1,4 +1,4 @@
-# Combine — Spec (rev 24)
+# Combine — Spec (rev 25)
 
 Updated 2026-11-24
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 24 (#49, M2-S6, Mermaid and Markdown renderers):** the client renders Mermaid and Markdown panels, and `open_url` opens their links. The contract is in the new Renderer contract paragraph. `renderSource` in `src/renderers/lazy.ts` is the only `import()` of the renderers, and it and both renderers never reject. Their outcome is `RenderOutcome`: a fragment, or an error `{ message, line?, column? }` with 1-based positions, and a source over 204,800 bytes is refused with a message and no render. Pele 1.13.0 `render()` gets the same `limit`, `maxEdges` and `outputLimit` as the daemon's check, `https` and `http` links, `data` images and a fresh `idPrefix` per render. Markdown uses markdown-it 15.0.3 (which ships its own typings) with `html: false`, and highlight.js 11.12.0 core with nine languages. Everything goes through DOMPurify 3.5.0 before insertion, with two profiles (SVG and HTML) and shared hooks: `on*` attributes, unsafe CSS values and every URL attribute but an allowed `data:` image are dropped, an image left without a source is removed, and a link becomes a marker (`data-combine-open-url`, `role="link"`, `tabindex="0"`) instead of keeping its `href`. `open_url { url }` is a host command in `app/src-tauri`: it refuses an empty URL, edge whitespace and C0 control characters, parses with the WHATWG parser (`url` 2.5.9), allows only `https` and `http`, and passes the serialized URL as the single argument of `/usr/bin/open`, with no shell. The webview calls it from a click or an Enter press on a marked link only, and a refusal is a silent no-op. The CSP is unchanged. A policy test checks every fixture's sanitized output against it, because jsdom never applies the CSP; the packaged-app check moved to S5 (#48). Limits gain a Markdown source size row. `rules.toml` gains the renderers' npm externals (D18). The daemon's vendored Pele (`PELE_VERSION` in `crates/combined/src/adapters/loader/pele.rs`, 1.13.0) and the webview's `pele` pin in `app/web/package.json` (1.13.0) are the same release.
 
 **Changes from rev 23 (#45, M2-S2, headless Mermaid validation):** the daemon validates Mermaid with no client through a `DiagramCheck` port, implemented in `adapters/loader/` on QuickJS (`rquickjs` 0.14.0, pinned exactly), which closes the engine question; M3's loaders use the same engine. Upstream npm Pele 1.13.0 is vendored unpatched as `adapters/loader/vendor/pele-1.13.0.global.js`, with its LICENSE and a provenance README, and a test checks its SHA-256 against the npm artifact's. Pele's full `render()` runs headless, so a check answers `validated` or `failed { code, message, line, column, snippet }`; `validated_parser_only`, from `parse()`, stays in the port as the fallback. A check that gets no verdict is either unavailable (the engine is down) or "no verdict" (Pele threw something that isn't a verdict on this source). The failure codes are Pele's `unsupported_diagram`, `syntax`, `semantic` and `limit`, and Combine's `too_large`, `time_limit` and `memory_limit`; Combine's codes carry no position. Where Pele gives no position for an unknown diagram type or a front-matter error, the daemon points at the diagram's first line or at the opening `---`. The Mermaid source cap is 200 KiB (204,800 bytes), and a larger source is refused with `too_large` before the engine runs. Pele is given `limit` equal to the cap, `maxEdges` 51,200 and `outputLimit` 4,000,000, and the web renderer must pass the same. For validation, the 10 s cap applies to each check and the 64 MiB cap to the engine heap (QuickJS `set_memory_limit`), Pele included. A run that hits a cap is stopped, its runtime discarded and a new one built before the next validation, and the daemon keeps running. One warm runtime, with Pele evaluated once, starts building on a dedicated thread at daemon start. An engine that can't start is logged once and leaves validation unavailable; the daemon starts anyway. Pele 1.13.0's README says it targets Mermaid 12.1.0 syntax, so that line stands; the bundle itself doesn't carry the claim. `docs/m2-s2-spike.md` records the spike, and `docs/m2-s2-bench.md` the `heavy.sh` benchmark (`tools/diagram-bench`): cold load 44.4 ms (p50 of 5); warm p50/p95 of 5.1/5.3 ms for 50 classes and 144.3/154.4 ms for 200 KiB; and 19 MiB of engine heap needed for 200 KiB.
 
@@ -717,8 +719,8 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 | Renderer | Shows | Input | Notes |
 | --- | --- | --- | --- |
 | Terminal | A live herdr/Rex terminal | Terminal slot | xterm.js with WebGL; follows the active terminal or is pinned |
-| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele 1.13.0 `render()`; Mermaid 12.1.0 syntax (as Pele's README states); themed with `--pele-*` variables |
-| Markdown | Notes, summaries, agent reports | Markdown text | Sanitized; code blocks highlighted |
+| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele 1.13.0 `render()`; Mermaid 12.1.0 syntax (as Pele's README states); `--pele-*` variables mapped to system colours on the renderer's container; sanitized with DOMPurify's SVG profile (Renderer contract) |
+| Markdown | Notes, summaries, agent reports | Markdown text | markdown-it `html: false`; fenced code highlighted with highlight.js core (bash, json, rust, typescript, javascript, python, toml, yaml, diff), other languages escaped; sanitized with DOMPurify (Renderer contract) |
 | View | A kind's view, or an inline one | View tree + data | The view language below; arranges the other renderers as nodes |
 | Table | Lists of records | JSON rows + column hints | Sort, filter, copy; keyboard navigation; virtualized; a row click can set group state |
 | Diff | Unified diffs | Diff text, or file hunks | Line numbers, collapse unchanged runs, side by side or inline |
@@ -726,6 +728,23 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 | Log | Streaming text | Text stream | Tail with pause |
 | Template | Fixed layouts the view language can't express | Logic-less HTML template + JSON | Filled by the client, sanitized with DOMPurify, no scripts; host-wired `data-action` attributes |
 | CustomHtml | Anything else | HTML/JS + JSON | Scripted sandboxed iframe, data only through `postMessage`; needs trust approval |
+
+**Renderer contract (Mermaid and Markdown).** The client renders these two renderers as follows. M2-S5's view panel host calls it.
+
+- **Entry.** `renderSource(renderer, source)` in `src/renderers/lazy.ts` is the only `import()` of the renderers, so their libraries stay out of the entry chunk. It and both renderers never reject: a failed load or a throw becomes a failure outcome.
+- **Outcome.** `RenderOutcome` in `src/model/render.ts` is `{ ok: true, fragment }` or `{ ok: false, error: { message, line?, column? } }`. Positions are 1-based; Pele's 0 means none, and the field is left out. The fragment holds one wrapper `div` with the class `combine-mermaid` or `combine-markdown`.
+- **Size.** A source over 204,800 bytes of UTF-8 is refused before rendering, with the message `The source is larger than 204,800 bytes.`.
+- **Pele options.** `limit` 204,800, `maxEdges` 51,200, `outputLimit` 4,000,000, `linkSchemes` `['https', 'http']`, `imageSchemes` `['data']`, and a fresh `idPrefix` per render, `combine-mermaid-<n>-`.
+- **markdown-it options.** `html: false`, `xhtmlOut: false`, `breaks: false`, `linkify: false`, `typographer: false`. Fenced code is highlighted by highlight.js core with nine languages: bash, json, rust, typescript, javascript, python, toml (the `ini` grammar), yaml and diff. Any other language, and any block that fails to highlight, is escaped.
+- **Sanitizing.** Both outputs go through DOMPurify with a SVG profile and an HTML profile, and the hooks below apply to both.
+  - The SVG profile is `USE_PROFILES: { svg: true }` with no filter primitives and `ADD_ATTR: ['role']`. The HTML profile is an allowlist of text, list, table, `a` and `img` elements.
+  - `foreignObject`, `style` and `script` are forbidden. `data-*` attributes are dropped.
+  - Every `on*` attribute is dropped. A value that can fetch a resource is dropped too (`isSafeCssValue`): a backslash, `@import`, `expression(`, `image-set(`, `image(`, `cross-fade(`, `element(`, `src(` and `url(` other than a `url(#id)` reference.
+  - `href`, `xlink:href`, `src` and `srcset` are dropped, with one exception: the `src` of an `img` and the `href` or `xlink:href` of an SVG `image` survive when they are `data:` URLs of `image/png`, `image/jpeg`, `image/gif` or `image/webp`. An `img` or `image` left without a source is removed.
+  - Pele's `rel` and `target` on links are dropped, because links become link markers; its `data-*` attributes such as `data-id` are dropped too.
+  - A link whose raw `href` is an absolute `https:` or `http:` URL with no edge whitespace and no control character becomes a link marker: `data-combine-open-url` holds the normalized URL, with `role="link"` and `tabindex="0"`. Any other link has no marker and does nothing.
+- **Links.** `attachRenderedLinks(container, port)` in `src/panels/renderedLinks.ts` routes a click or an Enter press on a marked link to `open_url` and prevents the default action. Other anchors are never followed. S5 mounts it on the container that holds the fragment.
+- **Theme.** The container maps Pele's `--pele-*` variables to system colours, so the diagram follows the OS light or dark scheme.
 
 **Loaders** (in the daemon, on the agent's host)
 
@@ -892,11 +911,15 @@ Several actions can be listed in order. Unknown action types are a validation er
   | `set_state`, `emit`, `refresh` | Any trigger, including timers and visibility (see Scheduling) |
 
   A timer, a countdown or a visibility trigger that names a gesture-only action is a validation error.
-- **What `open_url` accepts.** The host parses the URL and allows only `https:` and `http:`. Anything else is refused, including `javascript:`, `data:`, `file:` and other app schemes. The URL opens in the system browser, and the webview never navigates.
-- **Images.** The client never loads remote URLs. That keeps the webview's CSP at `img-src 'self' data:`, and applies the same rule to `image`, `avatar`, Templates, Markdown and SVG.
+- **What `open_url` accepts.** `open_url { url }` is a host command in `app/src-tauri`, not routed to a daemon.
+  - It refuses an empty URL, whitespace at either end and any C0 control character, without trimming.
+  - It parses with the WHATWG URL parser (`url` 2.5.9) and allows only `https:` and `http:`, after the parser lowercases the scheme. Anything else is refused, including `javascript:`, `data:`, `file:` and other app schemes.
+  - An allowed URL is passed in serialized form as the single argument of `/usr/bin/open`, with no shell. The URL opens in the system browser, and the webview never navigates.
+  - The webview calls it only from a click or an Enter press on a marked link, prevents the default action, and treats a refusal as a silent no-op.
+- **Images.** The client never loads remote URLs. That keeps the webview's CSP at `img-src 'self' data:`, and applies the same rule to `image`, `avatar`, Templates, Markdown and SVG. In Markdown and SVG a `data:` image is kept only for `image/png`, `image/jpeg`, `image/gif` and `image/webp`; any other image, including `data:image/svg+xml`, remote, protocol-relative, relative and reference-style images whose target isn't such a URL, is removed with its element.
 - **IPC.** The CSP's `connect-src` allows only Tauri's IPC, `ipc: http://ipc.localhost`. That is a local channel, not the network. Raw-byte commands need it: without it they fall back to `postMessage`, which carries only JSON.
   - A remote image reaches a panel only as a `data:` URL that its loader fetched through an approved source, such as an allowlisted CLI or an approved MCP tool.
-  - Templates, Markdown and SVG are sanitized with remote `src`, `srcset` and `href` resources removed. Their links go through `open_url`.
+  - Templates, Markdown and SVG are sanitized with remote `src`, `srcset` and `href` resources removed. Their links go through `open_url`. For Markdown and SVG the exact rules are in the Renderer contract.
 
 *Scheduling of automatic triggers.* An action fired by a timer, a countdown or a visibility change is automatic, and so is anything it causes downstream: an `emit` that triggers an `OnEvent` panel, a `set_state`, a `refresh`. The daemon's scheduler keeps that provenance through every chain and admits automatic runs at one shared point:
 - An **Interval** panel runs no more often than its interval, whatever triggers it.
@@ -1152,7 +1175,7 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
 
-**Suggested stack:** daemon in Rust with `tokio` (one task owns core; each client connection has a blocking reader and writer thread over `combine-protocol`'s codec), `serde_json`, `notify`, `rmcp`, and `rquickjs` (QuickJS) for loaders and headless Mermaid validation. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+**Suggested stack:** daemon in Rust with `tokio` (one task owns core; each client connection has a blocking reader and writer thread over `combine-protocol`'s codec), `serde_json`, `notify`, `rmcp`, and `rquickjs` (QuickJS) for loaders and headless Mermaid validation. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele 1.13.0, DOMPurify 3.5.0, markdown-it 15.0.3, highlight.js 11.12.0 (core, nine languages), and uPlot or ECharts. Remote transport: the system `ssh` binary.
 
 ## Security model
 
@@ -1188,12 +1211,12 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 - **Views:** the view language and Template views run no code. Every effect goes through the action dispatcher:
   - external links accept `https:`/`http:` only, open on a user gesture only, and open in the system browser;
   - clipboard writes and selections also need a user gesture;
-  - images are `data:` URLs only, so the CSP stays at `img-src 'self' data:`;
+  - images are `data:` URLs only (png, jpeg, gif or webp in Markdown and SVG), so the CSP stays at `img-src 'self' data:`;
   - automatic triggers are rate-limited at the scheduler.
 
   Templates are sanitized with DOMPurify, with remote resources removed, and their `data-action` arguments are checked at dispatch.
 - **CustomHtml:** `<iframe sandbox="allow-scripts">` without `allow-same-origin`, a strict CSP with no network, data only via `postMessage`, and trust approval as repo-origin code.
-- **SVG and Markdown:** always sanitized with DOMPurify before insertion, whatever Pele escapes itself.
+- **SVG and Markdown:** always sanitized with DOMPurify before insertion, whatever Pele escapes itself (profiles and hooks in the Renderer contract); the renderers also refuse a source over 204,800 bytes.
 - **Audit:** every panel records which slot created it, and the panel header shows it.
 
 **Limits** (defaults, set in `settings.json`)
@@ -1211,6 +1234,7 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 | Table rows sent to a client | 10,000 |
 | Log panel retention | 5,000 lines |
 | Mermaid source size | 200 KiB (204,800 bytes of UTF-8); a larger source is `failed` with `too_large` before the engine runs |
+| Markdown source size | 200 KiB (204,800 bytes), valid UTF-8 |
 | Terminal replay buffer | 4 MiB and 16,384 events per attachment |
 
 - For headless Mermaid validation, the 10 s cap applies to each validation, and the memory cap is the engine heap (QuickJS `set_memory_limit`), Pele included, not the process. A validation that hits either is stopped and its runtime rebuilt before the next one; the daemon keeps running. M3 confirms how loader runs apply the same caps.
