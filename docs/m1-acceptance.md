@@ -36,7 +36,7 @@ SPEC.md, rev 21, is the source of truth for the behavior checked here.
 ## Crash path: pass
 
 1. The test started with `jasons-mac-mini-alpha`'s zsh visible in the panel.
-2. `tools/m1demo/m1demo.sh crash` sent SIGKILL to the `m1demo` core's own process. It checked the core id against the default core's first, and never signals the holder.
+2. `tools/m1demo/m1demo.sh crash` sent SIGKILL to the `m1demo` core's own process. It checked the core id against the default core's first, and never signals the holder. After review, the script was made fail-closed. It pins the demo core id at `up`, and the default core's id must be read successfully. The id and the pid it kills now come from one status reply. It excludes every holder and our own process tree, and it checks the live process is herdr-core (`tools/m1demo/test_m1demo.py`).
 3. The holder kept zsh alive, and the next `hc server start` adopted it.
 4. The daemon did not restart: the adapter reconnected within its reopen window.
 5. The panel header showed **inexact**. The screen repainted from the adopted program, with zsh's partial-line `%` markers visible, which is what `Inexact` warns about. Input went back to `none` for the new epoch.

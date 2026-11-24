@@ -80,7 +80,14 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 - **D8. Caller identity.** A `CallerIdentity` port, implemented by the herdr-core adapter. `HC_TERMINAL_ID` is accepted only when `HC_TERMINAL_SOCKET` equals the daemon's herdr-core socket. Otherwise the shim falls back to matching the cwd.
 - **D9. Where panel content lives.** In a file next to `panel.json` (`diagram.mmd` or `content.md`). `panel.json` stays small, under its 8 KiB bound. Agents edit diagrams with ordinary file tools. SPEC's Persistence section lists the file.
 - **D10. Markdown limits.** 200 KB, as for Mermaid. For Markdown, "validated" means within that size and valid UTF-8.
-- **D11. Revisions and idempotency.** Revisions come from the never-repeating `ids.json` counter. Idempotency keys are scoped per space and held in memory, at most 1,024 per space. For an older revision, `panel_status` returns the current revision marked `superseded`.
+- **D11. Revisions and idempotency.**
+  - Revisions come from the never-repeating `ids.json` counter.
+  - An idempotency key is stored in the panel's own `panel.json` (`idempotency_key`), scoped to its space. A repeated `create_panel` with the same key finds that panel and returns it. That is what SPEC promises: "A repeated call with the same idempotency key returns the same panel".
+    - The key survives daemon restarts, because it is in the file.
+    - There is nothing to evict: the lookup scans the space's panels, at most 100.
+    - The guarantee lasts as long as the panel. Once a panel is removed, or a scratch panel expires, a new call with its key creates a new panel. S4 states this in SPEC and in the tool description.
+  - For an older revision, `panel_status` returns the current revision marked `superseded`.
+  - The decision was revised on 2026-11-23 after review (opencode-39): the in-memory map capped at 1,024 keys would have weakened SPEC's guarantee across restarts.
 - **D12. `created_by`.** `{ "type": "agent", "slot": <slot or null> }`. Repo files never hold a TermId.
 - **D13. Placement.** A tab in the tile the hint names, or else the first tile in tree order. No new tiles in M2. Scratch IDs leave `layout.json` when the panel is deleted.
 - **D14. Terminal tabs.** They are in M2 as S8, but not part of the done criterion. S8 also decides whether a terminal with no input owner should refit.
