@@ -93,6 +93,16 @@ fn view_panel_is_not_a_terminal_panel() {
 }
 
 #[test]
+fn a_view_panel_json_is_not_a_terminal_panel() {
+    let view = json!({ "version": 1, "renderer": "mermaid", "title": "Flow" });
+    assert_eq!(parse(&view), Err(PanelSkip::NotTerminal));
+    assert_eq!(PanelSkip::NotTerminal.to_string(), "not a terminal panel");
+    assert_eq!(PanelSkip::NotView.to_string(), "not a view panel");
+    let with_content = json!({ "version": 1, "renderer": "markdown", "content": {} });
+    assert_eq!(parse(&with_content), Err(PanelSkip::NotTerminal));
+}
+
+#[test]
 fn id_mismatch_skipped() {
     let mut value = terminal(json!({ "argv": ["sh"] }));
     value["id"] = json!("other");

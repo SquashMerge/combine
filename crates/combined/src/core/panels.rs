@@ -21,7 +21,7 @@ pub const DEFAULT_ROWS: u16 = 24;
 pub const REASON_MAX_BYTES: usize = 256;
 
 const FOLDER_RULE: &str = "it can't contain / or start with .";
-const SLOT_RULE: &str = "must be 1 to 256 bytes with no control characters";
+pub(crate) const SLOT_RULE: &str = "must be 1 to 256 bytes with no control characters";
 const ARGV_RULE: &str = "must be a non-empty list of strings with no NUL and a non-empty first";
 const ENV_RULE: &str =
     "must be an object of strings with non-empty keys without = or NUL and values without NUL";
@@ -126,6 +126,7 @@ pub enum PanelSkip {
     Version(String),
     IdMismatch,
     NotTerminal,
+    NotView,
     Field {
         path: &'static str,
         rule: &'static str,
@@ -161,6 +162,7 @@ impl fmt::Display for PanelSkip {
             }
             PanelSkip::IdMismatch => f.write_str("its id doesn't match the folder name"),
             PanelSkip::NotTerminal => f.write_str("not a terminal panel"),
+            PanelSkip::NotView => f.write_str("not a view panel"),
             PanelSkip::Field { path, rule } => write!(f, "{path} {rule}"),
             PanelSkip::Cwd { cwd, refusal } => write!(f, "cwd \"{cwd}\" {refusal}"),
         }
@@ -246,6 +248,10 @@ pub fn parse_terminal_panel(panel: &str, bytes: &[u8]) -> Result<TerminalTemplat
                 .to_owned(),
         ),
     };
+
+    if root.contains_key("renderer") {
+        return Err(PanelSkip::NotTerminal);
+    }
 
     let content = root
         .get("content")
