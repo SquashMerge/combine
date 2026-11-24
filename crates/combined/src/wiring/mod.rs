@@ -15,6 +15,7 @@ use crate::adapters::fs::file_store::FsFileStore;
 use crate::adapters::fs::git_probe::FsGitProbe;
 use crate::adapters::fs::host_id;
 use crate::adapters::fs::project_dirs::FsProjectDirs;
+use crate::adapters::loader::DiagramLimits;
 use crate::core::{Core, CoreConfig, Driver, LayoutTiming, TerminalList};
 use crate::ports::{FileStore, TerminalBackend};
 use crate::rpc::socket::{self, BindError};
@@ -30,6 +31,7 @@ pub mod backend;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod diagram;
 pub mod ids;
 
 /// Why the daemon did not start or stopped.
@@ -284,6 +286,9 @@ fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
                 _ = interrupt.recv() => {}
             }
         });
+        // Pele's warm runtime builds now, beside the backend, and lives as long as the daemon;
+        // M2-S3 hands it to the panels through ServerParts.
+        let _diagram_check = diagram::build(DiagramLimits::default());
         let Some(backend) =
             rpc::until_shutdown(shutdown.as_mut(), backend::build(&resolved.backend)).await
         else {

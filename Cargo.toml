@@ -9,3 +9,8 @@ edition = "2021"
 version = "0.0.0"
 license = "BUSL-1.1"
 repository = "https://github.com/SquashMerge/combine"
+
+# QuickJS is C, compiled by rquickjs-sys's build script at the profile's opt-level. Optimizing it in
+# dev and test builds keeps the diagram-check tests and ./tools/verify quick; release is optimized anyway.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
