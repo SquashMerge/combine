@@ -1,0 +1,17 @@
+classDiagram
+  class Animal {
+    +String name
+    +int age
+    +makeSound() void
+  }
+  class Dog {
+    +String breed
+    +fetch() bool
+  }
+  class Cat {
+    +bool indoor
+  }
+  class Owner
+  Animal <|-- Dog
+  Animal <|-- Cat
+  Owner --> Dog : walks
