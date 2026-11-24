@@ -1,4 +1,4 @@
-# Combine — Spec (rev 23)
+# Combine — Spec (rev 24)
 
 Updated 2026-11-24
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 23 (#45, M2-S2, headless Mermaid validation):** the daemon validates Mermaid with no client through a `DiagramCheck` port, implemented in `adapters/loader/` on QuickJS (`rquickjs` 0.14.0, pinned exactly), which closes the engine question; M3's loaders use the same engine. Upstream npm Pele 1.13.0 is vendored unpatched as `adapters/loader/vendor/pele-1.13.0.global.js`, with its LICENSE and a provenance README, and a test checks its SHA-256 against the npm artifact's. Pele's full `render()` runs headless, so a check answers `validated` or `failed { code, message, line, column, snippet }`; `validated_parser_only`, from `parse()`, stays in the port as the fallback. A check that gets no verdict is either unavailable (the engine is down) or "no verdict" (Pele threw something that isn't a verdict on this source). The failure codes are Pele's `unsupported_diagram`, `syntax`, `semantic` and `limit`, and Combine's `too_large`, `time_limit` and `memory_limit`; Combine's codes carry no position. Where Pele gives no position for an unknown diagram type or a front-matter error, the daemon points at the diagram's first line or at the opening `---`. The Mermaid source cap is 200 KiB (204,800 bytes), and a larger source is refused with `too_large` before the engine runs. Pele is given `limit` equal to the cap, `maxEdges` 51,200 and `outputLimit` 4,000,000, and the web renderer must pass the same. For validation, the 10 s cap applies to each check and the 64 MiB cap to the engine heap (QuickJS `set_memory_limit`), Pele included. A run that hits a cap is stopped, its runtime discarded and a new one built before the next validation, and the daemon keeps running. One warm runtime, with Pele evaluated once, starts building on a dedicated thread at daemon start. An engine that can't start is logged once and leaves validation unavailable; the daemon starts anyway. Pele 1.13.0's README says it targets Mermaid 12.1.0 syntax, so that line stands; the bundle itself doesn't carry the claim. `docs/m2-s2-spike.md` records the spike, and `docs/m2-s2-bench.md` the `heavy.sh` benchmark (`tools/diagram-bench`): cold load 44.4 ms (p50 of 5); warm p50/p95 of 5.1/5.3 ms for 50 classes and 144.3/154.4 ms for 200 KiB; and 19 MiB of engine heap needed for 200 KiB.
 
 **Changes from rev 22 (#44, M2-S1, wire protocol v5):** Wire protocol is version 5: panels and the agents' MCP channel (see Version 5 messages). `panels` rides on `watch_layout`, after the `layout` that answers it; `get_panel` is answered by `panel`, which carries the whole source; `report_render` reports a client's render status and gets no reply; `close_panel` and `pin_panel` are answered by `panel_closed` and `panel_pinned`, replies of their own. The reasons: a close changes both the layout and the panel list, so an answer by either push would be ambiguous; pushes are coalesced and carry `request: null`; and the reply arrives whether or not the connection watches the space. The layout ops `add_panel`, with an optional tile hint, and `remove_panel` put a panel ID into a layout and take one out, which `move_panel` can't; the op `remove_panel` isn't the MCP tool of that name. `mcp_open { request, caller }`, answered by `mcp_opened { request, space }`, opens the MCP channel on the daemon's socket, and then each `mcp { message }` frame carries one JSON-RPC message either way. The error codes `unknown_panel`, `unknown_caller` and `panel_limit` are added. A panel's `state` is a closed list that already holds `validated_parser_only`, `untrusted` and `removed`, and its `renderer` is `mermaid` or `markdown`. `mcp`'s `message` must be a JSON object, and the codec keeps it as its exact JSON text: decoded into a tree, a message of small objects can hold far more memory than its text, past the 32 MiB bound per decoded frame, so two messages are equal when their text is, and a message round-trips byte for byte. The field sets proposed in `docs/m2-plan.md` are kept, except that a `panels` entry's `title` may be `null`, as in `templates`, `created_by` can name the user as well as an agent, and `mcp_open` and `mcp_opened` carry a `request`, which the proposal (`mcp_open { caller }`, `mcp_opened { space }`) left out: every request carries a `request` that its answer echoes (Client to daemon), so a client can match an `mcp_opened`, or an `unknown_caller` or `invalid_request` error, to its `mcp_open`. "200 KB" in Limits is 204,800 bytes (200 KiB): such a source fits one `panel` frame even at 2 bytes a byte once escaped (409,600), and one made only of control characters escaped at 6 bytes (1,228,800) fails to encode with `FrameTooLarge`. Until the slices that build them land, the daemon answers the new requests and ops with `invalid_request` and ignores `report_render` and `mcp`.
 
@@ -715,7 +717,7 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 | Renderer | Shows | Input | Notes |
 | --- | --- | --- | --- |
 | Terminal | A live herdr/Rex terminal | Terminal slot | xterm.js with WebGL; follows the active terminal or is pinned |
-| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele `render()`; Mermaid 12.1.0 syntax; themed with `--pele-*` variables |
+| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele 1.13.0 `render()`; Mermaid 12.1.0 syntax (as Pele's README states); themed with `--pele-*` variables |
 | Markdown | Notes, summaries, agent reports | Markdown text | Sanitized; code blocks highlighted |
 | View | A kind's view, or an inline one | View tree + data | The view language below; arranges the other renderers as nodes |
 | Table | Lists of records | JSON rows + column hints | Sort, filter, copy; keyboard navigation; virtualized; a row click can set group state |
@@ -738,7 +740,7 @@ export default async function load(ctx) {
 ```
 
 - The loader's only I/O is `ctx`: `cli.run(id, args)`, `mcp.call(server, tool, args)`, `files.read(path)` inside the project, `terminal.read(slot)`, `params`, and the group's `state` and `lib`.
-- It runs in an embedded JS isolate in the daemon with no filesystem, network or process access, a time limit and a memory cap. Engine choice is open (deno_core or QuickJS).
+- It runs in an embedded JS isolate in the daemon with no filesystem, network or process access, a time limit and a memory cap. The engine is QuickJS, through `rquickjs` pinned exactly, in `adapters/loader/`; headless Mermaid validation (see Feedback) runs in it too.
 - Its return value goes through the validation pipeline (see Panel kinds) before it reaches a client.
 - A panel with no loader uses a single declared source or static content.
 
@@ -1093,7 +1095,7 @@ The coding agent already running in the space builds panels through the local da
 2. Every create or update gets a revision number. A result for an older revision never overwrites a newer one.
 3. Daemon states: `validating`, `fetching`, `validated`, `failed`, `untrusted` (waiting for the user's trust approval).
 4. Client render status is separate: `rendered` or `render_failed`, reported per client against the revision. `validated` means the spec, loader output and diagram source passed the daemon's checks; it does not prove a client drew it.
-5. Mermaid is validated in the daemon with the same Pele code the client uses, run headless if `render()` works without a DOM. If it doesn't, the daemon uses a Mermaid parser and reports its result as `validated (parser only)`.
+5. Mermaid is validated in the daemon, with no client, by the same Pele release the client uses: the daemon runs Pele's full `render()` headless in the loader isolate, with Pele's built-in text metrics and no DOM, and the result is `validated` or `failed` with Pele's code, message, line, column and snippet. Where Pele gives no position for an unknown diagram type or a front-matter error, the daemon points at the diagram's first line or at the opening `---`. If a Pele release couldn't render headless, the daemon would call Pele's `parse()` instead and report `validated (parser only)`.
 6. The tool waits up to about 5 s for `validated` or `failed` and returns that state with the error (parse message, loader stack trace), plus any client render status already in. Otherwise it returns the current state, and the agent polls `panel_status`.
 7. Closing a panel while it's pending cancels its work; later calls for it return `removed`.
 
@@ -1150,7 +1152,7 @@ Agents call their own host's daemon through the MCP shim; the client sees their 
 - Only visible terminal panels are attached. Hidden ones detach and `attach` again on show.
 - The client renders Mermaid with Pele and draws xterm.js; daemons send Mermaid source, loader output and raw bytes, never rendered output.
 
-**Suggested stack:** daemon in Rust with `tokio` (one task owns core; each client connection has a blocking reader and writer thread over `combine-protocol`'s codec), `serde_json`, `notify`, `rmcp`, and deno_core or `rquickjs` for loaders. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
+**Suggested stack:** daemon in Rust with `tokio` (one task owns core; each client connection has a blocking reader and writer thread over `combine-protocol`'s codec), `serde_json`, `notify`, `rmcp`, and `rquickjs` (QuickJS) for loaders and headless Mermaid validation. Client: Tauri 2, TypeScript with React (as in mimir and trellis), xterm.js (WebGL and Unicode 11 addons), Pele, DOMPurify, and uPlot or ECharts. Remote transport: the system `ssh` binary.
 
 ## Security model
 
@@ -1167,7 +1169,7 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 - **Network:** the daemon opens no network port; its one listener is a Unix socket, mode 0600 in a 0700 directory. `tools/arch-guard` checks the code, a test runs `lsof` where it exists, and `docs/daemon.md` has the manual check. Remote clients come in through SSH, which handles authentication, encryption and server identity. There is no WebSocket or HTTP endpoint for a browser page to reach. Never start Rex's TCP listener with `--allow-anonymous`.
 - **Host identity:** the client stores each host's ID and refuses a connection whose daemon reports a different one, on top of SSH's `known_hosts` check.
 - **MCP server (for agents):** a Unix socket with user-only permissions. Its tools change panels and run loaders in the sandbox. Through loaders and `run_loader` they can cause approved CLIs and MCP tools to run, never anything else.
-- **Loaders:** an isolate with no filesystem, network or process access. All I/O goes through `ctx`, which enforces the CLI allowlist, approved MCP servers and tools, and file containment. Time and memory limits apply.
+- **Loaders:** an isolate with no filesystem, network or process access. All I/O goes through `ctx`, which enforces the CLI allowlist, approved MCP servers and tools, and file containment. Time and memory limits apply. Headless Mermaid validation runs Pele in the same isolate under the same caps; the diagram source is data passed to Pele, never evaluated.
 - **Authorization per source:** every CLI entry, MCP server launch definition and MCP tool is approved individually in `settings.json`, with typed args, a fixed cwd and env. Avoiding shell interpolation prevents injection; approval is what keeps commands safe.
 - **Repo-origin trust:** nothing from a repo runs until the user approves it. In M1 the only repo content that can start a program is a terminal template, and the approval is the user's click: the daemon starts one only in answer to the `spawn_terminal` the client sends when the user picks it from Add terminal, which shows its env, argv and cwd exactly, with invisible characters escaped. The click carries the hash of the definition the menu showed, and the daemon runs only those exact bytes: if the file changed after it was listed, even to another valid template, the daemon refuses with `template_changed`, starts nothing, and the user must review it and choose again. Nothing from a repo spawns on its own: not opening a space, reading or watching `.workspace/`, a layout or panel file change, or a daemon start. Automatic spawning from repo content arrives with the work that needs it, and with it the approval records and the execution manifest below. The daemon builds a normalized **execution manifest** per panel. Approval is a hash of that manifest, which contains:
   - its spawn spec and declared sources;
@@ -1199,7 +1201,7 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 | What | Default |
 | --- | --- |
 | Panels per space | 100 |
-| Loader run time / memory | 10 s / 64 MB |
+| Loader run time / memory | 10 s / 64 MiB |
 | Concurrent loader runs per host | 8 |
 | Concurrent source executions (CLI, MCP) per host | 8, a separate pool |
 | Concurrent loader runs per space | 3, so one busy space can't starve others |
@@ -1208,9 +1210,10 @@ Agent-made panels and anything that arrives from a repo are untrusted: they can 
 | CLI output cap | 10 MB |
 | Table rows sent to a client | 10,000 |
 | Log panel retention | 5,000 lines |
-| Mermaid source size | 200 KiB (204,800 bytes) |
+| Mermaid source size | 200 KiB (204,800 bytes of UTF-8); a larger source is `failed` with `too_large` before the engine runs |
 | Terminal replay buffer | 4 MiB and 16,384 events per attachment |
 
+- For headless Mermaid validation, the 10 s cap applies to each validation, and the memory cap is the engine heap (QuickJS `set_memory_limit`), Pele included, not the process. A validation that hits either is stopped and its runtime rebuilt before the next one; the daemon keeps running. M3 confirms how loader runs apply the same caps.
 - Scheduling is round-robin across spaces. Manual refreshes and agent calls jump the queue; interval refreshes of hidden panels go last.
 - A loader waiting on `ctx.cli.run` or `ctx.mcp.call` holds only its loader permit; the call takes a permit from the separate source pool, so loaders can't deadlock waiting on their own children.
 - Cancelled runs (removed panel, superseded generation, timeout) free their loader permit immediately. A source fetch they started stops only when no other run still waits on it.
@@ -1229,12 +1232,12 @@ crates/
     src/mcp_server/                 entry: the agents' MCP tools
     src/adapters/herdr_core/        TerminalBackend for herdr-core
     src/adapters/sources/           CLI runner, MCP client
-    src/adapters/loader/            JS isolate
+    src/adapters/loader/            JS isolate: QuickJS (rquickjs), the vendored Pele, the DiagramCheck adapter
     src/adapters/fs/                file store, git probe, project folder checks, daemon config, host ID, ID reservation, safe writes, watcher
     src/core/                       spaces, attachment logs, ownership, panels, layout, trust, scheduler, cache, generations
-    src/ports/                      traits core needs: TerminalBackend, GitProbe, SourceRunner, LoaderEngine, FileStore, ProjectDirs
+    src/ports/                      traits core needs: TerminalBackend, GitProbe, SourceRunner, LoaderEngine, DiagramCheck, FileStore, ProjectDirs
     src/model/                      plain data shared by core, ports and adapters
-    src/testing/                    in-memory fake backend (test-support feature)
+    src/testing/                    in-memory fakes: backend, file store, diagram check (test-support feature)
     tests/
     launchd/                        the launchd agent plist (installed by hand)
   combine/                          `combine` CLI: the `combine mcp` shim
@@ -1343,13 +1346,13 @@ An M0 spike proves terminal fidelity first; M2 is where the idea is proven. Each
 
 **From rev 2**
 
-- [ ] JS engine for loaders: deno_core or QuickJS (`rquickjs`)?
+- [x] JS engine for loaders: deno_core or QuickJS (`rquickjs`)? Decided (rev 24, M2-S2): QuickJS through `rquickjs`, pinned exactly; Pele meets the 5 s wait and the 64 MiB cap in it (`docs/m2-s2-spike.md`, `docs/m2-s2-bench.md`).
 - [ ] Should a group library be per host, or synced between hosts (e.g. a dotfiles repo)?
 - [x] Is Rex in v1 scope? Decided: no. v1 is herdr-only behind the backend-neutral trait; the Rex adapter (M5) comes after v1.
 
 **From rev 1**
 
-- [ ] Does Pele's `render()` work without a DOM? Needed for headless validation in the daemon.
+- [x] Does Pele's `render()` work without a DOM? Yes: Pele 1.13.0 renders headless under QuickJS with its built-in text metrics (`docs/m2-s2-spike.md`), so the daemon validates with full `render()`.
 - [ ] Should `.workspace/` be committed or gitignored by default?
 - [ ] Where should agent-created views go by default: a new tile, a tab in the focused tile, or the scratch stack?
 - [x] Product name. Decided: Combine.
