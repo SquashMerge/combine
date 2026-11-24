@@ -96,6 +96,35 @@ printf '\000\000\000\046\001{"type":"hello","protocol_version":5}' \
 
 Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":5}`. The reply is a control frame holding `{"type":"welcome","protocol_version":5,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
+## Which ssh to use for the bridge
+
+The app reaches each host's daemon with `ssh -T <host> <path>/combined connect`. Use macOS Remote Login (OpenSSH) for this, not Tailscale SSH.
+
+Keystroke echo at typing speed, measured for #42 (`docs/m1-acceptance.md`), against the 30 ms budget:
+
+| Bridge | p95 | p99 | Within budget |
+| --- | --- | --- | --- |
+| OpenSSH, LAN name (`Jasons-Mac-Mini.local`) | 11.4 ms | 28.0 ms | yes |
+| macOS `sshd` over the tailnet (tailnet IP, Tailscale SSH off) | 13.3 ms | 36.0 ms | close, no |
+| Tailscale SSH (MagicDNS name, `RunSSH` on) | 25.9 ms | 61.4 ms | no |
+
+Tailscale SSH answers in `tailscaled`, not in `sshd`, and adds most of the tail. WireGuard itself adds only a few milliseconds.
+
+**At home:** point the host at its LAN name, in `~/.ssh/config` on the client:
+
+```
+Host mini
+  HostName Jasons-Mac-Mini.local
+  User jcarreira
+```
+
+**Away from home:** use the tailnet, but reach `sshd` rather than Tailscale SSH.
+- Tailscale SSH is a setting of the host, not of the client. While it is on, port 22 on the host's tailnet address goes to `tailscaled`.
+- To use `sshd` over the tailnet, turn Tailscale SSH off on that host (`sudo tailscale set --ssh=false`), and give the tailnet name or address as `HostName`.
+- This was measured at p99 36 ms: better than Tailscale SSH, but just over budget.
+
+**Host keys:** keep host-key checking on. The first time you connect to a new name or address, accept the host key interactively, after checking its fingerprint against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host. The app's bridge uses `BatchMode=yes`, so it can't answer that prompt.
+
 ## Check that no network port is open
 
 ```sh
