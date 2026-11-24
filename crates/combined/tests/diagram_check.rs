@@ -6,7 +6,8 @@ mod diagram_support;
 use std::time::Duration;
 
 use combined::adapters::loader::{
-    DiagramLimits, PeleDiagramCheck, MAX_MESSAGE_BYTES, MAX_SNIPPET_BYTES, MEMORY_LIMIT,
+    DiagramLimits, PeleDiagramCheck, MAX_MESSAGE_BYTES, MAX_SNIPPET_BYTES, MAX_SOURCE_BYTES,
+    MEMORY_LIMIT, TIME_LIMIT,
 };
 use combined::ports::{
     DiagramCheck, DiagramCheckError, DiagramFailure, DiagramVerdict, FailureCode,
@@ -322,4 +323,32 @@ async fn front_matter_anchors_agree_with_pele() {
             }
         }
     }
+}
+
+/// AC3 and AC4: the shipped caps are the story's numbers, 200 KB (SPEC's unit, 204,800 bytes),
+/// 10 s and 64 MB, and the default limits use them.
+#[test]
+fn default_limits_are_the_story_caps() {
+    assert_eq!(MAX_SOURCE_BYTES, 200 * 1024);
+    assert_eq!(TIME_LIMIT, Duration::from_secs(10));
+    assert_eq!(MEMORY_LIMIT, 64 * MIB);
+    assert_eq!(
+        DiagramLimits::default(),
+        DiagramLimits {
+            max_source_bytes: MAX_SOURCE_BYTES,
+            time_limit: TIME_LIMIT,
+            memory_limit: MEMORY_LIMIT,
+        }
+    );
+}
+
+/// AC8: the JS engine is pinned to an exact version in the crate manifest.
+#[test]
+fn rquickjs_is_pinned_exactly() {
+    let manifest = include_str!("../Cargo.toml");
+    let line = manifest
+        .lines()
+        .find(|line| line.trim_start().starts_with("rquickjs"))
+        .expect("the manifest names rquickjs");
+    assert!(line.contains("version = \"="), "not an exact pin: {line}");
 }
