@@ -192,9 +192,20 @@ impl TerminalBackend for Stub {
             let _ = gate.await;
         }
         let (tx, rx) = mpsc::unbounded();
-        self.senders.lock().unwrap().insert(id.0.clone(), tx);
+        // A second open attachment on the same terminal is named `<terminal>#<n>`.
+        let name = {
+            let mut senders = self.senders.lock().unwrap();
+            let mut name = id.0.clone();
+            let mut n = 1;
+            while senders.get(&name).is_some_and(|sender| !sender.is_closed()) {
+                n += 1;
+                name = format!("{}#{n}", id.0);
+            }
+            senders.insert(name.clone(), tx);
+            name
+        };
         Ok(Box::new(StubAttachment {
-            name: id.0.clone(),
+            name,
             log: Arc::clone(&self.log),
             holds: Arc::clone(&self.holds),
             events: Some(rx),
@@ -938,10 +949,11 @@ fn queued_calls_run_in_issue_order_once_the_call_in_flight_completes() {
     release.send(()).unwrap();
     assert!(env.poll().is_ready());
     env.run();
+    // The reply is not written: core has handled the detach by the time it would start, so it
+    // is no longer the live owner's.
     let expected: Vec<String> = [
         "write held".to_string(),
         "write w1".to_string(),
-        "auto a1".to_string(),
         "resize 100x30".to_string(),
         "focus".to_string(),
         "set_display".to_string(),
@@ -1113,4 +1125,173 @@ fn a_call_that_fails_in_flight_is_refused_when_it_completes() {
         "the backend refused input for this attachment"
     );
     assert!(env.driver.attachment(a.id).is_some());
+}
+
+/// Attaches a second viewer to `fake:<n>`, named `fake:<n>#2` in the stub, and lets it start.
+fn second_viewer(env: &mut Env, n: u32) -> AttachmentId {
+    let message = env.attach_message(100 + n as u64, &format!("fake:{n}"));
+    env.send(message);
+    env.run();
+    let id = env
+        .pull()
+        .iter()
+        .find_map(|message| match message {
+            DaemonMessage::Attached(attached) => Some(attached.attachment),
+            _ => None,
+        })
+        .unwrap();
+    env.stub.start(&format!("fake:{n}#2"));
+    env.pump();
+    env.pull();
+    id
+}
+
+fn reply(live: &Live, bytes: &str) -> ClientMessage {
+    ClientMessage::AutomaticReply(AutomaticReply {
+        attachment: live.id,
+        epoch: live.epoch,
+        ownership_generation: live.ownership,
+        bytes: bytes.as_bytes().to_vec(),
+    })
+}
+
+fn take_ownership(env: &mut Env, attachment: AttachmentId) -> OwnershipGeneration {
+    env.send(ClientMessage::RequestOwnership(RequestOwnership {
+        attachment,
+    }));
+    env.run();
+    let ownership = env
+        .driver
+        .core()
+        .ownership(&TermId("fake:1".into()))
+        .unwrap();
+    assert_eq!(ownership.owner, Some(attachment));
+    ownership.generation
+}
+
+/// Releases the call in flight on `fake:1` and runs what was queued behind it.
+fn release_and_drain(env: &mut Env, release: oneshot::Sender<()>) {
+    release.send(()).unwrap();
+    assert!(env.poll().is_ready());
+    env.run();
+    env.pump();
+}
+
+fn entries(list: &[&str], terminal: &str) -> Vec<String> {
+    list.iter()
+        .map(|entry| format!("{entry} {terminal}"))
+        .collect()
+}
+
+#[test]
+fn a_queued_reply_is_dropped_once_another_attachment_takes_ownership() {
+    let mut env = Env::new();
+    let a = live_owner(&mut env, 1);
+    let b = second_viewer(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    let base = env.stub.log_of("fake:1").len();
+    issue(&mut env, &a, Call::Write);
+    env.send(reply(&a, "a1"));
+    env.run();
+    let mut pulled = env.pull();
+
+    take_ownership(&mut env, b);
+    assert!(since(&env, "fake:1", base).is_empty());
+
+    release_and_drain(&mut env, release);
+    assert_eq!(
+        since(&env, "fake:1", base),
+        entries(&["write held"], "fake:1")
+    );
+    assert!(!env.stub.log().iter().any(|entry| entry.starts_with("auto")));
+    pulled.extend(env.pull());
+    assert!(errors(&pulled).is_empty(), "{pulled:?}");
+}
+
+#[test]
+fn a_queued_reply_is_dropped_after_its_attachment_loses_and_regains_ownership() {
+    let mut env = Env::new();
+    let a = live_owner(&mut env, 1);
+    let b = second_viewer(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    let base = env.stub.log_of("fake:1").len();
+    issue(&mut env, &a, Call::Write);
+    env.send(reply(&a, "a1"));
+    env.run();
+    let mut pulled = env.pull();
+
+    take_ownership(&mut env, b);
+    let regained = take_ownership(&mut env, a.id);
+    assert!(regained.0 > a.ownership.0);
+    let current = Live {
+        id: a.id,
+        epoch: a.epoch,
+        ownership: regained,
+    };
+    env.send(reply(&current, "a2"));
+    env.run();
+    assert!(since(&env, "fake:1", base).is_empty());
+
+    release_and_drain(&mut env, release);
+    assert_eq!(
+        since(&env, "fake:1", base),
+        entries(
+            &[
+                "write held",
+                "set_display",
+                "resize 80x24",
+                "focus",
+                "auto a2"
+            ],
+            "fake:1"
+        )
+    );
+    pulled.extend(env.pull());
+    assert!(errors(&pulled).is_empty(), "{pulled:?}");
+}
+
+#[test]
+fn queued_replies_from_the_current_owner_are_forwarded_in_order() {
+    let mut env = Env::new();
+    let a = live_owner(&mut env, 1);
+    second_viewer(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    let base = env.stub.log_of("fake:1").len();
+    issue(&mut env, &a, Call::Write);
+    env.send(reply(&a, "a1"));
+    env.send(input(&a, "w1"));
+    env.send(reply(&a, "a2"));
+    env.run();
+    assert!(since(&env, "fake:1", base).is_empty());
+
+    release_and_drain(&mut env, release);
+    assert_eq!(
+        since(&env, "fake:1", base),
+        entries(&["write held", "auto a1", "write w1", "auto a2"], "fake:1")
+    );
+    assert!(errors(&env.pull()).is_empty());
+}
+
+#[test]
+fn accepted_input_queued_with_a_stale_reply_is_still_written_after_a_hand_off() {
+    let mut env = Env::new();
+    let a = live_owner(&mut env, 1);
+    let b = second_viewer(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    let base = env.stub.log_of("fake:1").len();
+    issue(&mut env, &a, Call::Write);
+    env.send(input(&a, "w1"));
+    env.send(reply(&a, "a1"));
+    env.send(input(&a, "w2"));
+    env.run();
+    let mut pulled = env.pull();
+
+    take_ownership(&mut env, b);
+    release_and_drain(&mut env, release);
+    assert_eq!(
+        since(&env, "fake:1", base),
+        entries(&["write held", "write w1", "write w2"], "fake:1")
+    );
+    pulled.extend(env.pull());
+    assert!(errors(&pulled).is_empty(), "{pulled:?}");
 }
