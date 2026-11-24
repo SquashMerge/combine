@@ -1,0 +1,56 @@
+#!/bin/sh
+# Measures headless Mermaid validation (docs/m2-s2-bench.md): cold load, warm checks of a
+# 50-class and a 200 KB diagram, the memory the engine needs, and the rebuild after a cap.
+# It takes the large tier of the shared heavy-run lease (AGENTS.md), because it measures time
+# and memory, and ./tools/verify never runs it.
+#
+#   sh tools/diagram-bench
+#
+# It prints one `diagram_bench` line per metric and ends with the go line; it exits 0 only when
+# that line says go=true.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+heavy=${COMBINE_HEAVY_LARGE_SH:-/Users/jcarreira/projects/squashmerge/trellis-evidence/heavy-lock/heavy.sh}
+if [ -z "${COMBINE_DIAGRAM_BENCH_LEASED:-}" ]; then
+  if [ -n "${MIMIR_HEAVY_LOCK_HELD:-}" ]; then
+    echo "diagram-bench: started inside another heavy-run lease; if it is the medium tier, the numbers may be skewed" >&2
+  elif [ -x "$heavy" ]; then
+    exec env COMBINE_DIAGRAM_BENCH_LEASED=1 "$heavy" sh "$0" "$@"
+  fi
+fi
+
+# One build directory per checkout or worktree, never shared (AGENTS.md).
+# COMBINE_TARGETS sets the parent; otherwise the shared directory beside the main
+# checkout if it exists, else one beside this checkout. Factory sandboxes are named
+# after their run, so each still gets its own.
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  targets=${COMBINE_TARGETS:-}
+  if [ -z "$targets" ]; then
+    shared="$HOME/projects/squashmerge/combine-targets"
+    if [ -d "$shared" ]; then targets=$shared; else targets="$(dirname "$root")/combine-targets"; fi
+  fi
+  case $root in
+    */.factory-sandboxes/*) name="factory-$(basename "$root")" ;;
+    *) name=$(basename "$root") ;;
+  esac
+  CARGO_TARGET_DIR="$targets/$name"
+  export CARGO_TARGET_DIR
+fi
+
+out=${TMPDIR:-/tmp}/combine-diagram-bench-$$.txt
+status=0
+cargo test --release --locked -p combined --test diagram_bench -- --ignored --nocapture --test-threads=1 >"$out" 2>&1 || status=$?
+cat "$out"
+if [ "$status" -ne 0 ]; then
+  rm -f "$out"
+  exit "$status"
+fi
+if grep -q '^diagram_bench go=true' "$out"; then
+  rm -f "$out"
+  exit 0
+fi
+rm -f "$out"
+exit 1
