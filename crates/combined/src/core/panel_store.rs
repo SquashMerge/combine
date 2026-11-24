@@ -19,7 +19,7 @@ use crate::core::machine::Core;
 use crate::core::panel_file::{
     clip_text, content_file, created_by_refusal, encode_view_panel, panel_reply_len,
     parse_view_panel, valid_idempotency_key, valid_title, KEY_RULE, PANEL_ERROR_TEXT_MAX,
-    SOURCE_MAX_BYTES, TITLE_RULE,
+    SCRATCH_FILE, SOURCE_MAX_BYTES, TITLE_RULE,
 };
 use crate::core::panels::{
     panel_folder_refusal, valid_panel_folder, PanelSkip, MAX_PANELS, PANELS_DIR, PANEL_FILE,
@@ -32,6 +32,8 @@ use crate::ports::{
     StoreError,
 };
 
+mod scratch;
+
 /// The most diagram checks that run at once.
 pub const MAX_CHECKS_IN_FLIGHT: usize = 2;
 /// How long a scratch panel lives after its last change.
@@ -43,9 +45,7 @@ pub const SCRATCH_LIST_MAX: usize = 4_096;
 /// Why a `.workspace/panels/<id>` folder is skipped while a scratch panel holds its ID.
 pub const SCRATCH_ID_OPEN: &str = "a scratch panel with this ID is open; close or pin it first";
 
-const HUNDRED_REASON: &str =
-    "the space has more than 100 panel folders; only the first 100 by name are read";
-const SCRATCH_PLACEHOLDER: &str = "scratch panels aren't supported yet";
+const HUNDRED_REASON: &str = "the space already has 100 panels; this folder isn't read";
 
 /// Where the next ID comes from. Panel revisions and daemon-made panel IDs use it.
 pub trait IdSource {
@@ -280,6 +280,39 @@ enum FolderState {
     Empty,
     Symlink,
     NotRead,
+    /// Its ID is held by a scratch panel: it is never read and never counted.
+    Shadowed {
+        symlink: bool,
+    },
+}
+
+/// What `scratch.json` of a folder said when it was last written or read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    space: SpaceId,
+    changed_at_ms: u64,
+}
+
+/// A scratch panel being loaded at start: its `panel.json`, once parsed, waits for the content.
+struct ScratchLoad {
+    dir: ScratchDir,
+    file: Option<(ViewPanelFile, FileMark)>,
+}
+
+/// The scratch state that belongs to no one space.
+#[derive(Default)]
+struct ScratchGlobal {
+    listed: bool,
+    list_failed: Option<String>,
+    pending: BTreeSet<ScratchDir>,
+    stamped: BTreeMap<ScratchDir, Stamp>,
+}
+
+impl ScratchGlobal {
+    /// The scratch folders were listed and every `scratch.json` was answered.
+    fn done(&self) -> bool {
+        self.listed && self.list_failed.is_none() && self.pending.is_empty()
+    }
 }
 
 struct UnreadInfo {
@@ -373,6 +406,14 @@ struct RemovedId {
 enum OpKind {
     Save,
     Remove,
+    ScratchSave,
+    /// A scratch folder goes. `swept` is the stamp a sweep acted on.
+    ScratchGone {
+        dir: ScratchDir,
+        swept: Option<Stamp>,
+    },
+    /// The undo of a pin that failed.
+    Cleanup,
 }
 
 struct SaveOp {
@@ -390,6 +431,7 @@ struct Out {
     in_flight: BTreeMap<(SpaceId, String), u64>,
     saves: BTreeMap<SaveTicket, SaveOp>,
     next_ticket: u64,
+    scratch: ScratchGlobal,
 }
 
 impl Out {
@@ -534,6 +576,10 @@ struct SpaceState {
     /// How many of those were emitted before a Save or Delete began; their results are dropped.
     stale_reads: BTreeMap<String, u32>,
     removed: VecDeque<RemovedId>,
+    /// Scratch folders of this space read before its first listing.
+    waiting_scratch: Vec<ScratchDir>,
+    /// Scratch folders of this space whose files are being read.
+    scratch_reading: BTreeMap<String, ScratchLoad>,
 }
 
 type Signature = (BTreeMap<String, String>, Option<String>);
@@ -560,6 +606,8 @@ impl SpaceState {
             reads_out: BTreeMap::new(),
             stale_reads: BTreeMap::new(),
             removed: VecDeque::new(),
+            waiting_scratch: Vec::new(),
+            scratch_reading: BTreeMap::new(),
         }
     }
 
@@ -580,11 +628,16 @@ impl SpaceState {
         by_quiet.min(by_wait)
     }
 
-    fn update_loaded(&mut self) {
+    fn update_loaded(&mut self, scratch: &ScratchGlobal) {
+        let scratch_settled = scratch.list_failed.is_some()
+            || (scratch.done()
+                && self.waiting_scratch.is_empty()
+                && self.scratch_reading.is_empty());
         if !self.loaded
             && self.listed
             && !self.folders.values().any(|f| *f == FolderState::Reading)
             && self.reading.is_empty()
+            && scratch_settled
         {
             self.loaded = true;
         }
@@ -618,6 +671,7 @@ impl SpaceState {
                     | FolderState::Symlink
                     | FolderState::Reading
                     | FolderState::NotRead
+                    | FolderState::Shadowed { .. }
             )
         );
         folder || self.records.contains_key(id) || self.reading.contains_key(id)
@@ -701,7 +755,12 @@ impl SpaceState {
     }
 
     /// The gate for a call about `id` when the space holds no such record.
-    fn missing(&self, id: &str, answer: Missing) -> Result<PanelView, PanelApiError> {
+    fn missing(
+        &self,
+        scratch: &ScratchGlobal,
+        id: &str,
+        answer: Missing,
+    ) -> Result<PanelView, PanelApiError> {
         if let Some(detail) = &self.listing_failed {
             return Err(PanelApiError::Store(format!(
                 "the space's panels couldn't be listed: {detail}"
@@ -715,6 +774,12 @@ impl SpaceState {
                 Missing::Get | Missing::Close => Ok(self.removed_view(entry)),
                 Missing::Refuse => Err(PanelApiError::Removed { id: id.to_owned() }),
             };
+        }
+        if let Some(detail) = &scratch.list_failed {
+            return Err(scratch_list_refusal(detail));
+        }
+        if self.scratch_loading(scratch, Some(id)) {
+            return Err(PanelApiError::SpaceLoading);
         }
         Err(PanelApiError::UnknownPanel { id: id.to_owned() })
     }
@@ -763,6 +828,7 @@ impl SpaceState {
         out: &mut Out,
         create: PanelCreate,
         ids: &mut dyn IdSource,
+        wall_ms: u64,
     ) -> Result<PanelView, PanelApiError> {
         if let Some(detail) = &self.listing_failed {
             return Err(PanelApiError::Store(format!(
@@ -770,6 +836,14 @@ impl SpaceState {
             )));
         }
         if !self.loaded {
+            return Err(PanelApiError::SpaceLoading);
+        }
+        if create.lifetime == Lifetime::Scratch {
+            if let Some(detail) = &out.scratch.list_failed {
+                return Err(scratch_list_refusal(detail));
+            }
+        }
+        if self.scratch_loading(&out.scratch, None) {
             return Err(PanelApiError::SpaceLoading);
         }
         if let Some(title) = &create.title {
@@ -785,12 +859,6 @@ impl SpaceState {
         if let Some(created_by) = &create.created_by {
             if let Some((field, rule)) = created_by_refusal(created_by) {
                 return Err(invalid_field(field, rule));
-            }
-        }
-        match create.lifetime {
-            Lifetime::Persistent => {}
-            Lifetime::Scratch => {
-                return Err(PanelApiError::Store(SCRATCH_PLACEHOLDER.to_owned()));
             }
         }
         if let Some(key) = &create.idempotency_key {
@@ -846,7 +914,20 @@ impl SpaceState {
         rec.pending.insert(PANEL_FILE);
         self.forget(&id);
         self.skipped.remove(&id);
-        self.folders.insert(id.clone(), FolderState::Panel);
+        match create.lifetime {
+            Lifetime::Persistent => {
+                self.folders.insert(id.clone(), FolderState::Panel);
+            }
+            Lifetime::Scratch => {
+                rec.lifetime = Lifetime::Scratch;
+                rec.pending.insert(SCRATCH_FILE);
+                let stamp = Stamp {
+                    space: self.id.clone(),
+                    changed_at_ms: wall_ms,
+                };
+                out.scratch.stamped.insert(self.scratch_dir(&id), stamp);
+            }
+        }
         self.records.insert(id.clone(), rec);
         self.service(out, &id);
         self.begin_validation(out, &id, core_error);
@@ -866,9 +947,10 @@ impl SpaceState {
         id: &str,
         update: PanelUpdate,
         ids: &mut dyn IdSource,
+        wall_ms: u64,
     ) -> Result<PanelView, PanelApiError> {
         let Some(rec) = self.records.get(id) else {
-            return self.missing(id, Missing::Refuse);
+            return self.missing(&out.scratch, id, Missing::Refuse);
         };
         if !rec.live() {
             return Err(PanelApiError::Removed { id: id.to_owned() });
@@ -897,9 +979,6 @@ impl SpaceState {
                 )));
             }
         }
-        if rec.lifetime == Lifetime::Scratch {
-            return Err(PanelApiError::Store(SCRATCH_PLACEHOLDER.to_owned()));
-        }
         if let Some(content) = &update.content {
             let encoded = panel_reply_len(&self.id, id, rec.file.renderer, content);
             if encoded > MAX_FRAME_LEN as usize {
@@ -909,7 +988,14 @@ impl SpaceState {
 
         let revision = ids.take_id();
         let mut core_error = None;
+        let dir = self.scratch_dir(id);
         if let Some(rec) = self.records.get_mut(id) {
+            if rec.lifetime == Lifetime::Scratch {
+                if let Some(stamp) = out.scratch.stamped.get_mut(&dir) {
+                    stamp.changed_at_ms = wall_ms;
+                }
+                rec.pending.insert(SCRATCH_FILE);
+            }
             rec.revision = revision;
             rec.dropped = None;
             rec.save_retry_at = None;
@@ -935,13 +1021,13 @@ impl SpaceState {
 
     fn close(&mut self, out: &mut Out, id: &str) -> Result<PanelView, PanelApiError> {
         let Some(rec) = self.records.get_mut(id) else {
-            return self.missing(id, Missing::Close);
+            return self.missing(&out.scratch, id, Missing::Close);
         };
         if !rec.live() {
             return self.view_now(id);
         }
         if rec.lifetime == Lifetime::Scratch {
-            return Err(PanelApiError::Store(SCRATCH_PLACEHOLDER.to_owned()));
+            return self.end_scratch(out, id);
         }
         rec.state = PanelState::Removed;
         rec.pending.clear();
@@ -954,7 +1040,7 @@ impl SpaceState {
 
     fn remove(&mut self, out: &mut Out, id: &str) -> Result<PanelView, PanelApiError> {
         let Some(rec) = self.records.get(id) else {
-            return self.missing(id, Missing::Close);
+            return self.missing(&out.scratch, id, Missing::Close);
         };
         if !rec.live() {
             return self.view_now(id);
@@ -966,7 +1052,7 @@ impl SpaceState {
             return Err(unread_refusal(id, unread));
         }
         if rec.lifetime == Lifetime::Scratch {
-            return Err(PanelApiError::Store(SCRATCH_PLACEHOLDER.to_owned()));
+            return self.end_scratch(out, id);
         }
         let (file, revision) = (rec.file.clone(), rec.revision);
         if let Some(rec) = self.records.get_mut(id) {
@@ -984,22 +1070,6 @@ impl SpaceState {
         self.view_now(id)
     }
 
-    fn pin(&mut self, id: &str) -> Result<PanelView, PanelApiError> {
-        let Some(rec) = self.records.get(id) else {
-            return self.missing(id, Missing::Refuse);
-        };
-        if !rec.live() {
-            return Err(PanelApiError::Removed { id: id.to_owned() });
-        }
-        if rec.read_only {
-            return Err(PanelApiError::ReadOnly);
-        }
-        match rec.lifetime {
-            Lifetime::Persistent => Err(PanelApiError::NotScratch { id: id.to_owned() }),
-            Lifetime::Scratch => Err(PanelApiError::Store(SCRATCH_PLACEHOLDER.to_owned())),
-        }
-    }
-
     // ---- saving
 
     /// Starts the next Delete or Save of a panel, if it may run now.
@@ -1011,6 +1081,7 @@ impl SpaceState {
             return;
         }
         if rec.lifetime == Lifetime::Scratch {
+            self.service_scratch(out, id);
             return;
         }
         let at = PanelFolder::Workspace {
@@ -1083,16 +1154,26 @@ impl SpaceState {
     /// the record's save or delete ends.
     fn request_read(&mut self, out: &mut Out, id: &str) {
         if let Some(rec) = self.records.get(id) {
-            if rec.busy.is_some() || rec.delete_wanted {
-                self.deferred.insert(id.to_owned());
-            } else {
-                self.emit_read(out, id, PANEL_FILE);
+            if rec.lifetime == Lifetime::Persistent {
+                if rec.busy.is_some() || rec.delete_wanted {
+                    self.deferred.insert(id.to_owned());
+                } else {
+                    self.emit_read(out, id, PANEL_FILE);
+                }
+                return;
             }
+        }
+        if self.scratch_held(id) {
+            let symlink = self.shadow_symlink(id);
+            self.shadow(id, symlink);
             return;
         }
         match self.folders.get(id).copied() {
-            Some(FolderState::Symlink | FolderState::Reading) => {}
+            Some(FolderState::Symlink | FolderState::Reading | FolderState::Shadowed { .. }) => {}
             Some(FolderState::Panel) => self.emit_read(out, id, PANEL_FILE),
+            Some(FolderState::Empty) if self.count() < MAX_PANELS => {
+                self.emit_read(out, id, PANEL_FILE);
+            }
             Some(FolderState::Empty | FolderState::NotRead) | None => self.first_sight(out, id),
         }
     }
@@ -1118,6 +1199,7 @@ impl SpaceState {
         &mut self,
         out: &mut Out,
         id: &str,
+        ticket: SaveTicket,
         op: OpKind,
         report: SaveReport,
         now: Millis,
@@ -1125,6 +1207,9 @@ impl SpaceState {
         match op {
             OpKind::Save => self.saved(out, id, report, now),
             OpKind::Remove => self.deleted(out, id, report),
+            OpKind::ScratchSave => self.scratch_saved(out, id, ticket, report, now),
+            OpKind::Cleanup => self.cleanup_ended(id, report, out),
+            OpKind::ScratchGone { .. } => {}
         }
     }
 
@@ -1140,6 +1225,10 @@ impl SpaceState {
                 rec.known.1 = FileMark::Hash(*hash);
             }
             rec.pending.remove(file);
+        }
+        if rec.pinning {
+            self.pin_ended(out, id, report, now);
+            return;
         }
         let create_conflict = matches!(&report.end, SaveEnd::Conflict { file } if *file == PANEL_FILE)
             && rec.is_create_save();
@@ -1236,6 +1325,13 @@ impl SpaceState {
                     rec.state = state;
                     rec.error = error;
                 }
+                if rec.state == PanelState::Validating {
+                    let key = (self.id.clone(), id.to_owned());
+                    if out.in_flight.get(&key) != Some(&rec.revision) {
+                        rec.wants_check = true;
+                        out.enqueue(key);
+                    }
+                }
                 self.forget(id);
                 self.changed(out, id);
                 self.deferred.remove(id);
@@ -1265,8 +1361,12 @@ impl SpaceState {
         now: Millis,
         ids: &mut dyn IdSource,
     ) {
-        if self.stale_result(id) {
-            self.update_loaded();
+        let stale = self.stale_result(id);
+        if self.scratch_held(id) {
+            self.drop_held_read(id);
+            return;
+        }
+        if stale {
             return;
         }
         let (got, fallback) = split_read(read);
@@ -1275,7 +1375,6 @@ impl SpaceState {
         } else {
             self.on_content(out, id, file, got, fallback, now, ids);
         }
-        self.update_loaded();
     }
 
     /// Counts a result in and tells whether it must be dropped: it was asked for before a Save
@@ -1296,10 +1395,9 @@ impl SpaceState {
             }
         }
         stale
-            || self
-                .records
-                .get(id)
-                .is_some_and(|rec| rec.busy.is_some() || rec.delete_wanted)
+            || self.records.get(id).is_some_and(|rec| {
+                rec.lifetime == Lifetime::Persistent && (rec.busy.is_some() || rec.delete_wanted)
+            })
     }
 
     fn on_json(&mut self, out: &mut Out, id: &str, got: Got, fallback: bool, now: Millis) {
@@ -1565,7 +1663,12 @@ impl SpaceState {
         if !matches!(file, PANEL_FILE | "diagram.mmd" | "content.md") {
             return;
         }
-        if !valid_panel_folder(id) || self.folders.get(id) == Some(&FolderState::Symlink) {
+        if !valid_panel_folder(id)
+            || matches!(
+                self.folders.get(id),
+                Some(FolderState::Symlink | FolderState::Shadowed { .. })
+            )
+        {
             return;
         }
         bump(&mut self.debounce, id, now);
@@ -1599,6 +1702,10 @@ impl SpaceState {
             .map(|entry| (entry.name, entry.kind))
             .collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
+        let listed: BTreeSet<String> = names.iter().map(|(name, _)| name.clone()).collect();
+        let (shadowed, names): (Vec<_>, Vec<_>) = names
+            .into_iter()
+            .partition(|(name, _)| self.scratch_held(name));
         let mut notes = Vec::new();
         if truncated {
             notes.push(format!(
@@ -1613,7 +1720,6 @@ impl SpaceState {
         self.over_hundred = truncated || names.len() > MAX_PANELS;
         self.list_note = (!notes.is_empty()).then(|| notes.join("; "));
 
-        let listed: BTreeSet<&str> = names.iter().map(|(name, _)| name.as_str()).collect();
         let gone: Vec<String> = self
             .folders
             .iter()
@@ -1623,7 +1729,11 @@ impl SpaceState {
             .map(|(name, _)| name.clone())
             .collect();
         for name in gone {
-            if self.records.contains_key(&name) {
+            let persistent = self
+                .records
+                .get(&name)
+                .is_some_and(|rec| rec.lifetime == Lifetime::Persistent);
+            if persistent {
                 self.request_read(out, &name);
             } else {
                 self.folders.remove(&name);
@@ -1651,7 +1761,10 @@ impl SpaceState {
                 self.folders.insert(name.clone(), FolderState::NotRead);
             }
         }
-        self.update_loaded();
+        for (name, kind) in &shadowed {
+            self.shadow(name, *kind == EntryKind::Symlink);
+        }
+        self.admit_waiting(out);
     }
 
     // ---- time
@@ -1815,6 +1928,10 @@ fn invalid_field(field: &'static str, rule: &str) -> PanelApiError {
     }
 }
 
+fn scratch_list_refusal(detail: &str) -> PanelApiError {
+    PanelApiError::Store(format!("the scratch panels couldn't be listed: {detail}"))
+}
+
 fn unread_refusal(id: &str, unread: &UnreadInfo) -> PanelApiError {
     PanelApiError::Store(format!(
         "couldn't read {} ({}), so the panel isn't changed until it can be read",
@@ -1829,6 +1946,7 @@ pub struct PanelStore {
     spaces: BTreeMap<SpaceId, SpaceState>,
     out: Out,
     scratch_retry_at: Option<Millis>,
+    next_sweep: Millis,
 }
 
 impl PanelStore {
@@ -1838,6 +1956,7 @@ impl PanelStore {
             spaces: BTreeMap::new(),
             out: Out::default(),
             scratch_retry_at: None,
+            next_sweep: Millis(0),
         }
     }
 
@@ -1868,6 +1987,7 @@ impl PanelStore {
         self.out.effects.push(PanelEffect::ListWorkspace {
             space: space.clone(),
         });
+        self.finish();
     }
 
     /// Runs `call` on the space and reports a change of its skipped folders or listing error.
@@ -1892,13 +2012,13 @@ impl PanelStore {
         space: &SpaceId,
         create: PanelCreate,
         _now: Millis,
-        _wall_ms: u64,
+        wall_ms: u64,
         ids: &mut dyn IdSource,
     ) -> Result<PanelView, PanelApiError> {
         let result = self
-            .in_space(space, |state, out| state.create(out, create, ids))
+            .in_space(space, |state, out| state.create(out, create, ids, wall_ms))
             .unwrap_or(Err(PanelApiError::UnknownSpace));
-        self.pump();
+        self.finish();
         result
     }
 
@@ -1908,13 +2028,15 @@ impl PanelStore {
         id: &str,
         update: PanelUpdate,
         _now: Millis,
-        _wall_ms: u64,
+        wall_ms: u64,
         ids: &mut dyn IdSource,
     ) -> Result<PanelView, PanelApiError> {
         let result = self
-            .in_space(space, |state, out| state.update(out, id, update, ids))
+            .in_space(space, |state, out| {
+                state.update(out, id, update, ids, wall_ms)
+            })
             .unwrap_or(Err(PanelApiError::UnknownSpace));
-        self.pump();
+        self.finish();
         result
     }
 
@@ -1927,7 +2049,7 @@ impl PanelStore {
         let result = self
             .in_space(space, |state, out| state.remove(out, id))
             .unwrap_or(Err(PanelApiError::UnknownSpace));
-        self.pump();
+        self.finish();
         result
     }
 
@@ -1940,7 +2062,7 @@ impl PanelStore {
         let result = self
             .in_space(space, |state, out| state.close(out, id))
             .unwrap_or(Err(PanelApiError::UnknownSpace));
-        self.pump();
+        self.finish();
         result
     }
 
@@ -1950,13 +2072,22 @@ impl PanelStore {
         id: &str,
         _now: Millis,
     ) -> Result<PanelView, PanelApiError> {
-        self.in_space(space, |state, _| state.pin(id))
-            .unwrap_or(Err(PanelApiError::UnknownSpace))
+        let result = self
+            .in_space(space, |state, out| state.pin(out, id))
+            .unwrap_or(Err(PanelApiError::UnknownSpace));
+        self.finish();
+        result
     }
 
     pub fn list(&self, space: &SpaceId) -> Result<PanelList, PanelApiError> {
         let state = self.spaces.get(space).ok_or(PanelApiError::UnknownSpace)?;
-        let error = state.list_error();
+        let error = match (&self.out.scratch.list_failed, state.list_error()) {
+            (Some(detail), Some(error)) => Some(format!(
+                "{error}; Couldn't list the scratch panels ({detail})"
+            )),
+            (Some(detail), None) => Some(format!("Couldn't list the scratch panels ({detail})")),
+            (None, error) => error,
+        };
         if state.listing_failed.is_none() && !state.loaded {
             return Err(PanelApiError::SpaceLoading);
         }
@@ -1990,7 +2121,9 @@ impl PanelStore {
                 };
                 Ok((state.view_of(id, rec), source))
             }
-            None => state.missing(id, Missing::Get).map(|view| (view, "")),
+            None => state
+                .missing(&self.out.scratch, id, Missing::Get)
+                .map(|view| (view, "")),
         }
     }
 
@@ -2008,7 +2141,7 @@ impl PanelStore {
         now: Millis,
     ) {
         self.in_space(space, |state, out| state.on_listing(out, listing, now));
-        self.pump();
+        self.finish();
     }
 
     pub fn apply_scratch_listing(
@@ -2017,17 +2150,22 @@ impl PanelStore {
         now: Millis,
     ) {
         match listing {
-            Ok(_) => self.scratch_retry_at = None,
+            Ok(listing) => {
+                self.scratch_retry_at = None;
+                self.on_scratch_listing(listing);
+            }
             Err(error) => {
-                self.out.effects.push(PanelEffect::Log {
-                    text: format!(
-                        "the scratch panels couldn't be listed: {}",
-                        store_error_detail(error)
-                    ),
-                });
+                let detail = store_error_detail(error);
+                if self.out.scratch.list_failed.as_ref() != Some(&detail) {
+                    self.out.effects.push(PanelEffect::Log {
+                        text: format!("the scratch panels couldn't be listed: {detail}"),
+                    });
+                }
+                self.out.scratch.list_failed = Some(detail);
                 self.scratch_retry_at = Some(now.saturating_add(Millis(self.timing.retry_ms)));
             }
         }
+        self.finish();
     }
 
     pub fn apply_read(
@@ -2044,9 +2182,9 @@ impl PanelStore {
                     state.on_read(out, panel, file, read, now, ids);
                 });
             }
-            PanelFolder::Scratch(_) => {}
+            PanelFolder::Scratch(dir) => self.on_scratch_read(dir, file, read, now, ids),
         }
-        self.pump();
+        self.finish();
     }
 
     pub fn apply_saved(&mut self, ticket: SaveTicket, report: SaveReport, now: Millis) {
@@ -2061,10 +2199,15 @@ impl PanelStore {
         let Some(op) = self.out.saves.remove(&ticket) else {
             return;
         };
-        self.in_space(&op.space, |state, out| {
-            state.apply_report(out, &op.panel, op.kind, report, now);
-        });
-        self.pump();
+        match op.kind {
+            OpKind::ScratchGone { dir, swept } => self.scratch_gone(&op.space, &dir, swept, report),
+            kind => {
+                self.in_space(&op.space, |state, out| {
+                    state.apply_report(out, &op.panel, ticket, kind, report, now);
+                });
+            }
+        }
+        self.finish();
     }
 
     pub fn apply_check(
@@ -2091,10 +2234,10 @@ impl PanelStore {
                 out.enqueue(key.clone());
             }
         });
-        self.pump();
+        self.finish();
     }
 
-    pub fn tick(&mut self, now: Millis, _wall_ms: u64) {
+    pub fn tick(&mut self, now: Millis, wall_ms: u64) {
         let spaces: Vec<SpaceId> = self.spaces.keys().cloned().collect();
         for space in spaces {
             self.in_space(&space, |state, out| state.tick(out, now));
@@ -2103,7 +2246,11 @@ impl PanelStore {
             self.scratch_retry_at = None;
             self.out.effects.push(PanelEffect::ListScratch);
         }
-        self.pump();
+        if self.out.scratch.done() && self.next_sweep <= now {
+            self.next_sweep = now.saturating_add(Millis(self.timing.sweep_every_ms));
+            self.sweep(wall_ms);
+        }
+        self.finish();
     }
 
     pub fn take_effects(&mut self) -> Vec<PanelEffect> {
@@ -2119,12 +2266,21 @@ impl PanelStore {
             .values()
             .filter_map(SpaceState::next_deadline)
             .chain(self.scratch_retry_at)
+            .chain(self.out.scratch.done().then_some(self.next_sweep))
             .min()
     }
 
     /// The number of checks running.
     pub fn in_flight(&self) -> usize {
         self.out.in_flight.len()
+    }
+
+    /// Ends every call: a space whose load is settled stops loading, and queued checks start.
+    fn finish(&mut self) {
+        for state in self.spaces.values_mut() {
+            state.update_loaded(&self.out.scratch);
+        }
+        self.pump();
     }
 
     /// Starts queued checks while a slot is free.
