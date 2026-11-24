@@ -448,6 +448,9 @@ class Session:
         self.last_cursor = None  # the newest cursor received, acked lazily
         self.acked_cursor = None
         self.ended = False  # the attachment's stream ended (gap, lost or closed)
+        # Set once a later `started`, or a cursor of another epoch, arrives for the attachment:
+        # its first paint can hold a sampled byte the program hasn't echoed, so the run fails.
+        self.new_epoch = None
         self.owner = None
         self.ownership_generation = None
         self.counts = {"resized": 0, "facts": 0, "resynced": 0, "other_data": 0, "terminals": 0}
@@ -497,7 +500,15 @@ class Session:
         """Bookkeeping common to every message: cursors to ack, ownership, counters."""
         kind = message["type"]
         if kind in CURSOR_EVENTS and self._ours(message):
-            self.last_cursor = message["cursor"]
+            cursor = message["cursor"]
+            previous = self.last_cursor
+            # The attach's own `started` sets the measurement epoch; nothing may change it.
+            if previous is not None and self.new_epoch is None and (
+                kind == "started" or cursor.get("epoch") != previous.get("epoch")
+            ):
+                self.new_epoch = "%s (epoch %s, measuring epoch %s)" % (
+                    kind, safe_text(cursor.get("epoch")), safe_text(previous.get("epoch")))
+            self.last_cursor = cursor
         if kind == "ownership" and message.get("attachment") == self.attachment:
             self.owner = message.get("owner")
             self.ownership_generation = message.get("ownership_generation")
@@ -633,10 +644,20 @@ class Session:
                 break
             self.note(message)
             self.fail_on(message)
+            self.check_epoch()
             self.ack()
             if time.monotonic() >= limit:
                 break
         self.ack()
+
+    def check_epoch(self):
+        """Fails the run once the attachment has started a new epoch (a backend reconnect or
+        rebuild): its repaint is not an echo, and samples across it don't measure one path."""
+        if self.new_epoch is not None:
+            raise HarnessError(
+                "the attachment started a new epoch during the run: %s; its repaint can "
+                "contain a sampled byte, so the run is invalid. Run again" % self.new_epoch
+            )
 
     def check_owner(self):
         if self.owner != self.attachment:
@@ -655,6 +676,7 @@ class Session:
                 return
             self.note(message)
             self.fail_on(message)
+            self.check_epoch()
             if message["type"] == "data":
                 self.counts["other_data"] += 1
             self.check_owner()
@@ -674,9 +696,12 @@ class Session:
             if message["type"] == "data" and self._ours(message) and byte in message["bytes"]:
                 elapsed = time.perf_counter_ns() - start
                 self.note(message)
+                # A data frame of another epoch is that epoch's paint, not this echo.
+                self.check_epoch()
                 return elapsed
             self.note(message)
             self.fail_on(message)
+            self.check_epoch()
             if message["type"] == "data":
                 self.counts["other_data"] += 1
             self.check_owner()

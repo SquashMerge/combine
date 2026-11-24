@@ -26,6 +26,7 @@ Every wait has a timeout. The harness stops with `FAILED: ...` and exit code 1 i
 - a malformed frame;
 - a bridge that exits or stops reading;
 - another client taking input ownership;
+- a new epoch on the attachment after the attach (a second `started`, or a frame of another epoch), during a sample or between samples. Its first paint can contain a sampled byte the program hasn't echoed, so it never counts as an echo;
 - `--max-consecutive-timeouts` samples in a row (default 10) with no echo.
 
 A sample whose echo takes longer than `--timeout-ms` is counted as timed out and left out of the percentiles.

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Pure tests for echo_latency.py: frame encoding against known bytes, decoding, the
-percentiles and the terminal choice. Run with `python3 -I tools/latency/test_echo_latency.py`.
+percentiles, the terminal choice, and a session over a scripted bridge (no daemon, no core, no
+subprocess, no timing). Run with `python3 -I tools/latency/test_echo_latency.py`.
 """
 import importlib.util
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True  # keep tools/latency free of __pycache__
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -149,6 +151,92 @@ class Args(unittest.TestCase):
         self.assertEqual(bridge, ["ssh", "-T", "mini", "--x"])
         self.assertEqual(args.label, ("role", "echo"))
         self.assertEqual((args.samples, args.interval_ms, args.timeout_ms), (2000, 3.0, 1000))
+
+
+class ScriptedBridge:
+    """Replays daemon messages in order; times out once they run out. Records what is sent."""
+
+    def __init__(self, messages):
+        self.messages = list(messages)
+        self.sent = []
+
+    def send(self, data, deadline):
+        self.sent.append(data)
+
+    def read_message(self, deadline):
+        if not self.messages:
+            raise el.Timeout("the script ran out")
+        return self.messages.pop(0)
+
+
+def cursor(epoch, seq, attachment=7):
+    return {"attachment": attachment, "epoch": epoch, "seq": seq}
+
+
+def started(epoch, seq=0, attachment=7):
+    return {"type": "started", "cursor": cursor(epoch, seq, attachment), "cols": 80, "rows": 24,
+            "fidelity": "exact"}
+
+
+def data(epoch, seq, body, attachment=7):
+    return {"type": "data", "cursor": cursor(epoch, seq, attachment), "bytes": body}
+
+
+class SessionEpochs(unittest.TestCase):
+    """The run measures one epoch: the one the attach's `started` opened."""
+
+    def session(self, after_attach):
+        args, _ = el.parse_args(["--terminal", "hc:t1", "--samples", "1", "--", "mock"])
+        terminal = {"id": "hc:t1", "state": "running", "cols": 80, "rows": 24}
+        bridge = ScriptedBridge(
+            [{"type": "attached", "request": 1, "attachment": 7}, started(1)] + after_attach
+        )
+        session = el.Session(bridge, args, lambda _: None)
+        session.terminal = terminal
+        session.attach()
+        session.owner = 7  # as take_input leaves it
+        return session
+
+    def test_normal_echo_is_measured(self):
+        session = self.session([data(1, 1, b"a")])
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 2_000_000]):
+            self.assertEqual(session.sample(ord("a")), 2_000_000)
+        self.assertEqual(session.last_cursor, cursor(1, 1))
+
+    def test_new_started_during_a_sample_fails_the_run(self):
+        session = self.session([started(2), data(2, 1, b"old screen with a")])
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 1_000_000]):
+            with self.assertRaisesRegex(el.HarnessError, "new epoch"):
+                session.sample(ord("a"))
+
+    def test_new_started_while_idle_fails_the_run(self):
+        session = self.session([data(1, 1, b"a"), started(2), data(2, 1, b"b")])
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 1_000_000]):
+            self.assertEqual(session.sample(ord("a")), 1_000_000)
+        with self.assertRaisesRegex(el.HarnessError, "new epoch"):
+            session.idle(1.0)
+
+    def test_new_started_while_idle_fails_the_next_sample_too(self):
+        session = self.session([started(2)])
+        with self.assertRaises(el.HarnessError):
+            session.idle(1.0)
+        session.bridge.messages = [data(2, 1, b"b")]
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 1_000_000]):
+            with self.assertRaisesRegex(el.HarnessError, "new epoch"):
+                session.sample(ord("b"))
+
+    def test_data_of_another_epoch_holding_the_byte_is_not_an_echo(self):
+        session = self.session([data(2, 5, b"a")])
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 1_000_000]):
+            with self.assertRaisesRegex(el.HarnessError, "epoch 2, measuring epoch 1"):
+                session.sample(ord("a"))
+
+    def test_another_attachments_epoch_is_ignored(self):
+        session = self.session([started(9, attachment=8), data(9, 1, b"a", attachment=8),
+                                data(1, 1, b"a")])
+        with patch.object(el.time, "perf_counter_ns", side_effect=[0, 3_000_000]):
+            self.assertEqual(session.sample(ord("a")), 3_000_000)
+        self.assertIsNone(session.new_epoch)
 
 
 if __name__ == "__main__":
