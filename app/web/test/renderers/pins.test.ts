@@ -32,4 +32,15 @@ describe('renderer package pins', () => {
     expect(manifest.dependencies['pele']).toBe('1.13.0');
     expect(lockfile.packages['node_modules/pele']?.integrity).toBe(PELE_INTEGRITY);
   });
+
+  it('names the pinned renderer versions in the SPEC suggested stack', () => {
+    const spec = readFileSync(resolve(webRoot, '../../SPEC.md'), 'utf8');
+    const line = spec.split('\n').find((l) => l.startsWith('**Suggested stack:**'));
+    expect(line).toBeDefined();
+    expect(line).toContain('Pele 1.13.0');
+    for (const name of ['DOMPurify', 'markdown-it', 'highlight.js']) {
+      const pin = manifest.dependencies[name === 'DOMPurify' ? 'dompurify' : name];
+      expect(line).toContain(`${name} ${pin}`);
+    }
+  });
 });
