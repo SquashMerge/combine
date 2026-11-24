@@ -378,7 +378,39 @@ mod tests {
         for (name, value) in env {
             command.env(name, value);
         }
-        command.output().expect("sh runs")
+        output_unless_killed(&mut command)
+    }
+
+    /// Runs `command` and returns its output, one child at a time across these tests.
+    ///
+    /// #27: when several of these tests spawned `sh` at the same instant, the kernel sometimes
+    /// SIGKILLed a child before it ran `sh` at all. The kernel log names the killed process by
+    /// the test binary's own name ("exiting with signal 9, force exiting the process"), and the
+    /// kills came in pairs a millisecond apart. Spawning one at a time stops that.
+    ///
+    /// A child a signal killed never ran to an answer, so it says nothing about the lane library.
+    /// It is run once more, and a second kill fails the test, naming the signal. A kill must
+    /// never decide a check: a `!sh_ok(..)` assertion would otherwise pass on a killed child.
+    fn output_unless_killed(command: &mut Command) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let run = |command: &mut Command| {
+            let _one_at_a_time = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            command.output().expect("sh runs")
+        };
+        let output = run(command);
+        if output.status.code().is_some() {
+            return output;
+        }
+        let first = output.status.signal();
+        let output = run(command);
+        assert!(
+            output.status.code().is_some(),
+            "sh was killed twice, by signal {first:?} then {:?}; stderr {:?}",
+            output.status.signal(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
     }
 
     fn sh_ok(script: &str, args: &[&str]) -> bool {
@@ -895,7 +927,8 @@ mod tests {
 
     #[test]
     fn sourcing_the_lane_library_runs_nothing() {
-        let output = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(format!(
                 "before=$(env | sort); . '{}'; after=$(env | sort); \
@@ -904,16 +937,13 @@ mod tests {
                 lib()
             ))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .expect("sh runs");
-        // A child killed by a signal (seen once under heavy machine load) has no exit code;
-        // name the signal so a kill isn't mistaken for the library running something.
+            .env("PATH", "/usr/bin:/bin");
+        // A kill is retried once inside; exit 3 or 4 (the library ran something) fails at once.
+        let output = output_unless_killed(&mut command);
         assert!(
             output.status.success(),
-            "exit {:?}, signal {:?}, stderr {:?}",
+            "exit {:?}, stderr {:?}",
             output.status.code(),
-            std::os::unix::process::ExitStatusExt::signal(&output.status),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.stdout.is_empty() && output.stderr.is_empty());
