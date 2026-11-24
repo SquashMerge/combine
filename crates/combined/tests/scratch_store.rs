@@ -260,3 +260,16 @@ fn folders_are_0700_and_files_0600() {
         0o600
     );
 }
+
+#[test]
+fn a_refused_write_through_a_symlinked_key_folder_creates_nothing_at_the_target() {
+    let (scratch, store) = open();
+    let root = scratch.path().join("scratch");
+    let outside = scratch.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir(&root).unwrap();
+    symlink(&outside, root.join(key('a'))).unwrap();
+    let result = block_on(store.write(&dir('a', "p1"), "panel.json", b"x".to_vec()));
+    assert!(unavailable(&result).contains("is a symlink"));
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+}

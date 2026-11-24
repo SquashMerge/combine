@@ -9,7 +9,7 @@
 //! canonical `.workspace`, and the read or the atomic write then uses that canonical path.
 //!
 //! When the project can't be written (`PermissionDenied` or `ReadOnlyFilesystem`, whether from
-//! creating the folders or from the write itself) and the store has a fallback root, the bytes
+//! the folder check, from creating the folders or from the write itself) and the store has a fallback root, the bytes
 //! go to `<root>/<sha256(space) in hex>/<path>` and the write reports `read_only`. A refusal
 //! for a symlink, a path outside `.workspace` or a relative space is not such a failure: it
 //! stays `Unavailable` and never reaches the fallback.
