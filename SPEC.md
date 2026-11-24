@@ -736,15 +736,15 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 - **Size.** A source over 204,800 bytes of UTF-8 is refused before rendering, with the message `The source is larger than 204,800 bytes.`.
 - **Pele options.** `limit` 204,800, `maxEdges` 51,200, `outputLimit` 4,000,000, `linkSchemes` `['https', 'http']`, `imageSchemes` `['data']`, and a fresh `idPrefix` per render, `combine-mermaid-<n>-`.
 - **markdown-it options.** `html: false`, `xhtmlOut: false`, `breaks: false`, `linkify: false`, `typographer: false`. Fenced code is highlighted by highlight.js core with nine languages: bash, json, rust, typescript, javascript, python, toml (the `ini` grammar), yaml and diff. Any other language, and any block that fails to highlight, is escaped.
-- **Sanitizing.** Both outputs go through DOMPurify with a SVG profile and an HTML profile, and the hooks below apply to both.
+- **Sanitizing.** Both outputs go through DOMPurify with an SVG profile and an HTML profile, and the hooks below apply to both.
   - The SVG profile is `USE_PROFILES: { svg: true }` with no filter primitives and `ADD_ATTR: ['role']`. The HTML profile is an allowlist of text, list, table, `a` and `img` elements.
   - `foreignObject`, `style` and `script` are forbidden. `data-*` attributes are dropped.
   - Every `on*` attribute is dropped. A value that can fetch a resource is dropped too (`isSafeCssValue`): a backslash, `@import`, `expression(`, `image-set(`, `image(`, `cross-fade(`, `element(`, `src(` and `url(` other than a `url(#id)` reference.
   - `href`, `xlink:href`, `src` and `srcset` are dropped, with one exception: the `src` of an `img` and the `href` or `xlink:href` of an SVG `image` survive when they are `data:` URLs of `image/png`, `image/jpeg`, `image/gif` or `image/webp`. An `img` or `image` left without a source is removed.
   - Pele's `rel` and `target` on links are dropped, because links become link markers; its `data-*` attributes such as `data-id` are dropped too.
-  - A link whose raw `href` is an absolute `https:` or `http:` URL with no edge whitespace and no control character becomes a link marker: `data-combine-open-url` holds the normalized URL, with `role="link"` and `tabindex="0"`. Any other link has no marker and does nothing.
+  - A link whose raw `href` is an absolute `https:` or `http:` URL with no edge whitespace and no C0 control character (U+0000 to U+001F) becomes a link marker: `data-combine-open-url` holds the normalized URL, with `role="link"` and `tabindex="0"`. Any other link has no marker and does nothing.
 - **Links.** `attachRenderedLinks(container, port)` in `src/panels/renderedLinks.ts` routes a click or an Enter press on a marked link to `open_url` and prevents the default action. Other anchors are never followed. S5 mounts it on the container that holds the fragment.
-- **Theme.** The container maps Pele's `--pele-*` variables to system colours, so the diagram follows the OS light or dark scheme.
+- **Theme.** The container maps Pele's `--pele-*` variables to CSS system colours. Those colours resolve to their light values until the app declares `color-scheme`; declaring it is an app-wide follow-up.
 
 **Loaders** (in the daemon, on the agent's host)
 
