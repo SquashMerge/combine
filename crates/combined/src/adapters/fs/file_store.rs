@@ -27,7 +27,6 @@
 //! case of a symlink already present in the working tree, not a concurrent attacker.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::io::{self, Read as _};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -89,12 +88,7 @@ impl FsFileStore {
             return None;
         }
         let root = self.fallback.as_ref()?;
-        let digest = Sha256::digest(space.0.as_bytes());
-        let mut name = String::with_capacity(64);
-        for byte in digest {
-            let _ = write!(name, "{byte:02x}");
-        }
-        Some(root.join(name).join(path))
+        Some(root.join(space.sha256_hex()).join(path))
     }
 }
 
@@ -206,11 +200,11 @@ fn checked_folder(
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => return Err(refused(&dir, "is not a directory").into()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(unavailable(error).into()),
+            Err(error) => return Err(created(error)),
         }
     }
-    let root = std::fs::canonicalize(&workspace).map_err(unavailable)?;
-    let canonical = std::fs::canonicalize(&dir).map_err(unavailable)?;
+    let root = std::fs::canonicalize(&workspace).map_err(created)?;
+    let canonical = std::fs::canonicalize(&dir).map_err(created)?;
     if !canonical.starts_with(&root) {
         return Err(refused(&dir, "resolves outside .workspace").into());
     }
@@ -234,7 +228,7 @@ fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<Path
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(unavailable(error).into()),
+        Err(error) => return Err(created(error)),
     }
     Ok(Some(file))
 }
@@ -271,7 +265,7 @@ fn read_listing(dir: &Path, max_entries: usize) -> Result<DirListing, StoreError
 }
 
 /// What a bounded read found.
-enum Bounded {
+pub(super) enum Bounded {
     Bytes(Vec<u8>),
     /// More than the bound: the file's size, as far as is known.
     TooLarge(u64),
@@ -282,7 +276,7 @@ enum Bounded {
 /// Reads `path`, but never more than `max_bytes + 1` bytes of it, so a huge file, or one that
 /// grows during the read, costs at most that. Only a regular file is read, and neither the
 /// open nor the read waits on a FIFO: see the module note.
-fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded> {
+pub(super) fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded> {
     if !std::fs::symlink_metadata(path)?.file_type().is_file() {
         return Ok(Bounded::NotRegular);
     }
@@ -427,6 +421,46 @@ impl FileStore for FsFileStore {
             hash: content_hash(&bytes),
             read_only: false,
         })
+    }
+
+    async fn remove_file(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        file_path(space, path)?;
+        let file = match checked_file(space, path, false) {
+            Ok(Some(file)) => file,
+            Ok(None) => return Ok(()),
+            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
+            Err(Checked::Refused(error)) => return Err(error),
+        };
+        match std::fs::remove_file(&file) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if is_denied(&error) => Err(StoreError::ReadOnly(error.to_string())),
+            Err(error) => Err(unavailable(error)),
+        }
+    }
+
+    async fn remove_dir(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        file_path(space, path)?;
+        let folders: Vec<&str> = path.split('/').collect();
+        let dir = match checked_folder(space, &folders, false) {
+            Ok(Some(dir)) => dir,
+            Ok(None) => return Ok(()),
+            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
+            Err(Checked::Refused(error)) => return Err(error),
+        };
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) if is_denied(&error) => Err(StoreError::ReadOnly(error.to_string())),
+            Err(error) => Err(unavailable(error)),
+        }
     }
 
     async fn list_dir(

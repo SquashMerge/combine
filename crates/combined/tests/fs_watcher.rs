@@ -44,6 +44,13 @@ fn layout_change(space: &SpaceId) -> FileChange {
     }
 }
 
+fn panels_change(space: &SpaceId, path: &str) -> FileChange {
+    FileChange {
+        space: space.clone(),
+        path: path.to_string(),
+    }
+}
+
 #[test]
 fn classify_ignores_temp_files() {
     let space = SpaceId("/work/project".to_string());
@@ -135,6 +142,103 @@ fn classify_ignores_other_files() {
     assert_eq!(classify(&event(created, &[]), &roots), []);
 }
 
+#[test]
+fn classify_reports_panel_files() {
+    let space = SpaceId("/work/project".to_string());
+    let roots = roots(&space);
+    for file in ["panel.json", "diagram.mmd", "content.md"] {
+        let path = PathBuf::from("/work/project/.workspace/panels/p1").join(file);
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert_eq!(
+                classify(&event(kind, &[&path]), &roots),
+                [panels_change(&space, &format!("panels/p1/{file}"))],
+                "{file} {kind:?}"
+            );
+        }
+    }
+    let temp = Path::new("/work/project/.workspace/panels/p1/.panel.json.tmp-1-0");
+    let target = Path::new("/work/project/.workspace/panels/p1/panel.json");
+    let renamed = event(
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[temp, target],
+    );
+    assert_eq!(
+        classify(&renamed, &roots),
+        [panels_change(&space, "panels/p1/panel.json")]
+    );
+}
+
+#[test]
+fn classify_ignores_panel_temp_and_other_files() {
+    let space = SpaceId("/work/project".to_string());
+    let roots = roots(&space);
+    let created = EventKind::Create(CreateKind::File);
+    for path in [
+        "/work/project/.workspace/panels/p1/.panel.json.tmp-1-0",
+        "/work/project/.workspace/panels/p1/.DS_Store",
+        "/work/project/.workspace/panels/p1/scratch.json",
+        "/work/project/.workspace/panels/p1/other.txt",
+        "/work/project/.workspace/panels/p1/sub/panel.json",
+        "/work/project/.workspace/panels/.p1/panel.json",
+        "/work/project/.workspace/panels/.DS_Store",
+        "/work/project/.workspace/other/p1/panel.json",
+        "/work/other/.workspace/panels/p1/panel.json",
+    ] {
+        assert_eq!(
+            classify(&event(created, &[Path::new(path)]), &roots),
+            [],
+            "{path}"
+        );
+    }
+    let read = Path::new("/work/project/.workspace/panels/p1/panel.json");
+    for kind in [
+        EventKind::Access(AccessKind::Open(AccessMode::Any)),
+        EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        EventKind::Access(AccessKind::Read),
+    ] {
+        assert_eq!(classify(&event(kind, &[read]), &roots), [], "{kind:?}");
+    }
+}
+
+#[test]
+fn classify_reports_panel_folder_events_as_panels() {
+    let space = SpaceId("/work/project".to_string());
+    let roots = roots(&space);
+    let panels = Path::new("/work/project/.workspace/panels");
+    let folder = Path::new("/work/project/.workspace/panels/p1");
+    let away = Path::new("/work/project/.workspace/panels/.p1.old");
+    let hidden = Path::new("/work/project/.workspace/panels/.p2");
+    let one = [panels_change(&space, "panels")];
+    for kind in [
+        EventKind::Create(CreateKind::Folder),
+        EventKind::Remove(RemoveKind::Folder),
+    ] {
+        assert_eq!(classify(&event(kind, &[panels]), &roots), one, "{kind:?}");
+        assert_eq!(classify(&event(kind, &[folder]), &roots), one, "{kind:?}");
+    }
+    let renamed = event(
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[folder, away],
+    );
+    assert_eq!(classify(&renamed, &roots), one);
+    let replaced = event(
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[away, folder],
+    );
+    assert_eq!(classify(&replaced, &roots), one);
+    assert_eq!(
+        classify(
+            &event(EventKind::Create(CreateKind::Folder), &[hidden]),
+            &roots
+        ),
+        []
+    );
+}
+
 fn start(space: &SpaceId) -> (SpaceWatcher, UnboundedReceiver<FileChange>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let watcher = SpaceWatcher::new(tx).unwrap();
@@ -149,10 +253,11 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// Runs `cause` until a change for `space` arrives, for at most [`BOUND`].
+/// Runs `cause` until the change `path` for `space` arrives, for at most [`BOUND`].
 fn change_after(
     rx: &mut UnboundedReceiver<FileChange>,
     space: &SpaceId,
+    path: &str,
     mut cause: impl FnMut(),
 ) -> bool {
     let rt = runtime();
@@ -161,7 +266,7 @@ fn change_after(
         cause();
         let next = rt.block_on(async { tokio::time::timeout(SLICE, rx.recv()).await });
         if let Ok(Some(change)) = next {
-            if change.space == *space && change.path == "layout.json" {
+            if change.space == *space && change.path == path {
                 return true;
             }
         }
@@ -180,27 +285,61 @@ fn scratch_space() -> (ShortTempDir, SpaceId) {
 #[test]
 fn workspace_creation_rearms_watch() {
     let (_scratch, space) = scratch_space();
-    let (_watcher, mut rx) = start(&space);
+    let (watcher, mut rx) = start(&space);
     let workspace = Path::new(&space.0).join(".workspace");
+    assert!(!watcher.is_armed(&space));
     fs::create_dir(&workspace).unwrap();
     assert!(
-        change_after(&mut rx, &space, || {}),
+        change_after(&mut rx, &space, "layout.json", || {}),
         "creating .workspace reported no layout change"
     );
+    assert!(watcher.is_armed(&space));
+    std::thread::sleep(SLICE);
+    while rx.try_recv().is_ok() {}
+    let armed = watcher.arms();
     let mut round = 0;
-    let seen = change_after(&mut rx, &space, || {
+    let seen = change_after(&mut rx, &space, "layout.json", || {
         round += 1;
         fs::write(workspace.join("layout.json"), format!("{round}")).unwrap();
     });
     assert!(seen, "no change from the re-armed watch");
+    assert_eq!(watcher.arms(), armed, "the change was a new re-arm's");
 
     fs::remove_dir_all(&workspace).unwrap();
     while rx.try_recv().is_ok() {}
     fs::create_dir(&workspace).unwrap();
     assert!(
-        change_after(&mut rx, &space, || {}),
+        change_after(&mut rx, &space, "layout.json", || {}),
         "re-creating .workspace reported no layout change"
     );
+}
+
+#[test]
+fn rearm_never_registers_a_path_twice() {
+    let (_scratch, space) = scratch_space();
+    let (watcher, mut rx) = start(&space);
+    let workspace = Path::new(&space.0).join(".workspace");
+    for cycle in 1..=3 {
+        fs::create_dir(&workspace).unwrap();
+        assert!(
+            change_after(&mut rx, &space, "layout.json", || {}),
+            "cycle {cycle}: creating .workspace reported no layout change"
+        );
+        let paths = watcher.watched_paths();
+        assert_eq!(
+            paths.iter().filter(|path| **path == workspace).count(),
+            1,
+            "cycle {cycle}: {paths:?}"
+        );
+        let mut round = 0;
+        let seen = change_after(&mut rx, &space, "layout.json", || {
+            round += 1;
+            fs::write(workspace.join("layout.json"), format!("{cycle} {round}")).unwrap();
+        });
+        assert!(seen, "cycle {cycle}: a write was not reported");
+        fs::remove_dir_all(&workspace).unwrap();
+        while rx.try_recv().is_ok() {}
+    }
 }
 
 #[test]
@@ -214,7 +353,7 @@ fn failed_watch_is_not_registered() {
     fs::create_dir_all(folder.join(".workspace")).unwrap();
     watcher.watch(&space).unwrap();
     let mut round = 0;
-    let seen = change_after(&mut rx, &space, || {
+    let seen = change_after(&mut rx, &space, "layout.json", || {
         round += 1;
         fs::write(folder.join(".workspace/layout.json"), format!("{round}")).unwrap();
     });
@@ -232,7 +371,12 @@ fn classify_maps_a_rescan_to_every_space() {
     let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
     assert_eq!(
         classify(&rescan, &roots),
-        [layout_change(&a), layout_change(&b)]
+        [
+            layout_change(&a),
+            panels_change(&a, "panels"),
+            layout_change(&b),
+            panels_change(&b, "panels")
+        ]
     );
     assert_eq!(classify(&Event::new(EventKind::Other), &roots), []);
 }
@@ -244,12 +388,12 @@ fn real_watcher_reports_outside_edit() {
     fs::create_dir(&workspace).unwrap();
     let (_watcher, mut rx) = start(&space);
     let mut round = 0;
-    let seen = change_after(&mut rx, &space, || {
+    let seen = change_after(&mut rx, &space, "layout.json", || {
         round += 1;
         fs::write(workspace.join("layout.json"), format!("edit {round}")).unwrap();
     });
     assert!(seen, "the edit was never reported");
-    let seen = change_after(&mut rx, &space, || {
+    let seen = change_after(&mut rx, &space, "layout.json", || {
         let _ = fs::remove_file(workspace.join("layout.json"));
     });
     assert!(seen, "the removal was never reported");
@@ -262,11 +406,38 @@ fn real_watcher_reports_rename_write() {
     fs::create_dir(&workspace).unwrap();
     let (_watcher, mut rx) = start(&space);
     let mut round = 0;
-    let seen = change_after(&mut rx, &space, || {
+    let seen = change_after(&mut rx, &space, "layout.json", || {
         round += 1;
         let temp = workspace.join(format!(".layout.json.tmp-{round}"));
         fs::write(&temp, format!("renamed {round}")).unwrap();
         fs::rename(&temp, workspace.join("layout.json")).unwrap();
     });
     assert!(seen, "the rename was never reported");
+}
+
+#[test]
+fn real_watcher_reports_panel_file_edits() {
+    let (_scratch, space) = scratch_space();
+    let folder = Path::new(&space.0).join(".workspace/panels/p1");
+    fs::create_dir_all(&folder).unwrap();
+    let (_watcher, mut rx) = start(&space);
+    let mut round = 0;
+    let seen = change_after(&mut rx, &space, "panels/p1/panel.json", || {
+        round += 1;
+        fs::write(folder.join("panel.json"), format!("edit {round}")).unwrap();
+    });
+    assert!(seen, "the panel.json edit was never reported");
+    let seen = change_after(&mut rx, &space, "panels/p1/diagram.mmd", || {
+        round += 1;
+        let temp = folder.join(format!(".diagram.mmd.tmp-{round}"));
+        fs::write(&temp, format!("graph {round}")).unwrap();
+        fs::rename(&temp, folder.join("diagram.mmd")).unwrap();
+    });
+    assert!(seen, "the diagram.mmd rename was never reported");
+    let seen = change_after(&mut rx, &space, "panels", || {
+        round += 1;
+        fs::create_dir_all(Path::new(&space.0).join(format!(".workspace/panels/q{round}")))
+            .unwrap();
+    });
+    assert!(seen, "a new panel folder was never reported");
 }
