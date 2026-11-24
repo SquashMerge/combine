@@ -389,6 +389,32 @@ fn an_outside_folder_is_not_admitted_past_100_scratch_panels() {
 }
 
 #[test]
+fn a_saved_scratch_panel_loads_when_an_empty_workspace_folder_is_the_100th() {
+    let mut rig = PanelRig::new();
+    rig.create(named("saved", scratch(markdown("kept"))))
+        .unwrap();
+    rig.wait_state("saved", PanelState::Validated);
+    for n in 0..MAX_PANELS - 1 {
+        let id = format!("p{n:03}");
+        rig.store
+            .write_quiet(&rig.space, &file_path(&id), THEIRS_JSON.to_vec());
+        rig.store
+            .write_quiet(&rig.space, &content_path(&id), id.as_bytes().to_vec());
+    }
+    rig.store
+        .write_quiet(&rig.space, "panels/empty/notes.txt", b"mine".to_vec());
+
+    rig.restart();
+    let (view, source) = wait_for(&rig, "saved", "loaded", |_, _| true);
+    assert_eq!(
+        (view.lifetime, source.as_str()),
+        (Lifetime::Scratch, "kept")
+    );
+    assert_eq!(rig.list_ids().len(), MAX_PANELS);
+    assert_eq!(rig.connections(), 0);
+}
+
+#[test]
 fn remove_deletes_the_panel_files_and_ds_store_and_frees_the_id() {
     let rig = PanelRig::new();
     rig.create(named("p", markdown("one"))).unwrap();

@@ -583,7 +583,8 @@ struct SpaceState {
     /// How many of those were emitted before a Save or Delete began; their results are dropped.
     stale_reads: BTreeMap<String, u32>,
     removed: VecDeque<RemovedId>,
-    /// Scratch folders of this space read before its first listing.
+    /// Scratch folders of this space waiting for its first listing, or for workspace reads that
+    /// may still free a slot. `loaded` waits until this is empty.
     waiting_scratch: Vec<ScratchDir>,
     /// Scratch folders of this space whose files are being read.
     scratch_reading: BTreeMap<String, ScratchLoad>,
@@ -655,12 +656,19 @@ impl SpaceState {
     /// path checks this one budget, so a read that is asked for but not yet answered already
     /// takes its place.
     fn held(&self) -> usize {
+        self.held_with(true)
+    }
+
+    /// `held`, with or without the workspace reads that are out. Without them it is what the
+    /// space keeps whichever way those reads end: a read that finds no `panel.json` frees its slot.
+    fn held_with(&self, reads: bool) -> usize {
         let folders = self
             .folders
             .iter()
             .filter(|(id, state)| match state {
-                FolderState::Panel | FolderState::Symlink | FolderState::Reading => true,
-                FolderState::Empty => self.reads_out.contains_key(id.as_str()),
+                FolderState::Panel | FolderState::Symlink => true,
+                FolderState::Reading => reads,
+                FolderState::Empty => reads && self.reads_out.contains_key(id.as_str()),
                 FolderState::NotRead | FolderState::Shadowed { .. } => false,
             })
             .count();
@@ -674,7 +682,11 @@ impl SpaceState {
 
     /// `held`, at least 100 when the listing had more.
     fn count(&self) -> usize {
-        let count = self.held();
+        self.count_with(true)
+    }
+
+    fn count_with(&self, reads: bool) -> usize {
+        let count = self.held_with(reads);
         if self.over_hundred {
             count.max(MAX_PANELS)
         } else {
@@ -2312,9 +2324,13 @@ impl PanelStore {
         self.out.in_flight.len()
     }
 
-    /// Ends every call: a space whose load is settled stops loading, and queued checks start.
+    /// Ends every call: scratch folders waiting on workspace reads are tried again, a space whose
+    /// load is settled stops loading, and queued checks start.
     fn finish(&mut self) {
         for state in self.spaces.values_mut() {
+            if state.listed && !state.waiting_scratch.is_empty() {
+                state.admit_waiting(&mut self.out);
+            }
             state.update_loaded(&self.out.scratch);
         }
         self.pump();

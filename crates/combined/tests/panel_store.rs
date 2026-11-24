@@ -3426,3 +3426,107 @@ fn queued_first_sight_reads_completing_together_never_exceed_100() {
         assert_eq!(skip_of(&rig, id).as_deref(), Some(HUNDRED), "{id}");
     }
 }
+
+/// How early the saved scratch panel's `scratch.json` arrives in a restart.
+#[derive(Clone, Copy)]
+enum MetaAt {
+    BeforeListing,
+    WhileReadsAreOut,
+}
+
+/// A restart: `valid` workspace panels, `empty` folders with no `panel.json`, and one saved
+/// scratch panel `saved`. Every workspace read is answered after the scratch folder is known.
+fn restart_with_one_scratch(valid: usize, empty: usize, meta: MetaAt) -> Rig {
+    let timing = PanelTiming::default();
+    let mut rig = Rig {
+        store: PanelStore::new(timing),
+        ids: Counter(1_000),
+        now: 10_000,
+        timing,
+    };
+    rig.store.start(rig.t());
+    rig.store.add_space(&space(), rig.t());
+    rig.store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: vec![sdir("saved")],
+            truncated: false,
+        }),
+        rig.t(),
+    );
+    let folder = PanelFolder::Scratch(sdir("saved"));
+    let meta_read = |rig: &mut Rig| {
+        let now = rig.t();
+        rig.store.apply_read(
+            &folder,
+            "scratch.json",
+            found(&meta_json(T)),
+            now,
+            &mut rig.ids,
+        );
+    };
+    if matches!(meta, MetaAt::BeforeListing) {
+        meta_read(&mut rig);
+    }
+    let valid_ids: Vec<String> = (0..valid).map(|n| format!("p{n:03}")).collect();
+    let empty_ids: Vec<String> = (0..empty).map(|n| format!("q{n:03}")).collect();
+    let names: Vec<&str> = valid_ids
+        .iter()
+        .chain(&empty_ids)
+        .map(String::as_str)
+        .collect();
+    rig.store.apply_listing(&space(), listing(&names), rig.t());
+    if matches!(meta, MetaAt::WhileReadsAreOut) {
+        meta_read(&mut rig);
+    }
+    assert_eq!(reads(&rig.fx()).len(), valid + empty);
+    for id in &valid_ids {
+        rig.pair(id, found(md_json()), found(id.as_bytes()));
+    }
+    for id in &empty_ids {
+        rig.store.apply_read(
+            &at(id),
+            "panel.json",
+            PanelRead::Missing,
+            rig.t(),
+            &mut rig.ids,
+        );
+    }
+    let now = rig.t();
+    rig.store
+        .apply_read(&folder, "panel.json", found(md_json()), now, &mut rig.ids);
+    rig.store
+        .apply_read(&folder, "content.md", found(b"saved"), now, &mut rig.ids);
+    rig
+}
+
+fn assert_saved_loaded(rig: &Rig, panels: usize) {
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), panels);
+    assert_eq!(rig.get("saved").1, "saved");
+}
+
+#[test]
+fn a_saved_scratch_panel_loads_when_an_empty_folder_leaves_the_100th_slot() {
+    let mut rig = restart_with_one_scratch(99, 1, MetaAt::BeforeListing);
+    assert_saved_loaded(&rig, 100);
+    assert!(matches!(
+        rig.create("late", Renderer::Markdown, "x"),
+        Err(PanelApiError::PanelLimit { .. })
+    ));
+}
+
+#[test]
+fn a_saved_scratch_panel_loads_beside_100_empty_folders() {
+    let mut rig = restart_with_one_scratch(0, 100, MetaAt::BeforeListing);
+    assert_saved_loaded(&rig, 1);
+    rig.md("late", "x");
+}
+
+#[test]
+fn a_saved_scratch_panel_whose_meta_arrives_while_reads_are_out_still_loads() {
+    let mut rig = restart_with_one_scratch(99, 1, MetaAt::WhileReadsAreOut);
+    assert_saved_loaded(&rig, 100);
+    assert!(matches!(
+        rig.create("late", Renderer::Markdown, "x"),
+        Err(PanelApiError::PanelLimit { .. })
+    ));
+}

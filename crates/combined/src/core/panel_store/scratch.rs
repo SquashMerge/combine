@@ -499,7 +499,9 @@ impl SpaceState {
     // ---- the scratch load
 
     /// A scratch folder is read, once the space is listed: unless the workspace already holds
-    /// its ID, which wins.
+    /// its ID, which wins. While the space is full only because workspace reads are out, the
+    /// folder waits in `waiting_scratch`; it is skipped for capacity only when the panels the
+    /// space keeps already fill it.
     pub(super) fn admit(&mut self, out: &mut Out, dir: ScratchDir) {
         let id = dir.panel.clone();
         let held = self.records.contains_key(&id)
@@ -524,6 +526,10 @@ impl SpaceState {
             return;
         }
         if self.count() >= MAX_PANELS {
+            if self.count_with(false) < MAX_PANELS {
+                self.waiting_scratch.push(dir);
+                return;
+            }
             self.log(
                 out,
                 format!(
@@ -541,6 +547,7 @@ impl SpaceState {
             .insert(id, ScratchLoad { dir, file: None });
     }
 
+    /// Tries the waiting folders in ID order; those that still wait on workspace reads stay.
     pub(super) fn admit_waiting(&mut self, out: &mut Out) {
         let mut waiting = std::mem::take(&mut self.waiting_scratch);
         waiting.sort_by(|a, b| a.panel.cmp(&b.panel));
