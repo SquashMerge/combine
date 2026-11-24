@@ -9,7 +9,8 @@
 //! Memory per decoded control frame is bounded by a constant factor of the
 //! frame cap: within the 32 MiB bound, the frame buffer for unknown values and
 //! unescaped keys. An unknown key containing an escape can grow serde_json's
-//! key scratch buffer to about twice that key.
+//! key scratch buffer to about twice that key. An `mcp` frame's message is kept
+//! as its JSON text, never as a tree, so it stays within that bound too.
 //!
 //! Nested known structs (`cursor`, `options`, `display`) accept JSON array
 //! form, as serde does by default: `{"type":"ack","cursor":[7,4,9]}` decodes.
@@ -25,20 +26,23 @@ mod frame;
 mod handshake;
 mod ids;
 mod layout;
+mod mcp;
+mod panels;
 mod spawn;
 mod stream;
 mod terminals;
 
 pub use client::{
-    Ack, Attach, AttachRequestOptions, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input,
-    ListTemplates, MutateLayout, RequestOwnership, Resize, Resume, SetDisplay, SpawnTerminal,
-    UnwatchLayout, WatchLayout, WatchTerminals,
+    Ack, Attach, AttachRequestOptions, AutomaticReply, ClientMessage, ClosePanel, Detach, Focus,
+    GetPanel, Hello, Input, ListTemplates, McpOpen, MutateLayout, PinPanel, ReportRender,
+    RequestOwnership, Resize, Resume, SetDisplay, SpawnTerminal, UnwatchLayout, WatchLayout,
+    WatchTerminals,
 };
 pub use codec::WireMessage;
 pub use daemon::{
     Attached, CloseReason, Closed, DaemonMessage, Data, ErrorCode, ErrorMessage, Facts, Fidelity,
-    Gap, Layout, Lost, Ownership, Resized, Resumed, Resynced, Spawned, Started, Templates,
-    Terminals, Welcome,
+    Gap, Layout, Lost, McpOpened, Ownership, Panel, PanelClosed, PanelPinned, Panels, Resized,
+    Resumed, Resynced, Spawned, Started, Templates, Terminals, Welcome,
 };
 pub use display::Display;
 pub use error::{DecodeError, EncodeError, ReadError, WriteError};
@@ -54,6 +58,8 @@ pub use ids::{
     TermId,
 };
 pub use layout::{DroppedNotice, LayoutNode, LayoutOp, LayoutSnapshot, Ratio, SplitDirection};
+pub use mcp::{JsonRpcMessage, Mcp, McpCaller};
+pub use panels::{CreatedBy, PanelError, PanelState, PanelSummary, RenderStatus, Renderer};
 pub use spawn::{SkippedPanel, SpawnSource, TemplateInfo};
 pub use stream::{read_message, write_message};
 pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};

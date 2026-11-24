@@ -1,6 +1,6 @@
 # M2 plan: agent-built diagrams
 
-This is the working plan for SPEC.md milestone 2 (rev 22). SPEC.md is the source of truth for behavior; this file only orders the work.
+This is the working plan for SPEC.md milestone 2 (rev 23). SPEC.md is the source of truth for behavior; this file only orders the work.
 
 M2 covers "MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation" (SPEC roadmap). M0 handed it this done criterion: **M2 is done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.**
 
@@ -50,6 +50,8 @@ Every slice ends with:
 - the layout ops `add_panel` and `remove_panel`;
 - `mcp_open { caller }`, answered by `mcp_opened { space }`, after which `mcp { message }` carries one JSON-RPC message per frame;
 - the error codes `unknown_panel`, `unknown_caller` and `panel_limit`.
+
+S1 fixed them in SPEC rev 23 (Wire protocol, Version 5 messages), which is now their source.
 
 **Order:**
 1. S1, S2 (spike first) and S6 run in parallel.
@@ -116,6 +118,8 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 - **Agent file edits racing MCP writes.** Check the hash before every panel and layout write (the #34 finding).
 - **The shim's lifetime and the connection cap.** A shim must survive a daemon restart, or fail clearly.
 - **Daemon-made layout writes with no watcher.** These are new. The debounce and shutdown flushes must cover them.
+- **A panel reply too big for one frame.** `write_one` (`crates/combined/src/rpc/connection.rs:169-185`) replaces a message it can't frame with an internal error carrying `request: null`. So a panel reply whose 204,800-byte source escapes past the 1 MiB frame (control characters at 6 bytes each) would leave its `get_panel` unanswered. S3 refuses a source whose escaped form can't fit one panel frame, or S5 gives that error the reply's `request`. S4 handles an `mcp` reply too big for one frame the same way.
+- **Memory and depth when parsing `mcp.message`.** The codec keeps `mcp.message` as text and accepts any nesting depth. So S4 bounds memory and depth when it parses the message into JSON-RPC types, because a tree of a full frame can hold over 100 MiB.
 
 ## Open issues
 

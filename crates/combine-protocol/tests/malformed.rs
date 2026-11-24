@@ -243,6 +243,49 @@ fn message_types_from_the_other_direction_are_unknown() {
 }
 
 #[test]
+fn v5_message_types_keep_their_direction() {
+    for key in [
+        "get_panel",
+        "report_render",
+        "close_panel",
+        "pin_panel",
+        "mcp_open",
+    ] {
+        let frame = client_goldens()
+            .into_iter()
+            .find(|(k, _, _)| *k == key)
+            .unwrap()
+            .2;
+        assert_eq!(
+            DaemonMessage::decode(&frame),
+            Err(unknown_type(key)),
+            "{key}"
+        );
+    }
+    for key in [
+        "panels",
+        "panel",
+        "panel_closed",
+        "panel_pinned",
+        "mcp_opened",
+    ] {
+        let frame = daemon_goldens()
+            .into_iter()
+            .find(|(k, _, _)| *k == key)
+            .unwrap()
+            .2;
+        assert_eq!(
+            ClientMessage::decode(&frame),
+            Err(unknown_type(key)),
+            "{key}"
+        );
+    }
+    let frame = control_frame(&golden_json("mcp_client"));
+    assert!(ClientMessage::decode(&frame).is_ok());
+    assert!(DaemonMessage::decode(&frame).is_ok());
+}
+
+#[test]
 fn binary_message_names_are_not_json_types() {
     for name in ["data", "input", "automatic_reply"] {
         let buf = control_frame(&format!(r#"{{"type":"{name}","attachment":7}}"#));

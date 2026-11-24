@@ -63,7 +63,8 @@ pub struct TemplateInfo {
     pub hash: String,
 }
 
-/// A panel folder the daemon couldn't offer as a template, and why.
+/// A panel folder the daemon couldn't offer, and why: as a terminal template in
+/// `templates`, or as a panel in `panels`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedPanel {
     pub panel: String,
