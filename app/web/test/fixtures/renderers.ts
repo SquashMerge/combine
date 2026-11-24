@@ -128,3 +128,108 @@ export const HTML_FIXTURES: RendererFixture[] = [
   { id: 'H5', source: '<p style="background:url(https://evil.example/x)">text</p>' },
   { id: 'H6', source: '<a data-combine-open-url="javascript:alert(1)">x</a>' },
 ];
+
+function clickFlowchart(click: string): string {
+  return `flowchart LR\n  A --> B\n  ${click}`;
+}
+
+/** Mermaid sources through `renderMermaid`. */
+export const MERMAID_FIXTURES: RendererFixture[] = [
+  { id: 'M1', source: 'flowchart LR\n  A["<script>alert(1)</script>"] --> B', mustRender: true },
+  { id: 'M2', source: 'flowchart LR\n  A["<img src=x onerror=alert(1)>"] --> B', mustRender: true },
+  { id: 'M3', source: clickFlowchart('click A href "javascript:alert(1)"') },
+  {
+    id: 'M4',
+    source:
+      'flowchart LR\n  A --> B\n  C --> D\n  E --> F\n  G --> H\n' +
+      '  click A href "data:text/html,<script>alert(1)</script>"\n' +
+      '  click C href "vbscript:x"\n' +
+      '  click E href "file:///etc/passwd"\n' +
+      '  click G href "mailto:a@b.c"',
+  },
+  { id: 'M5', source: clickFlowchart('click A href "//evil.example/x"') },
+  {
+    id: 'M-link',
+    source: clickFlowchart('click A href "https://example.com/a"'),
+    mustRender: true,
+  },
+  {
+    id: 'M6',
+    source:
+      'flowchart LR\n  A --> B\n  classDef bad fill:url(https://evil.example/x.svg),stroke:#f00\n  class A bad',
+    mustFail: true,
+  },
+  {
+    id: 'M7',
+    source:
+      'flowchart LR\n  A --> B\n  style A fill:#f00,background-image:url(https://evil.example/p.png)',
+    mustFail: true,
+  },
+  {
+    id: 'M8',
+    source:
+      '%%{init: {"themeCSS": "* { background: url(https://evil.example/x) }", "securityLevel": "loose"}}%%\nflowchart LR\n  A --> B',
+  },
+  { id: 'M9', source: clickFlowchart('click A call alert(1)') },
+  { id: 'M10', source: 'flowchart LR\n  A["$$x^2$$"] --> B' },
+  {
+    id: 'M11',
+    source: 'flowchart LR\n  A --> B\n  style A color:red;background:url(https://evil.example/x)',
+    mustRender: true,
+  },
+];
+
+const MD3_LINKS = [
+  '[a](javascript:alert(1))',
+  '[b](JAVASCRIPT:alert(1))',
+  '[c](vbscript:x)',
+  '[d](file:///etc/passwd)',
+  '[e](data:text/html,x)',
+  '[f](mailto:a@b.c)',
+  '[g](ftp://example.com)',
+  '[h](//evil.example)',
+  '[i](/rel)',
+  '[j](#frag)',
+  '[k](https://example.com/k)',
+  '[l](HTTP://EXAMPLE.COM/l)',
+  '<https://example.com/auto>',
+  '[m][ref]',
+];
+
+const MD4_IMAGES = [
+  '![r](https://evil.example/r.png)',
+  '![p](//evil.example/p.png)',
+  '![rel](./x.png)',
+  '![svg](data:image/svg+xml;base64,PHN2Zz4=)',
+  '![png](data:image/png;base64,iVBORw0KGgo=)',
+  '![jpeg](data:image/jpeg;base64,/9j/)',
+  '![gif](data:image/gif;base64,R0lGODlh)',
+  '![webp](data:image/webp;base64,UklGRg==)',
+  '![ref][img]',
+];
+
+/** Markdown sources through `renderMarkdown`. */
+export const MARKDOWN_FIXTURES: RendererFixture[] = [
+  {
+    id: 'MD1',
+    source: '<script>alert(1)</script>\n\ntext <script>alert(1)</script> text',
+    mustRender: true,
+  },
+  {
+    id: 'MD2',
+    source: '<img src=x onerror=alert(1)>\n\n<div onclick="x">y</div>',
+    mustRender: true,
+  },
+  {
+    id: 'MD3',
+    source: `${MD3_LINKS.join('\n\n')}\n\n[ref]: https://example.com/m`,
+    mustRender: true,
+  },
+  {
+    id: 'MD4',
+    source: `${MD4_IMAGES.join('\n\n')}\n\n[img]: https://evil.example/i.png`,
+    mustRender: true,
+  },
+  { id: 'MD6', source: '```"><img src=x onerror=alert(1)>\ncode\n```', mustRender: true },
+  { id: 'MD9', source: '[x](&#106;avascript:alert(1))', mustRender: true },
+];

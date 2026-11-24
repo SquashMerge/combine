@@ -1,0 +1,29 @@
+.combine-mermaid {
+  --pele-bg: Canvas;
+  --pele-fg: CanvasText;
+  --pele-muted: GrayText;
+  --pele-line: CanvasText;
+  --pele-surface: Canvas;
+  --pele-surface-alt: ButtonFace;
+  --pele-border: CanvasText;
+  --pele-accent: Highlight;
+  --pele-error: #b42318;
+  --pele-critical: #b42318;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.combine-mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.combine-mermaid [data-combine-open-url] {
+  cursor: pointer;
+}
+
+.combine-mermaid [data-combine-open-url]:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
