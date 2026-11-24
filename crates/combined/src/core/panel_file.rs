@@ -168,7 +168,7 @@ fn pretty(value: &impl Serialize) -> Vec<u8> {
 }
 
 /// The bytes of `panel.json`: pretty JSON with a trailing newline. It writes only the fields of
-/// a [`ViewPanelFile`]. The worst case is 3,214 bytes, within [`PANEL_MAX_BYTES`].
+/// a [`ViewPanelFile`]. The worst case is 3,216 bytes, within [`PANEL_MAX_BYTES`].
 pub fn encode_view_panel(file: &ViewPanelFile) -> Vec<u8> {
     pretty(&ViewPanelJson {
         version: 1,

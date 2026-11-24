@@ -24,6 +24,22 @@ impl IdSource for Counter {
     }
 }
 
+/// A store that has asked for its scratch listing and been told it is empty, as the server
+/// starts it. No space is added.
+fn started_store(timing: PanelTiming) -> PanelStore {
+    let mut store = PanelStore::new(timing);
+    store.start(Millis(0));
+    store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: Vec::new(),
+            truncated: false,
+        }),
+        Millis(0),
+    );
+    store.take_effects();
+    store
+}
+
 fn space() -> SpaceId {
     SpaceId("/work/app".to_owned())
 }
@@ -508,19 +524,16 @@ fn unavailable() -> Result<DiagramVerdict, DiagramCheckError> {
     Err(DiagramCheckError::Unavailable("engine down".to_owned()))
 }
 
-/// Applies `Unavailable` and returns the delay until the retried `Check`, which it takes.
-fn retry_delay(rig: &mut Rig, id: &str, revision: u64) -> u64 {
+/// Applies `Unavailable`, then checks the retried `Check` waits for exactly `delay_ms`: none just
+/// before it, one at it. The store's `next_deadline` is not read.
+fn retry_after(rig: &mut Rig, id: &str, revision: u64, delay_ms: u64) {
     rig.verdict(id, revision, unavailable());
     assert_eq!(rig.get(id).0.state, PanelState::Validating);
     assert_eq!(rig.get(id).0.error, None);
-    let deadline = rig.store.next_deadline().unwrap();
-    rig.tick(0);
+    rig.tick(delay_ms - 1);
     assert!(checks(&rig.fx()).is_empty());
-    let delay = deadline.0 - rig.now;
-    rig.set(deadline.0);
-    rig.store.tick(rig.t(), 0);
+    rig.tick(1);
     assert_eq!(checks(&rig.fx()).len(), 1);
-    delay
 }
 
 #[test]
@@ -528,9 +541,9 @@ fn unavailable_retries_at_1_5_30_seconds_then_fails() {
     let mut rig = Rig::new();
     let view = rig.mm("d", "x");
     rig.fx();
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 1_000);
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 5_000);
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 30_000);
+    retry_after(&mut rig, "d", view.revision, 1_000);
+    retry_after(&mut rig, "d", view.revision, 5_000);
+    retry_after(&mut rig, "d", view.revision, 30_000);
     rig.verdict("d", view.revision, unavailable());
     let (view, _) = rig.get("d");
     assert_eq!(view.state, PanelState::Failed);
@@ -545,14 +558,14 @@ fn an_update_restarts_the_retry_cycle() {
     let mut rig = Rig::new();
     let view = rig.mm("d", "x");
     rig.fx();
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 1_000);
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 5_000);
+    retry_after(&mut rig, "d", view.revision, 1_000);
+    retry_after(&mut rig, "d", view.revision, 5_000);
     let updated = rig.update("d", content_update("y")).unwrap();
     rig.fx();
     rig.verdict("d", view.revision, unavailable());
     assert_eq!(checks(&rig.fx()).len(), 1);
     assert_eq!(rig.store.in_flight(), 1);
-    assert_eq!(retry_delay(&mut rig, "d", updated.revision), 1_000);
+    retry_after(&mut rig, "d", updated.revision, 1_000);
 }
 
 #[test]
@@ -561,8 +574,8 @@ fn an_outside_edit_restarts_the_retry_cycle() {
     let view = rig.mm("d", "x");
     rig.finish_save();
     rig.fx();
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 1_000);
-    assert_eq!(retry_delay(&mut rig, "d", view.revision), 5_000);
+    retry_after(&mut rig, "d", view.revision, 1_000);
+    retry_after(&mut rig, "d", view.revision, 5_000);
     rig.verdict("d", view.revision, unavailable());
     rig.store
         .apply_change(&space(), "panels/d/diagram.mmd", rig.t());
@@ -574,9 +587,9 @@ fn an_outside_edit_restarts_the_retry_cycle() {
     let running = checks(&rig.fx());
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].1, adopted.revision);
-    assert_eq!(retry_delay(&mut rig, "d", adopted.revision), 1_000);
-    assert_eq!(retry_delay(&mut rig, "d", adopted.revision), 5_000);
-    assert_eq!(retry_delay(&mut rig, "d", adopted.revision), 30_000);
+    retry_after(&mut rig, "d", adopted.revision, 1_000);
+    retry_after(&mut rig, "d", adopted.revision, 5_000);
+    retry_after(&mut rig, "d", adopted.revision, 30_000);
     rig.verdict("d", adopted.revision, unavailable());
     assert_eq!(rig.get("d").0.state, PanelState::Failed);
 }
@@ -612,7 +625,7 @@ fn core_take_id_advances_high_water() {
         },
     )
     .unwrap();
-    let mut store = PanelStore::new(PanelTiming::default());
+    let mut store = started_store(PanelTiming::default());
     store.add_space(&space(), Millis(0));
     store.apply_listing(&space(), Ok(None), Millis(0));
     let before = core.high_water();
@@ -920,6 +933,164 @@ fn a_rescan_finds_an_edit_inside_an_existing_folder() {
     rig.pair("b", found(md_json()), found(b"changed"));
     assert_eq!(rig.get("b").1, "changed");
     assert!(rig.get("b").0.revision > before);
+}
+
+/// A saved panel `p` with "one", and the files its create wrote.
+fn saved_with_files(rig: &mut Rig) -> Vec<FileWrite> {
+    rig.md("p", "one");
+    let files = rig.finish_save();
+    rig.fx();
+    rig.ev();
+    files
+}
+
+#[test]
+fn a_read_asked_before_a_delete_is_not_adopted_while_it_runs() {
+    let mut rig = Rig::with_folders(&[("p", "one")]);
+    let fx = rig.outside("panels/p/content.md");
+    assert_eq!(reads(&fx), [("p".to_owned(), "panel.json")]);
+    rig.store.remove(&space(), "p", rig.t()).unwrap();
+    let (ticket, _) = deletes(&rig.fx()).remove(0);
+    let removed_at = rig.get("p").0.revision;
+    rig.ev();
+    rig.store.apply_read(
+        &at("p"),
+        "panel.json",
+        found(md_json()),
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert!(reads(&rig.fx()).is_empty());
+    rig.store.apply_read(
+        &at("p"),
+        "content.md",
+        found(&[0x66, 0xff]),
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert!(changed(&rig.ev()).is_empty());
+    let (view, _) = rig.get("p");
+    assert_eq!(view.state, PanelState::Removed);
+    assert_eq!(view.revision, removed_at);
+    rig.store.apply_deleted(
+        ticket,
+        SaveReport {
+            written: Vec::new(),
+            end: SaveEnd::Conflict { file: "content.md" },
+        },
+        rig.t(),
+    );
+    assert_eq!(reads(&rig.fx()), [("p".to_owned(), "panel.json")]);
+    rig.pair("p", found(md_json()), found(&[0x66, 0xff]));
+    let (view, source) = rig.get("p");
+    assert_eq!(view.state, PanelState::Failed);
+    assert_eq!(view.error.unwrap().code, "invalid_utf8");
+    assert_eq!(source, "");
+    assert!(view.revision > removed_at);
+}
+
+#[test]
+fn a_content_read_taken_before_a_save_is_not_applied_after_it() {
+    let mut rig = Rig::new();
+    let files = saved_with_files(&mut rig);
+    rig.outside("panels/p/content.md");
+    rig.store.apply_read(
+        &at("p"),
+        "panel.json",
+        found(&files[1].bytes),
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert_eq!(reads(&rig.fx()), [("p".to_owned(), "content.md")]);
+    let updated = rig.update("p", content_update("two")).unwrap().revision;
+    let (ticket, written) = saves(&rig.fx()).remove(0);
+    rig.store.apply_saved(ticket, done(&written), rig.t());
+    assert_eq!(reads(&rig.fx()), [("p".to_owned(), "panel.json")]);
+    rig.store
+        .apply_read(&at("p"), "content.md", found(b"one"), rig.t(), &mut rig.ids);
+    let (view, source) = rig.get("p");
+    assert_eq!(source, "two");
+    assert_eq!(view.revision, updated);
+    assert_eq!(view.dropped, None);
+    assert!(rig.fx().is_empty());
+    rig.pair("p", found(&files[1].bytes), found(b"two"));
+    let (view, source) = rig.get("p");
+    assert_eq!((source.as_str(), view.revision), ("two", updated));
+}
+
+#[test]
+fn no_content_read_is_asked_while_a_save_runs() {
+    let mut rig = Rig::new();
+    let files = saved_with_files(&mut rig);
+    rig.outside("panels/p/content.md");
+    rig.update("p", content_update("two")).unwrap();
+    let (ticket, written) = saves(&rig.fx()).remove(0);
+    rig.store.apply_read(
+        &at("p"),
+        "panel.json",
+        found(&files[1].bytes),
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert!(reads(&rig.fx()).is_empty());
+    rig.tick(rig.timing.debounce_ms);
+    assert!(reads(&rig.fx()).is_empty());
+    rig.store.apply_saved(ticket, done(&written), rig.t());
+    assert_eq!(reads(&rig.fx()), [("p".to_owned(), "panel.json")]);
+    assert_eq!(rig.get("p").1, "two");
+}
+
+#[test]
+fn a_remove_during_a_save_that_conflicts_stays_removed_and_deletes_with_its_own_marks() {
+    let mut rig = Rig::new();
+    let files = saved_with_files(&mut rig);
+    rig.update("p", content_update("two")).unwrap();
+    let (ticket, _) = saves(&rig.fx()).remove(0);
+    rig.store.remove(&space(), "p", rig.t()).unwrap();
+    assert!(deletes(&rig.fx()).is_empty());
+    let last = changed(&rig.ev()).pop().unwrap();
+    assert_eq!(last.2, PanelState::Removed);
+    rig.store.apply_saved(
+        ticket,
+        SaveReport {
+            written: Vec::new(),
+            end: SaveEnd::Conflict { file: "content.md" },
+        },
+        rig.t(),
+    );
+    let fx = rig.fx();
+    assert!(reads(&fx).is_empty());
+    let (delete, marks) = deletes(&fx).remove(0);
+    assert_eq!(
+        marks,
+        [
+            ("panel.json", FileMark::Hash(hash_of(&files[1].bytes))),
+            ("content.md", FileMark::Hash(hash_of(b"one"))),
+        ]
+    );
+    rig.store.apply_read(
+        &at("p"),
+        "panel.json",
+        found(&files[1].bytes),
+        rig.t(),
+        &mut rig.ids,
+    );
+    rig.store.apply_read(
+        &at("p"),
+        "content.md",
+        found(b"theirs"),
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert!(rig.fx().is_empty());
+    assert!(changed(&rig.ev()).is_empty());
+    let (view, _) = rig.get("p");
+    assert_eq!(view.state, PanelState::Removed);
+    assert_eq!(view.revision, last.1);
+    rig.store.apply_deleted(delete, done(&[]), rig.t());
+    assert_eq!(lists(&rig.fx()), 1);
+    let (view, _) = rig.get("p");
+    assert_eq!((view.state, view.revision), (PanelState::Removed, last.1));
 }
 
 // ---- AC6
@@ -1600,7 +1771,7 @@ fn a_project_read_clears_read_only() {
 #[test]
 fn create_waits_for_every_first_read() {
     let mut rig = Rig::new();
-    let mut fresh = PanelStore::new(rig.timing);
+    let mut fresh = started_store(rig.timing);
     fresh.add_space(&space(), rig.t());
     fresh.apply_listing(&space(), listing(&["x"]), rig.t());
     fresh.take_effects();
@@ -1643,7 +1814,7 @@ fn create_waits_for_every_first_read() {
 #[test]
 fn a_failed_listing_refuses_create_until_a_listing_succeeds() {
     let mut rig = Rig::new();
-    let mut store = PanelStore::new(rig.timing);
+    let mut store = started_store(rig.timing);
     store.add_space(&space(), rig.t());
     store.take_effects();
     store.apply_listing(
@@ -1693,7 +1864,7 @@ fn a_failed_listing_refuses_create_until_a_listing_succeeds() {
 #[test]
 fn unknown_ids_while_loading_are_space_loading() {
     let mut rig = Rig::new();
-    let mut store = PanelStore::new(rig.timing);
+    let mut store = started_store(rig.timing);
     store.add_space(&space(), rig.t());
     store.apply_listing(&space(), listing(&["x"]), rig.t());
     assert_eq!(
@@ -1765,7 +1936,7 @@ fn pin_refuses_before_it_does_anything() {
 #[test]
 fn listing_reads_the_first_100_and_notes_the_rest() {
     let mut rig = Rig::new();
-    let mut store = PanelStore::new(rig.timing);
+    let mut store = started_store(rig.timing);
     store.add_space(&space(), rig.t());
     store.take_effects();
     let mut entries: Vec<ListedEntry> = (0..101)

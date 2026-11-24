@@ -529,6 +529,10 @@ struct SpaceState {
     debounce: Debounce,
     reread_at: BTreeMap<String, Millis>,
     deferred: BTreeSet<String>,
+    /// How many `Read`s of each panel were emitted and not yet answered.
+    reads_out: BTreeMap<String, u32>,
+    /// How many of those were emitted before a Save or Delete began; their results are dropped.
+    stale_reads: BTreeMap<String, u32>,
     removed: VecDeque<RemovedId>,
 }
 
@@ -553,6 +557,8 @@ impl SpaceState {
             debounce: BTreeMap::new(),
             reread_at: BTreeMap::new(),
             deferred: BTreeSet::new(),
+            reads_out: BTreeMap::new(),
+            stale_reads: BTreeMap::new(),
             removed: VecDeque::new(),
         }
     }
@@ -679,7 +685,8 @@ impl SpaceState {
         }
     }
 
-    fn emit_read(&self, out: &mut Out, id: &str, file: &'static str) {
+    fn emit_read(&mut self, out: &mut Out, id: &str, file: &'static str) {
+        *self.reads_out.entry(id.to_owned()).or_insert(0) += 1;
         out.effects.push(PanelEffect::Read {
             at: PanelFolder::Workspace {
                 space: self.id.clone(),
@@ -1022,6 +1029,7 @@ impl SpaceState {
                     (content_file(rec.file.renderer), rec.known.1),
                 ],
             });
+            self.abandon_reads(id);
             return;
         }
         if !rec.live() {
@@ -1054,13 +1062,28 @@ impl SpaceState {
         let ticket = out.ticket(&self.id, id, OpKind::Save);
         rec.busy = Some(ticket);
         out.effects.push(PanelEffect::Save { ticket, at, files });
+        self.abandon_reads(id);
+    }
+
+    /// A Save or Delete of the panel starts: a half-read pair is dropped, the results of the
+    /// reads already asked for are never applied, and the folder is read again once the report
+    /// is applied.
+    fn abandon_reads(&mut self, id: &str) {
+        let half = self.reading.remove(id).is_some();
+        let out = self.reads_out.get(id).copied().unwrap_or(0);
+        if out > 0 {
+            self.stale_reads.insert(id.to_owned(), out);
+        }
+        if half || out > 0 {
+            self.deferred.insert(id.to_owned());
+        }
     }
 
     /// Reads `panel.json` of a folder the store holds a record for, or defers the read until
     /// the record's save or delete ends.
     fn request_read(&mut self, out: &mut Out, id: &str) {
         if let Some(rec) = self.records.get(id) {
-            if rec.busy.is_some() {
+            if rec.busy.is_some() || rec.delete_wanted {
                 self.deferred.insert(id.to_owned());
             } else {
                 self.emit_read(out, id, PANEL_FILE);
@@ -1132,6 +1155,10 @@ impl SpaceState {
             }
             SaveEnd::Conflict { .. } if create_conflict => {
                 self.create_gives_way(out, id);
+            }
+            SaveEnd::Conflict { .. } if rec.delete_wanted => {
+                self.service(out, id);
+                self.release_deferred(out, id);
             }
             SaveEnd::Conflict { .. } => {
                 rec.conflict_read = true;
@@ -1238,6 +1265,10 @@ impl SpaceState {
         now: Millis,
         ids: &mut dyn IdSource,
     ) {
+        if self.stale_result(id) {
+            self.update_loaded();
+            return;
+        }
         let (got, fallback) = split_read(read);
         if file == PANEL_FILE {
             self.on_json(out, id, got, fallback, now);
@@ -1245,6 +1276,30 @@ impl SpaceState {
             self.on_content(out, id, file, got, fallback, now, ids);
         }
         self.update_loaded();
+    }
+
+    /// Counts a result in and tells whether it must be dropped: it was asked for before a Save
+    /// or Delete began, or the panel is busy or has a remove pending.
+    fn stale_result(&mut self, id: &str) -> bool {
+        if let Some(count) = self.reads_out.get_mut(id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.reads_out.remove(id);
+            }
+        }
+        let mut stale = false;
+        if let Some(count) = self.stale_reads.get_mut(id) {
+            *count -= 1;
+            stale = true;
+            if *count == 0 {
+                self.stale_reads.remove(id);
+            }
+        }
+        stale
+            || self
+                .records
+                .get(id)
+                .is_some_and(|rec| rec.busy.is_some() || rec.delete_wanted)
     }
 
     fn on_json(&mut self, out: &mut Out, id: &str, got: Got, fallback: bool, now: Millis) {
