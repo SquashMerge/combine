@@ -105,6 +105,11 @@ fn decoding_stays_within_its_allocation_bounds() {
         assert!(peak < 64 * 1024, "peak {peak}");
     }
 
+    for (result, peak) in decode_both::<DaemonMessage>(&oversize) {
+        assert!(matches!(result, Err(DecodeError::FrameTooLarge { .. })));
+        assert!(peak < 64 * 1024, "peak {peak}");
+    }
+
     let truncated = MAX_FRAME_LEN.to_be_bytes().to_vec();
     for (result, peak) in decode_both::<ClientMessage>(&truncated) {
         assert!(matches!(result, Err(DecodeError::Truncated { .. })));
@@ -203,6 +208,147 @@ fn decoding_stays_within_its_allocation_bounds() {
     let (decoded, live) = measure_live(|| ClientMessage::decode(&leaves));
     assert!(decoded.is_ok());
     assert!(live <= 32 * frame_cap, "leaves list: {live} live bytes");
+
+    // Version 5 messages. Each case asserts the smallest tier that is at least 1.25 times what
+    // was measured. A JSON tree of an `mcp` message would hold far more than its text.
+    let bounded = |case: &str, wire: &[u8], peak_max: usize, live_max: usize| {
+        for (result, peak) in decode_both::<ClientMessage>(wire) {
+            assert!(result.is_ok(), "{case}");
+            assert!(peak <= peak_max, "{case}: peak {peak}");
+        }
+        let (decoded, live) = measure_live(|| ClientMessage::decode(wire));
+        assert!(decoded.is_ok(), "{case}");
+        assert!(live <= live_max, "{case}: live {live}");
+    };
+    let bounded_daemon = |case: &str, wire: &[u8], peak_max: usize, live_max: usize| {
+        for (result, peak) in decode_both::<DaemonMessage>(wire) {
+            assert!(result.is_ok(), "{case}");
+            assert!(peak <= peak_max, "{case}: peak {peak}");
+        }
+        let (decoded, live) = measure_live(|| DaemonMessage::decode(wire));
+        assert!(decoded.is_ok(), "{case}");
+        assert!(live <= live_max, "{case}: live {live}");
+    };
+
+    let entry = r#"{"id":"p","title":null,"renderer":"mermaid","revision":1,"state":"validated","error":null,"created_by":{"type":"agent","slot":null}}"#;
+    let panels = full_control_frame(
+        r#"{"type":"panels","request":null,"space":"s","skipped":[],"error":null,"panels":["#,
+        |_| format!("{entry},"),
+        &format!("{entry}]"),
+    );
+    match DaemonMessage::decode(&panels) {
+        Ok((DaemonMessage::Panels(list), _)) => assert!(list.panels.len() > 5_000),
+        other => panic!("expected panels, got {other:?}"),
+    }
+    // measured: peak 1441792, live 2166792
+    bounded_daemon("panels", &panels, 2 * frame_cap, 32 * frame_cap);
+
+    let panel = full_control_frame(
+        r#"{"type":"panel","request":1,"space":"s","id":"p","revision":1,"renderer":"mermaid","state":"validated","error":null,"source":""#,
+        |_| r#"\""#.to_owned(),
+        r#"""#,
+    );
+    match DaemonMessage::decode(&panel) {
+        Ok((DaemonMessage::Panel(panel), _)) => assert!(panel.source.len() > 500_000),
+        other => panic!("expected panel, got {other:?}"),
+    }
+    // measured: peak 1048576, live 1048518
+    bounded_daemon("panel source", &panel, 2 * frame_cap, 2 * frame_cap);
+
+    // An `mcp` message is kept as its text, so its frame costs about one copy of itself in either
+    // direction.
+    let mcp_prefix = r#"{"type":"mcp","message":{"jsonrpc":"2.0","method":"x","params":["#;
+    let mcp_array = full_control_frame(mcp_prefix, |_| "0,".to_owned(), "0]}");
+    // measured: peak 1048576, live 1048560
+    bounded("mcp array, client", &mcp_array, frame_cap, 2 * frame_cap);
+    bounded_daemon("mcp array, daemon", &mcp_array, frame_cap, 2 * frame_cap);
+    // A JSON tree of this frame would hold about 100 times its text.
+    let mcp_nested = full_control_frame(mcp_prefix, |_| r#"{"":{"":{"":0}}},"#.to_owned(), "0]}");
+    // measured: peak 1048576, live 1048546
+    bounded("mcp nested, client", &mcp_nested, frame_cap, 2 * frame_cap);
+    bounded_daemon("mcp nested, daemon", &mcp_nested, frame_cap, 2 * frame_cap);
+
+    let mcp_open = full_control_frame(
+        r#"{"type":"mcp_open","request":1,"caller":{"terminal_id":null,"terminal_socket":null,"cwd":""#,
+        |_| "x".to_owned(),
+        r#""}"#,
+    );
+    match ClientMessage::decode(&mcp_open) {
+        Ok((ClientMessage::McpOpen(open), _)) => {
+            assert!(open.caller.cwd.unwrap().len() > 1_000_000)
+        }
+        other => panic!("expected mcp_open, got {other:?}"),
+    }
+    // measured: peak 1048576, live 1048490
+    bounded("mcp_open cwd", &mcp_open, frame_cap, 2 * frame_cap);
+
+    let panel_ops = full_control_frame(
+        r#"{"type":"mutate_layout","request":1,"space":"s","base_layout_revision":0,"ops":["#,
+        |_| r#"{"op":"add_panel","panel":"p","tile":"t"},"#.to_owned(),
+        r#"{"op":"remove_panel","panel":"p"}]"#,
+    );
+    match ClientMessage::decode(&panel_ops) {
+        Ok((ClientMessage::MutateLayout(mutate), _)) => assert!(mutate.ops.len() > 10_000),
+        other => panic!("expected mutate_layout, got {other:?}"),
+    }
+    // measured: peak 2883584, live 4358160
+    bounded("panel ops", &panel_ops, 8 * frame_cap, 32 * frame_cap);
+
+    // Unknown keys are skipped, never stored.
+    let created_by_keys = full_control_frame(
+        r#"{"type":"panels","request":null,"space":"s","skipped":[],"error":null,"panels":[{"id":"p","renderer":"mermaid","revision":1,"state":"validated","created_by":{"type":"user","#,
+        |i| format!(r#""u{i}":0,"#),
+        r#""last":0}}]"#,
+    );
+    // measured: peak 1048576, live 712
+    bounded_daemon("created_by keys", &created_by_keys, 2 * frame_cap, slack);
+
+    // One long final string. measured: peak 1048576, live 1048491 to 1048541
+    for (case, prefix) in [
+        (
+            "get_panel",
+            r#"{"type":"get_panel","request":1,"space":"s","panel":""#,
+        ),
+        (
+            "close_panel",
+            r#"{"type":"close_panel","request":1,"space":"s","panel":""#,
+        ),
+        (
+            "pin_panel",
+            r#"{"type":"pin_panel","request":1,"space":"s","panel":""#,
+        ),
+        (
+            "report_render",
+            r#"{"type":"report_render","space":"s","revision":1,"status":"render_failed","error":null,"panel":""#,
+        ),
+    ] {
+        let wire = full_control_frame(prefix, |_| "x".to_owned(), r#"""#);
+        bounded(case, &wire, 2 * frame_cap, 2 * frame_cap);
+    }
+    for (case, prefix) in [
+        (
+            "panel_closed",
+            r#"{"type":"panel_closed","request":1,"space":"s","panel":""#,
+        ),
+        (
+            "panel_pinned",
+            r#"{"type":"panel_pinned","request":1,"space":"s","panel":""#,
+        ),
+        (
+            "mcp_opened",
+            r#"{"type":"mcp_opened","request":1,"space":""#,
+        ),
+    ] {
+        let wire = full_control_frame(prefix, |_| "x".to_owned(), r#"""#);
+        bounded_daemon(case, &wire, 2 * frame_cap, 2 * frame_cap);
+    }
+    let get_panel_keys = full_control_frame(
+        r#"{"type":"get_panel","request":1,"space":"s","panel":"p","#,
+        |i| format!(r#""u{i}":0,"#),
+        r#""last":0"#,
+    );
+    // measured: peak 1048576, live 11
+    bounded("get_panel keys", &get_panel_keys, 2 * frame_cap, slack);
 
     let worst_error = {
         let target = MAX_FRAME_LEN as usize - 1;

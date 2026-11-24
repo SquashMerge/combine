@@ -239,6 +239,9 @@ fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
     }
 }
 
+const UNEXPECTED_ADD_PANEL: &str = "the add_panel op is not supported by this daemon yet";
+const UNEXPECTED_REMOVE_PANEL: &str = "the remove_panel op is not supported by this daemon yet";
+
 /// Converts the ops of a `mutate_layout` for [`Layouts::mutate`]. The batch holds 1 to
 /// [`MAX_WIRE_OPS`] ops, and every ID must be valid. The error text is for the client.
 pub fn ops_from_wire(ops: Vec<wire::LayoutOp>) -> Result<Vec<LayoutOp>, String> {
@@ -289,6 +292,8 @@ fn op_from_wire(op: wire::LayoutOp) -> Result<LayoutOp, String> {
             panel: p.map(panel).transpose()?,
         },
         wire::LayoutOp::CloseTile { tile: t } => LayoutOp::CloseTile { tile: tile(t)? },
+        wire::LayoutOp::AddPanel { .. } => return Err(UNEXPECTED_ADD_PANEL.to_owned()),
+        wire::LayoutOp::RemovePanel { .. } => return Err(UNEXPECTED_REMOVE_PANEL.to_owned()),
     })
 }
 

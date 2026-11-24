@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::display::Display;
 use crate::ids::{AttachmentId, Cursor, Epoch, OwnershipGeneration, RequestId, TermId};
 use crate::layout::LayoutOp;
+use crate::mcp::{Mcp, McpCaller};
+use crate::panels::{PanelError, RenderStatus};
 use crate::spawn::SpawnSource;
 
 /// The client's first frame. See the handshake in [`crate::client_handshake`].
@@ -144,6 +146,57 @@ pub struct SpawnTerminal {
     pub source: SpawnSource,
 }
 
+/// Asks for one panel of a space, with its source. The daemon answers `panel`
+/// carrying this `request`, or an `error` with `unknown_space`,
+/// `unknown_panel` or `invalid_request`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetPanel {
+    pub request: RequestId,
+    pub space: String,
+    pub panel: String,
+}
+
+/// Reports whether this client drew a panel's revision. `error` says why when
+/// `status` is `render_failed`. It has no `request` and gets no reply, not
+/// even an `error`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportRender {
+    pub space: String,
+    pub panel: String,
+    pub revision: u64,
+    pub status: RenderStatus,
+    pub error: Option<PanelError>,
+}
+
+/// Closes a panel. The daemon answers `panel_closed` carrying this `request`,
+/// or an `error` with `unknown_space`, `unknown_panel` or `invalid_request`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosePanel {
+    pub request: RequestId,
+    pub space: String,
+    pub panel: String,
+}
+
+/// Keeps a scratch panel in the project. The daemon answers `panel_pinned`
+/// carrying this `request`, or an `error` with `unknown_space`,
+/// `unknown_panel` or `invalid_request`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinPanel {
+    pub request: RequestId,
+    pub space: String,
+    pub panel: String,
+}
+
+/// Opens the MCP channel on this connection for the agent `caller`
+/// describes. The daemon answers `mcp_opened` carrying this `request`, or an
+/// `error` with `unknown_caller` or `invalid_request`. After `mcp_opened`,
+/// [`Mcp`] frames carry the agent's JSON-RPC messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpOpen {
+    pub request: RequestId,
+    pub caller: McpCaller,
+}
+
 /// Typed input: frame kind 3, never JSON. A caller with more than
 /// [`MAX_INPUT_CHUNK`](crate::MAX_INPUT_CHUNK) bytes splits it, in order, with
 /// `chunks`.
@@ -188,6 +241,13 @@ pub enum ClientMessage {
     MutateLayout(MutateLayout),
     ListTemplates(ListTemplates),
     SpawnTerminal(SpawnTerminal),
+    GetPanel(GetPanel),
+    ReportRender(ReportRender),
+    ClosePanel(ClosePanel),
+    PinPanel(PinPanel),
+    McpOpen(McpOpen),
+    /// One JSON-RPC message for the daemon's MCP server, after `mcp_opened`.
+    Mcp(Mcp),
     #[serde(skip)]
     Input(Input),
     #[serde(skip)]
@@ -214,6 +274,12 @@ impl ClientMessage {
             Self::MutateLayout(_) => "mutate_layout",
             Self::ListTemplates(_) => "list_templates",
             Self::SpawnTerminal(_) => "spawn_terminal",
+            Self::GetPanel(_) => "get_panel",
+            Self::ReportRender(_) => "report_render",
+            Self::ClosePanel(_) => "close_panel",
+            Self::PinPanel(_) => "pin_panel",
+            Self::McpOpen(_) => "mcp_open",
+            Self::Mcp(_) => "mcp",
             Self::Input(_) => "input",
             Self::AutomaticReply(_) => "automatic_reply",
         }
