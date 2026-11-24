@@ -10,10 +10,11 @@ use combined::model::{
     ContentHash, Millis, RootKind, Space, SpaceId, SpawnSpec, TermEvent, TermInfo, TermState,
 };
 use combined::ports::{
-    AttachOptions, Attachment, BackendError, FileStore, GitEntry, GitProbe, StoreError,
-    StoreRevision, StoredFile, TerminalBackend,
+    AttachOptions, Attachment, BackendError, DiagramCheck, FileMark, FileStore, GitEntry, GitProbe,
+    ScratchStore, StoreError, StoreRevision, StoredFile, TerminalBackend, WallClock,
 };
 use common::{display, request_options, spawn_spec, FakeGitProbe};
+use sha2::{Digest, Sha256};
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = fs::read_dir(dir)
@@ -224,6 +225,68 @@ fn traits_are_object_safe() {
     fn _attachment(_: &dyn Attachment) {}
     fn _git(_: &dyn GitProbe) {}
     fn _store(_: &dyn FileStore) {}
+    fn _scratch(_: &dyn ScratchStore) {}
+    fn _clock(_: &dyn WallClock) {}
+    fn _diagram(_: &dyn DiagramCheck) {}
+}
+
+fn read_of(bytes: &[u8], read_only: bool) -> Result<Option<StoredFile>, StoreError> {
+    Ok(Some(StoredFile {
+        bytes: bytes.to_vec(),
+        revision: StoreRevision(1),
+        hash: ContentHash(Sha256::digest(bytes).into()),
+        read_only,
+    }))
+}
+
+#[test]
+fn file_mark_matches_and_matches_project() {
+    let hash = ContentHash(Sha256::digest(b"x").into());
+    let other = ContentHash(Sha256::digest(b"y").into());
+    let mark = FileMark::Hash(hash);
+    assert_eq!(FileMark::from(Some(hash)), mark);
+    assert_eq!(FileMark::from(None), FileMark::Missing);
+
+    assert!(mark.matches(&read_of(b"x", false)));
+    assert!(mark.matches_project(&read_of(b"x", false)));
+    assert!(mark.matches(&read_of(b"x", true)));
+    assert!(!mark.matches_project(&read_of(b"x", true)));
+    assert!(!mark.matches(&read_of(b"y", false)));
+    assert!(!FileMark::Hash(other).matches(&read_of(b"x", false)));
+    assert!(!mark.matches(&Ok(None)));
+
+    assert!(FileMark::Missing.matches(&Ok(None)));
+    assert!(FileMark::Missing.matches_project(&Ok(None)));
+    assert!(!FileMark::Missing.matches(&read_of(b"x", false)));
+
+    let large = |read_only| Err(StoreError::TooLarge { size: 9, read_only });
+    assert!(FileMark::TooLarge.matches(&large(false)));
+    assert!(FileMark::TooLarge.matches_project(&large(false)));
+    assert!(FileMark::TooLarge.matches(&large(true)));
+    assert!(!FileMark::TooLarge.matches_project(&large(true)));
+    assert!(!mark.matches(&large(false)));
+
+    for error in [
+        StoreError::InvalidPath,
+        StoreError::Unavailable("x".into()),
+        StoreError::ReadOnly("x".into()),
+    ] {
+        for mark in [FileMark::Missing, mark, FileMark::TooLarge] {
+            assert!(!mark.matches(&Err(error.clone())), "{mark:?} {error:?}");
+            assert!(!mark.matches_project(&Err(error.clone())));
+        }
+    }
+}
+
+#[test]
+fn space_sha256_hex_matches_the_fallback_folder() {
+    for id in ["/p", "/Users/me/work tree", ""] {
+        let digest = Sha256::digest(id.as_bytes());
+        let expected: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        let hex = SpaceId(id.to_owned()).sha256_hex();
+        assert_eq!(hex, expected);
+        assert_eq!(hex.len(), 64);
+    }
 }
 
 #[test]

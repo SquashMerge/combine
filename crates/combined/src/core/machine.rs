@@ -157,6 +157,12 @@ impl Core {
         self.next_id.saturating_sub(1)
     }
 
+    /// The next ID from the counter. Panel revisions and daemon-made panel IDs use it too, so
+    /// `high_water` covers them.
+    pub fn take_id(&mut self) -> u64 {
+        take(&mut self.next_id)
+    }
+
     pub fn connect(&mut self) -> ConnectionId {
         let id = ConnectionId(take(&mut self.next_connection));
         self.connections.insert(id, Connection::default());

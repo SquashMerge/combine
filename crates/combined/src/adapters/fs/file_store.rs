@@ -393,6 +393,42 @@ impl FileStore for FsFileStore {
         })
     }
 
+    async fn write_project(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteOutcome, StoreError> {
+        let mut revisions = self
+            .revisions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        file_path(space, path)?;
+        match checked_file(space, path, true) {
+            Ok(Some(file)) => match write_atomic(&file, &bytes, 0o644) {
+                Ok(()) => {}
+                Err(error) if is_denied(&error) => {
+                    return Err(StoreError::ReadOnly(error.to_string()))
+                }
+                Err(error) => return Err(unavailable(error)),
+            },
+            Ok(None) => {
+                return Err(StoreError::Unavailable(
+                    "the folder could not be created".to_string(),
+                ))
+            }
+            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
+            Err(Checked::Refused(error)) => return Err(error),
+        }
+        let revision = revisions.entry(space.clone()).or_insert(0);
+        *revision += 1;
+        Ok(WriteOutcome {
+            revision: StoreRevision(*revision),
+            hash: content_hash(&bytes),
+            read_only: false,
+        })
+    }
+
     async fn list_dir(
         &self,
         space: &SpaceId,
