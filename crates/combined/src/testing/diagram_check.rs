@@ -98,7 +98,11 @@ impl DiagramCheck for FakeDiagramCheck {
             state.holds.get(source).cloned()
         };
         if let Some(mut released) = hold {
-            let _ = released.wait_for(|released| *released).await;
+            // `Ok`: the hold was released. `Err`: its sender is gone, which only happens once
+            // the hold is dropped, so that releases the check too.
+            match released.wait_for(|released| *released).await {
+                Ok(_) | Err(_) => {}
+            }
         }
         let state = self.state();
         state.answers.get(source).unwrap_or(&state.default).clone()
@@ -107,6 +111,8 @@ impl DiagramCheck for FakeDiagramCheck {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::ports::{DiagramFailure, FailureCode};
 
@@ -120,41 +126,102 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn validates_by_default_and_records_calls() {
-        let fake = FakeDiagramCheck::new();
-        assert_eq!(fake.check("a").await, Ok(DiagramVerdict::Validated));
-        assert_eq!(fake.check("b").await, Ok(DiagramVerdict::Validated));
-        assert_eq!(fake.calls(), ["a", "b"]);
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
     }
 
     #[tokio::test]
-    async fn per_source_answers_win_over_the_default() {
+    async fn answers_validated_by_default() {
         let fake = FakeDiagramCheck::new();
-        fake.answer_all(Err(DiagramCheckError::Unavailable("down".into())));
-        fake.answer("bad", Ok(failure()));
-        assert_eq!(fake.check("bad").await, Ok(failure()));
+        assert_eq!(fake.check("a").await, Ok(DiagramVerdict::Validated));
         assert_eq!(
-            fake.check("other").await,
-            Err(DiagramCheckError::Unavailable("down".into()))
+            FakeDiagramCheck::default().check("b").await,
+            Ok(DiagramVerdict::Validated)
         );
     }
 
     #[tokio::test]
-    async fn a_hold_waits_until_released_or_dropped() {
-        let fake = std::sync::Arc::new(FakeDiagramCheck::new());
+    async fn answer_all_scripts_every_check() {
+        let fake = FakeDiagramCheck::new();
+        fake.answer_all(Ok(failure()));
+        assert_eq!(fake.check("a").await, Ok(failure()));
+        assert_eq!(fake.check("b").await, Ok(failure()));
+        fake.answer_all(Ok(DiagramVerdict::ValidatedParserOnly));
+        assert_eq!(
+            fake.check("a").await,
+            Ok(DiagramVerdict::ValidatedParserOnly)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_answer_overrides_answer_all() {
+        let fake = FakeDiagramCheck::new();
+        fake.answer_all(Ok(DiagramVerdict::ValidatedParserOnly));
+        fake.answer("bad", Ok(failure()));
+        assert_eq!(fake.check("bad").await, Ok(failure()));
+        assert_eq!(
+            fake.check("other").await,
+            Ok(DiagramVerdict::ValidatedParserOnly)
+        );
+    }
+
+    #[tokio::test]
+    async fn scripts_both_errors() {
+        let fake = FakeDiagramCheck::new();
+        let unavailable = DiagramCheckError::Unavailable("the engine thread has stopped".into());
+        let no_verdict = DiagramCheckError::NoVerdict("TypeError: boom".into());
+        fake.answer("down", Err(unavailable.clone()));
+        fake.answer_all(Err(no_verdict.clone()));
+        assert_eq!(fake.check("down").await, Err(unavailable));
+        assert_eq!(fake.check("other").await, Err(no_verdict));
+    }
+
+    #[tokio::test]
+    async fn records_checked_sources_in_order() {
+        let fake = FakeDiagramCheck::new();
+        assert!(fake.calls().is_empty());
+        for source in ["b", "a", "b"] {
+            let _ = fake.check(source).await;
+        }
+        assert_eq!(fake.calls(), ["b", "a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn a_held_check_waits_until_released() {
+        let fake = Arc::new(FakeDiagramCheck::new());
+        fake.answer("slow", Ok(failure()));
         let hold = fake.hold("slow");
         let task = tokio::spawn({
             let fake = fake.clone();
             async move { fake.check("slow").await }
         });
-        tokio::task::yield_now().await;
+        settle().await;
+        assert_eq!(fake.calls(), ["slow"]);
         assert!(!task.is_finished());
+        assert_eq!(fake.check("fast").await, Ok(DiagramVerdict::Validated));
         hold.release();
-        assert_eq!(task.await.unwrap(), Ok(DiagramVerdict::Validated));
+        settle().await;
+        assert!(task.is_finished());
+        assert_eq!(task.await.unwrap(), Ok(failure()));
+    }
 
-        let dropped = fake.hold("slow");
-        drop(dropped);
-        assert_eq!(fake.check("slow").await, Ok(DiagramVerdict::Validated));
+    #[tokio::test]
+    async fn a_dropped_hold_releases() {
+        let fake = Arc::new(FakeDiagramCheck::new());
+        fake.answer("slow", Ok(failure()));
+        let hold = fake.hold("slow");
+        let task = tokio::spawn({
+            let fake = fake.clone();
+            async move { fake.check("slow").await }
+        });
+        settle().await;
+        assert_eq!(fake.calls(), ["slow"]);
+        assert!(!task.is_finished());
+        drop(hold);
+        settle().await;
+        assert!(task.is_finished());
+        assert_eq!(task.await.unwrap(), Ok(failure()));
     }
 }
