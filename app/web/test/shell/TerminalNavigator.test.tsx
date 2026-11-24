@@ -49,6 +49,7 @@ describe('TerminalNavigator', () => {
     expect(rows[0]?.querySelector('.name')?.textContent).toBe('second');
     expect(rows[0]?.querySelector('.command')?.textContent).toBe('cmd two');
     expect(rows[0]?.querySelector('.state')?.textContent).toBe('running');
+    expect(rows[0]?.querySelector('button')?.getAttribute('aria-label')).toBe('second, cmd two, running');
     fireEvent.click(spaceButton('mac', 'empty'));
     expect(within(navigator()).getByText('No terminals in this space.')).toBeTruthy();
   });
