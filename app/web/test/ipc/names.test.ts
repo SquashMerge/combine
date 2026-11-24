@@ -7,6 +7,7 @@ import {
   HOSTS_SNAPSHOT_COMMAND,
   LAYOUT_EVENT,
   MUTATE_LAYOUT_COMMAND,
+  OPEN_URL_COMMAND,
   RETRY_HOST_COMMAND,
   SET_CLIENT_SPACE_STATE_COMMAND,
   SET_LAST_SPACE_COMMAND,
@@ -52,6 +53,7 @@ const contract = JSON.parse(
     terminalRequestOwnership: string;
     terminalInput: string;
     terminalAutomaticReply: string;
+    openUrl: string;
   };
 };
 
@@ -78,4 +80,5 @@ it('matches the shared ipc contract fixture', () => {
   expect(TERMINAL_REQUEST_OWNERSHIP_COMMAND).toBe(contract.commands.terminalRequestOwnership);
   expect(TERMINAL_INPUT_COMMAND).toBe(contract.commands.terminalInput);
   expect(TERMINAL_AUTOMATIC_REPLY_COMMAND).toBe(contract.commands.terminalAutomaticReply);
+  expect(OPEN_URL_COMMAND).toBe(contract.commands.openUrl);
 });

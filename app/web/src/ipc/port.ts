@@ -34,3 +34,8 @@ export interface SpawnPort {
   listTemplates(hostId: HostId, space: string): Promise<TemplateList>;
   spawnTerminal(hostId: HostId, space: string, source: SpawnSource): Promise<TermId>;
 }
+
+export interface OpenUrlPort {
+  /** Asks the shell to open the URL in the system browser. Never rejects; a refusal is a no-op. */
+  openUrl(url: string): Promise<void>;
+}
