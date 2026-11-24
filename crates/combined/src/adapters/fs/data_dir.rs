@@ -94,4 +94,8 @@ impl DataDir {
     pub fn ids_json(&self) -> PathBuf {
         self.path.join("ids.json")
     }
+
+    pub fn scratch(&self) -> PathBuf {
+        self.path.join("scratch")
+    }
 }
