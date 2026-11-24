@@ -346,6 +346,11 @@ struct Record {
     retries_done: usize,
     check_retry_at: Option<Millis>,
     pinning: bool,
+    /// A pin was accepted while the scratch folder might lack some of the panel: the rollback
+    /// of that pin saves all of it again.
+    scratch_unsaved: bool,
+    /// The scratch Save error the pin accept set aside, shown again by the rollback.
+    scratch_failure: Option<String>,
     before_remove: Option<(PanelState, Option<PanelError>)>,
 }
 
@@ -376,6 +381,8 @@ impl Record {
             retries_done: 0,
             check_retry_at: None,
             pinning: false,
+            scratch_unsaved: false,
+            scratch_failure: None,
             before_remove: None,
         }
     }
@@ -990,11 +997,13 @@ impl SpaceState {
         let mut core_error = None;
         let dir = self.scratch_dir(id);
         if let Some(rec) = self.records.get_mut(id) {
-            if rec.lifetime == Lifetime::Scratch {
+            if rec.lifetime == Lifetime::Scratch || rec.pinning {
                 if let Some(stamp) = out.scratch.stamped.get_mut(&dir) {
                     stamp.changed_at_ms = wall_ms;
                 }
-                rec.pending.insert(SCRATCH_FILE);
+                if rec.lifetime == Lifetime::Scratch {
+                    rec.pending.insert(SCRATCH_FILE);
+                }
             }
             rec.revision = revision;
             rec.dropped = None;
@@ -2149,6 +2158,7 @@ impl PanelStore {
         listing: Result<ScratchListing, StoreError>,
         now: Millis,
     ) {
+        let before = self.out.scratch.list_failed.clone();
         match listing {
             Ok(listing) => {
                 self.scratch_retry_at = None;
@@ -2163,6 +2173,15 @@ impl PanelStore {
                 }
                 self.out.scratch.list_failed = Some(detail);
                 self.scratch_retry_at = Some(now.saturating_add(Millis(self.timing.retry_ms)));
+            }
+        }
+        if self.out.scratch.list_failed != before {
+            for (space, state) in &self.spaces {
+                if state.loaded || state.listing_failed.is_some() {
+                    self.out.events.push(PanelEvent::Listing {
+                        space: space.clone(),
+                    });
+                }
             }
         }
         self.finish();

@@ -328,6 +328,12 @@ impl SpaceState {
         if let Some(rec) = self.records.get_mut(id) {
             rec.lifetime = Lifetime::Persistent;
             rec.pinning = true;
+            rec.scratch_unsaved = rec.save_failed || rec.busy.is_some() || !rec.pending.is_empty();
+            rec.scratch_failure = if rec.save_failed {
+                rec.file_error.take()
+            } else {
+                None
+            };
             rec.pending.clear();
             rec.save_retry_at = None;
             if rec.save_failed {
@@ -355,7 +361,7 @@ impl SpaceState {
     }
 
     /// The Save of a pin ended.
-    pub(super) fn pin_ended(&mut self, out: &mut Out, id: &str, report: SaveReport, _now: Millis) {
+    pub(super) fn pin_ended(&mut self, out: &mut Out, id: &str, report: SaveReport, now: Millis) {
         let SaveReport { written, end } = report;
         let reason = match end {
             SaveEnd::Done => {
@@ -367,7 +373,7 @@ impl SpaceState {
             }
             SaveEnd::Failed { error, .. } => store_error_detail(error),
         };
-        self.pin_undone(out, id, written, reason);
+        self.pin_undone(out, id, written, reason, now);
     }
 
     fn pin_done(&mut self, out: &mut Out, id: &str) {
@@ -388,6 +394,7 @@ impl SpaceState {
         id: &str,
         written: Vec<(&'static str, crate::model::ContentHash)>,
         reason: String,
+        now: Millis,
     ) {
         let dir = self.scratch_dir(id);
         let live = self.records.get(id).is_some_and(Record::live);
@@ -412,10 +419,23 @@ impl SpaceState {
                 rec.lifetime = Lifetime::Scratch;
                 rec.pinning = false;
                 rec.known = (FileMark::Missing, FileMark::Missing);
-                rec.file_error = Some(format!("Couldn't pin: {reason}"));
-                rec.save_failed = false;
+                let unsaved = std::mem::take(&mut rec.scratch_unsaved);
+                let failure = rec.scratch_failure.take();
+                rec.file_error = Some(match &failure {
+                    Some(failure) => format!("Couldn't pin: {reason}. {failure}"),
+                    None => format!("Couldn't pin: {reason}"),
+                });
+                rec.save_failed = failure.is_some();
+                if unsaved {
+                    rec.pending.insert(SCRATCH_FILE);
+                    rec.pending.insert(content_file(rec.file.renderer));
+                    rec.pending.insert(PANEL_FILE);
+                }
                 if !rec.pending.is_empty() {
                     rec.pending.insert(SCRATCH_FILE);
+                }
+                if failure.is_some() {
+                    rec.save_retry_at = Some(now.saturating_add(Millis(self.timing.retry_ms)));
                 }
             }
             self.shadow(id, false);
@@ -423,7 +443,13 @@ impl SpaceState {
                 space: self.id.clone(),
             });
             self.changed(out, id);
-            self.service(out, id);
+            if self
+                .records
+                .get(id)
+                .is_some_and(|rec| rec.save_retry_at.is_none())
+            {
+                self.service(out, id);
+            }
         } else {
             if let Some(rec) = self.records.remove(id) {
                 self.remember(id, Lifetime::Scratch, rec.file, rec.revision);

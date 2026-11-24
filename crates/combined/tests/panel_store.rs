@@ -3134,3 +3134,112 @@ fn a_remove_that_conflicts_while_a_check_waits_queues_the_check_again() {
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0].0, "a");
 }
+
+fn conflict_on_panel_json() -> SaveReport {
+    SaveReport {
+        written: Vec::new(),
+        end: SaveEnd::Conflict { file: "panel.json" },
+    }
+}
+
+fn file_names(files: &[FileWrite]) -> Vec<&'static str> {
+    files.iter().map(|write| write.file).collect()
+}
+
+#[test]
+fn a_failed_pin_after_a_failed_scratch_save_saves_the_scratch_folder_again() {
+    let mut rig = Rig::new();
+    rig.screate("x", "a", T).unwrap();
+    let (ticket, _) = saves(&rig.fx()).remove(0);
+    fail_save(&mut rig, ticket, "content.md");
+    rig.fx();
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.store
+        .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    assert!(scratch_saves(&fx).is_empty(), "{fx:?}");
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Scratch);
+    let error = view.file_error.unwrap();
+    assert!(error.starts_with("Couldn't pin: "), "{error}");
+    assert!(
+        error.contains("Couldn't save the scratch panel x (") && error.ends_with("retrying."),
+        "{error}"
+    );
+    rig.tick(rig.timing.retry_ms - 1);
+    assert!(scratch_saves(&rig.fx()).is_empty());
+    rig.tick(2);
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (ticket, _, files) = all.remove(0);
+    assert_eq!(
+        file_names(&files),
+        ["scratch.json", "content.md", "panel.json"]
+    );
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert_eq!(rig.get("x").0.file_error, None);
+}
+
+#[test]
+fn a_failed_pin_while_a_scratch_save_is_in_flight_saves_the_scratch_folder_again() {
+    let mut rig = Rig::new();
+    rig.screate("x", "a", T).unwrap();
+    let (scratch_ticket, _) = saves(&rig.fx()).remove(0);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (pin_ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    fail_save(&mut rig, scratch_ticket, "content.md");
+    rig.store
+        .apply_saved(pin_ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (_, _, files) = all.remove(0);
+    assert_eq!(
+        file_names(&files),
+        ["scratch.json", "content.md", "panel.json"]
+    );
+}
+
+#[test]
+fn an_update_during_a_pin_restamps_the_scratch_folder_after_a_rollback() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.supdate("x", content_update("b"), T + 500).unwrap();
+    rig.fx();
+    rig.store
+        .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (_, _, files) = all.remove(0);
+    assert_eq!(files[0].file, "scratch.json");
+    assert_eq!(files[0].bytes, meta_json(T + 500));
+}
+
+#[test]
+fn the_scratch_listing_error_emits_listing_when_it_starts_changes_and_clears() {
+    let mut rig = Rig::new();
+    rig.ev();
+    let now = rig.t();
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), now);
+    assert!(has_listing(&rig.ev()));
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), now);
+    assert!(!has_listing(&rig.ev()));
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("still".into())), now);
+    assert!(has_listing(&rig.ev()));
+    rig.store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: Vec::new(),
+            truncated: false,
+        }),
+        now,
+    );
+    assert!(has_listing(&rig.ev()));
+}
