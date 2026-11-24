@@ -882,6 +882,54 @@ fn store_contract_read_only_routes_to_fallback() {
 }
 
 #[test]
+fn write_project_never_uses_the_fallback() {
+    const PATH: &str = "panels/p/panel.json";
+    let scratch = ShortTempDir::new();
+    let root = scratch.path().join("spaces");
+
+    // A writable project gets the bytes, and a fallback copy already there is left alone.
+    let open = space(&scratch, "open");
+    let store = FsFileStore::with_fallback(&root);
+    let copy = root.join(hex_sha256(&open.0)).join(PATH);
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::write(&copy, b"aside").unwrap();
+    let outcome = block_on(store.write_project(&open, PATH, b"project".to_vec())).unwrap();
+    assert!(!outcome.read_only);
+    assert_eq!(outcome.hash, sha256(b"project"));
+    let file = Path::new(&open.0).join(".workspace").join(PATH);
+    assert_eq!(fs::read(&file).unwrap(), b"project");
+    assert_eq!(fs::read(&copy).unwrap(), b"aside");
+
+    // A project that can't be written is refused, and nothing goes to the fallback.
+    let locked = space(&scratch, "locked");
+    fs::create_dir_all(&locked.0).unwrap();
+    if lock_down(Path::new(&locked.0)) {
+        let refused = block_on(store.write_project(&locked, PATH, b"x".to_vec()));
+        unlock(Path::new(&locked.0));
+        assert!(
+            matches!(refused, Err(StoreError::ReadOnly(_))),
+            "{refused:?}"
+        );
+        assert!(!root.join(hex_sha256(&locked.0)).exists());
+    } else {
+        eprintln!("skipped: this user can write a 0o555 folder");
+    }
+
+    // The memory store refuses a read-only space whatever its fallback setting.
+    let memory = MemoryFileStore::new();
+    let held = SpaceId("/held".to_owned());
+    memory.set_read_only(&held, true);
+    let refused = block_on(memory.write_project(&held, PATH, b"x".to_vec()));
+    assert!(
+        matches!(refused, Err(StoreError::ReadOnly(_))),
+        "{refused:?}"
+    );
+    assert_eq!(memory.write_count(&held, PATH), 0);
+    assert_eq!(memory.fallback_bytes(&held, PATH), None);
+    assert_eq!(memory.bytes(&held, PATH), None);
+}
+
+#[test]
 fn store_contract_read_only_without_fallback_is_read_only_error() {
     let memory = MemoryFileStore::new().without_fallback();
     let space = SpaceId("/repo".to_string());

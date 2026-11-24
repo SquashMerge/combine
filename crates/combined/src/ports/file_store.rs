@@ -32,6 +32,49 @@ pub struct WriteOutcome {
     pub read_only: bool,
 }
 
+/// What a file was when the daemon last read or wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMark {
+    Missing,
+    Hash(ContentHash),
+    TooLarge,
+}
+
+impl From<Option<ContentHash>> for FileMark {
+    fn from(hash: Option<ContentHash>) -> FileMark {
+        match hash {
+            Some(hash) => FileMark::Hash(hash),
+            None => FileMark::Missing,
+        }
+    }
+}
+
+impl FileMark {
+    /// Whether `read` shows the file as this mark says. A read that failed for any other reason
+    /// never matches. The fallback flag is ignored: writes follow the fallback copy.
+    pub fn matches(&self, read: &Result<Option<StoredFile>, StoreError>) -> bool {
+        match (self, read) {
+            (FileMark::Missing, Ok(None)) => true,
+            (FileMark::Hash(hash), Ok(Some(file))) => *hash == file.hash,
+            (FileMark::TooLarge, Err(StoreError::TooLarge { .. })) => true,
+            (FileMark::Missing | FileMark::Hash(_) | FileMark::TooLarge, _) => false,
+        }
+    }
+
+    /// As [`FileMark::matches`], but false for any read of the fallback copy.
+    pub fn matches_project(&self, read: &Result<Option<StoredFile>, StoreError>) -> bool {
+        let fallback = match read {
+            Ok(Some(file)) => file.read_only,
+            Err(StoreError::TooLarge { read_only, .. }) => *read_only,
+            Ok(None)
+            | Err(StoreError::InvalidPath | StoreError::Unavailable(_) | StoreError::ReadOnly(_)) => {
+                false
+            }
+        };
+        !fallback && self.matches(read)
+    }
+}
+
 /// A file under a watched space changed, by this store or by anyone else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
@@ -119,6 +162,30 @@ pub trait FileStore: Send + Sync {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<WriteOutcome, StoreError>;
+    /// As [`FileStore::write`], but only to the project: the fallback copy is never touched, and
+    /// a project that can't be written is [`StoreError::ReadOnly`].
+    async fn write_project(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteOutcome, StoreError>;
+    /// Removes the project's file `path`; a missing file is `Ok`. The fallback copy is never
+    /// touched.
+    async fn remove_file(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        let _ = (space, path);
+        Err(StoreError::Unavailable(
+            "this store can't remove files".into(),
+        ))
+    }
+    /// Removes the project's folder `path` only when it is empty; a non-empty or missing folder
+    /// is `Ok`.
+    async fn remove_dir(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        let _ = (space, path);
+        Err(StoreError::Unavailable(
+            "this store can't remove files".into(),
+        ))
+    }
     async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError>;
     /// Lists the folder `path`, relative to `<space>/.workspace/` and checked as for
     /// [`FileStore::read`]: an invalid path is [`StoreError::InvalidPath`]. `Ok(None)` when

@@ -1,5 +1,6 @@
 #![cfg(feature = "test-support")]
-//! The in-memory fakes, for tests: the TerminalBackend, the file store and the diagram check.
+//! The in-memory fakes, for tests: the TerminalBackend, the file store, the scratch store, the
+//! wall clock and the diagram check.
 //!
 //! [`FakeBackend::new`] gives the backend and a [`FakeControl`] handle. The control handle
 //! drives the program in each terminal, injects faults and observes what the backend was asked
@@ -11,6 +12,8 @@ mod diagram_check;
 mod fake_attachment;
 mod fake_backend;
 mod file_store;
+mod scratch_store;
+mod wall_clock;
 pub(crate) mod world;
 
 use combine_protocol::{Display, TermId};
@@ -21,6 +24,8 @@ pub use control::FakeControl;
 pub use diagram_check::{FakeAnswer, FakeDiagramCheck, FakeHold};
 pub use fake_backend::FakeBackend;
 pub use file_store::MemoryFileStore;
+pub use scratch_store::MemoryScratchStore;
+pub use wall_clock::FakeWallClock;
 
 /// Opens every paint.
 pub const FAKE_PAINT_START: &[u8] = b"\x18\x1b[!p";

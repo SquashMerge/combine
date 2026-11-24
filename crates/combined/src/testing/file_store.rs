@@ -24,6 +24,7 @@ struct SpaceFiles {
     read_only: bool,
     watched: bool,
     write_counts: BTreeMap<String, u64>,
+    remove_counts: BTreeMap<String, u64>,
     read_counts: BTreeMap<String, u64>,
     list_counts: BTreeMap<String, u64>,
     fail_next_write: Option<StoreError>,
@@ -121,6 +122,34 @@ impl MemoryFileStore {
         state.notify(space, path);
     }
 
+    /// Replaces a file as someone else would, and queues no change: the edit is seen only
+    /// through a later event or rescan.
+    pub fn write_quiet(&self, space: &SpaceId, path: &str, bytes: Vec<u8>) {
+        self.state()
+            .spaces
+            .entry(space.clone())
+            .or_default()
+            .files
+            .insert(path.to_string(), bytes);
+    }
+
+    /// Queues a change for `path` on a watched space and touches no file, as a folder event or a
+    /// rescan would.
+    pub fn notify_outside(&self, space: &SpaceId, path: &str) {
+        self.state().notify(space, path);
+    }
+
+    /// Puts a fallback copy of a file by hand. The fallback copy is not watched, so no change is
+    /// queued.
+    pub fn put_fallback(&self, space: &SpaceId, path: &str, bytes: Vec<u8>) {
+        self.state()
+            .spaces
+            .entry(space.clone())
+            .or_default()
+            .fallback
+            .insert(path.to_string(), bytes);
+    }
+
     /// Deletes a file as someone else would, and queues a change.
     pub fn remove_outside(&self, space: &SpaceId, path: &str) {
         let mut state = self.state();
@@ -149,6 +178,17 @@ impl MemoryFileStore {
             .spaces
             .get(space)
             .and_then(|entry| entry.write_counts.get(path))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many removals of the file succeeded.
+    pub fn remove_count(&self, space: &SpaceId, path: &str) -> u64 {
+        let state = self.state();
+        state
+            .spaces
+            .get(space)
+            .and_then(|entry| entry.remove_counts.get(path))
             .copied()
             .unwrap_or(0)
     }
@@ -245,6 +285,57 @@ impl FileStore for MemoryFileStore {
             hash,
             read_only,
         })
+    }
+
+    async fn write_project(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteOutcome, StoreError> {
+        if !valid_store_path(path) {
+            return Err(StoreError::InvalidPath);
+        }
+        let mut state = self.state();
+        let entry = state.spaces.entry(space.clone()).or_default();
+        if entry.read_only {
+            return Err(StoreError::ReadOnly(format!("{} is read-only", space.0)));
+        }
+        if let Some(error) = entry.fail_next_write.take() {
+            return Err(error);
+        }
+        let hash = content_hash(&bytes);
+        entry.revision += 1;
+        let revision = StoreRevision(entry.revision);
+        *entry.write_counts.entry(path.to_string()).or_default() += 1;
+        entry.files.insert(path.to_string(), bytes);
+        state.notify(space, path);
+        Ok(WriteOutcome {
+            revision,
+            hash,
+            read_only: false,
+        })
+    }
+
+    async fn remove_file(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        if !valid_store_path(path) {
+            return Err(StoreError::InvalidPath);
+        }
+        let mut state = self.state();
+        let entry = state.spaces.entry(space.clone()).or_default();
+        if entry.read_only {
+            return Err(StoreError::ReadOnly(format!("{} is read-only", space.0)));
+        }
+        entry.files.remove(path);
+        entry.revision += 1;
+        *entry.remove_counts.entry(path.to_string()).or_default() += 1;
+        state.notify(space, path);
+        Ok(())
+    }
+
+    async fn remove_dir(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        let _ = (space, path);
+        Ok(())
     }
 
     async fn list_dir(

@@ -67,7 +67,7 @@ pub struct DiagramFailure {
     /// unknown diagram type or a front-matter error. `None` for `too_large`, `time_limit` and
     /// `memory_limit`, and when neither gives a position.
     pub line: Option<u32>,
-    /// 1-based column within `line`, in the units Pele counts (recorded in docs/m2-s2-spike.md,
+    /// 1-based column within `line`, in UTF-16 code units (recorded in docs/m2-s2-spike.md,
     /// P5). `None` whenever `line` is.
     pub column: Option<u32>,
     /// The source text around the error, as Pele quotes it, or the anchored line; at most
