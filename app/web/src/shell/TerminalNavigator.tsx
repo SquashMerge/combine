@@ -36,7 +36,12 @@ function TerminalList({ host, space, active, onSelectTerminal }: TerminalListPro
             data-dimmed={dimmed}
             aria-current={isActive ? 'true' : undefined}
           >
-            <button type="button" onClick={() => onSelectTerminal(space.key, terminal.id)}>
+            <button
+              type="button"
+              className="terminal-entry"
+              aria-label={`${terminal.name}, ${terminal.command}, ${terminal.state}`}
+              onClick={() => onSelectTerminal(space.key, terminal.id)}
+            >
               <span className="name">{terminal.name}</span>
               <span className="command">{terminal.command}</span>
               <span className="state">{terminal.state}</span>
