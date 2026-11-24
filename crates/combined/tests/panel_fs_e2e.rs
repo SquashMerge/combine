@@ -152,6 +152,7 @@ fn daemon_writes_are_not_echoed_on_disk() {
     assert_eq!((view.revision, source.as_str()), (updated.revision, "two"));
     assert_eq!(read(&rig.panel_dir("p").join("content.md")), "two");
     assert!(read(&rig.panel_dir("p").join("panel.json")).contains("\"title\": \"Title\""));
+    assert_eq!(rig.server.stats().connections(), 0);
 }
 
 #[test]
@@ -179,6 +180,7 @@ fn a_panel_folder_replaced_by_rename_is_reread() {
     });
     assert!(after.revision > before.revision);
     assert_eq!(source, "replaced");
+    assert_eq!(rig.server.stats().connections(), 0);
 }
 
 #[test]
@@ -199,6 +201,7 @@ fn scratch_panel_lives_under_data_scratch_sha256() {
     assert!(read(&folder.join("scratch.json")).contains(&rig.space.0));
     assert!(!rig.panel_dir("s").exists());
     assert!(!rig.work.join(".workspace").exists());
+    assert_eq!(rig.server.stats().connections(), 0);
 }
 
 #[test]
@@ -224,4 +227,5 @@ fn pin_moves_files_into_dot_workspace_on_disk() {
     assert_eq!(read(&rig.panel_dir("s").join("content.md")), "one");
     assert!(read(&rig.panel_dir("s").join("panel.json")).contains("\"renderer\": \"markdown\""));
     assert!(!folder.exists());
+    assert_eq!(rig.server.stats().connections(), 0);
 }

@@ -1045,6 +1045,76 @@ fn remove_file_and_remove_dir() {
 }
 
 #[test]
+fn denied_remove_file_and_remove_dir_give_read_only() {
+    let scratch = ShortTempDir::new();
+    let space = space(&scratch, "work");
+    let store = FsFileStore::with_fallback(scratch.path().join("spaces"));
+    let panels = Path::new(&space.0).join(".workspace/panels");
+    let folder = panels.join("p");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("panel.json"), b"{}").unwrap();
+    fs::create_dir_all(panels.join("empty")).unwrap();
+
+    // The file's folder is read-only, so unlinking the file is denied.
+    if !lock_down(&folder) {
+        eprintln!("skipped: this user can write a 0o555 folder");
+        return;
+    }
+    let file_result = block_on(store.remove_file(&space, "panels/p/panel.json"));
+    unlock(&folder);
+    assert!(
+        matches!(file_result, Err(StoreError::ReadOnly(_))),
+        "{file_result:?}"
+    );
+    assert!(folder.join("panel.json").exists());
+
+    // The empty folder's parent is read-only, so removing the folder is denied.
+    lock_down(&panels);
+    let dir_result = block_on(store.remove_dir(&space, "panels/empty"));
+    unlock(&panels);
+    assert!(
+        matches!(dir_result, Err(StoreError::ReadOnly(_))),
+        "{dir_result:?}"
+    );
+    assert!(panels.join("empty").is_dir());
+}
+
+#[test]
+fn removes_refuse_a_symlinked_path_and_leave_the_target_alone() {
+    use std::os::unix::fs::symlink;
+    for escape in [Escape::Workspace, Escape::Folder, Escape::File] {
+        let scratch = ShortTempDir::new();
+        let (space, path, sentinel) = escaping_space(&scratch, &escape);
+        let store = FsFileStore::new();
+        let outside = sentinel.parent().unwrap().to_path_buf();
+        let result = block_on(store.remove_file(&space, path));
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "remove_file {path}: {result:?}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), SENTINEL);
+
+        // remove_dir through the same symlinks: an empty folder outside must stay.
+        let victim_dir = outside.join("victim_dir");
+        fs::create_dir(&victim_dir).unwrap();
+        let dir_path = match escape {
+            Escape::File => {
+                // `.workspace/link` is a symlink to an outside folder; the path names it.
+                symlink(&victim_dir, Path::new(&space.0).join(".workspace/link")).unwrap();
+                "link".to_string()
+            }
+            _ => path.replace("victim", "victim_dir"),
+        };
+        let result = block_on(store.remove_dir(&space, &dir_path));
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "remove_dir {dir_path}: {result:?}"
+        );
+        assert!(victim_dir.is_dir(), "{dir_path}: the outside folder stays");
+    }
+}
+
+#[test]
 fn remove_file_removes_a_ds_store() {
     let scratch = ShortTempDir::new();
     let space = space(&scratch, "work");

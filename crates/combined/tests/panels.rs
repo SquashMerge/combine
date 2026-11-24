@@ -339,6 +339,13 @@ fn panel_read_keeps_the_fallback_flag() {
     assert_eq!(PanelRead::from(Ok(None)), PanelRead::Missing);
     assert!(!PanelRead::Missing.is_fallback());
     let failed = PanelRead::from(Err(StoreError::Unavailable("x".into())));
-    assert!(matches!(failed, PanelRead::Failed(_)));
+    match &failed {
+        PanelRead::Failed(message) => assert!(message.contains('x'), "{message}"),
+        PanelRead::Missing
+        | PanelRead::Found { .. }
+        | PanelRead::TooLarge { .. }
+        | PanelRead::FallbackFound { .. }
+        | PanelRead::FallbackTooLarge { .. } => panic!("expected Failed, got {failed:?}"),
+    }
     assert!(!failed.is_fallback());
 }

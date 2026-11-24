@@ -291,6 +291,7 @@ fn invalid_panel_json_is_never_rewritten_on_update_shutdown_or_restart() {
     assert_eq!(skipped.len(), 1, "{list:?}");
     assert!(skipped[0].reason.contains("JSON"), "{}", skipped[0].reason);
     assert!(list.panels.iter().all(|view| view.id != "p"));
+    assert_eq!(rig.connections(), 0);
 }
 
 #[test]
@@ -523,6 +524,7 @@ fn no_more_than_two_checks_run_at_once() {
         rig.wait_state(&format!("d{n}"), PanelState::Validated);
     }
     assert_eq!(rig.check.peak_in_flight(), 2);
+    assert_eq!(rig.connections(), 0);
 }
 
 #[test]
@@ -646,6 +648,7 @@ fn a_hand_placed_fallback_copy_is_never_written_and_never_bumps_revisions() {
     assert!(after.read_only);
     assert_eq!(rig.write_count(&file_path("f")), 0);
     assert_eq!(rig.write_count(&content_path("f")), 0);
+    assert_eq!(rig.connections(), 0);
 }
 
 // A2-6
@@ -656,6 +659,7 @@ fn create_in_a_space_with_no_terminal_succeeds_on_the_first_call() {
     let created = rig.create(named("p", markdown("one"))).unwrap();
     assert_eq!(created.id, "p");
     rig.wait_state("p", PanelState::Validated);
+    assert_eq!(rig.connections(), 0);
 }
 
 // #34: the hash check before every write
