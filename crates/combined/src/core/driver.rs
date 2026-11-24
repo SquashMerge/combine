@@ -4,16 +4,17 @@
 //! `Context`. A call is polled once when it starts. One that isn't done stays in flight, and
 //! that attachment's later calls queue behind it, in the order core issued them. Other
 //! attachments, connections and the server loop carry on. [`Driver::poll_event`] polls the calls
-//! in flight, so the caller's waker is registered on them. An automatic reply that queues keeps
-//! the ownership generation core authorized it under, and is checked with core again just before
-//! it starts: one that is no longer current is dropped without a word.
+//! in flight, so the caller's waker is registered on them. An automatic reply that queues is
+//! checked with core again just before it starts, against the ownership generation core
+//! authorized it under, which the command carries: one that is no longer current is dropped
+//! without a word.
 //! It uses only `futures`: no locks, threads or clocks.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use combine_protocol::{AttachmentId, OwnershipGeneration};
+use combine_protocol::AttachmentId;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 
@@ -33,25 +34,9 @@ type Opening = BoxFuture<'static, (AttachmentId, BackendResult<Box<dyn Attachmen
 struct Slot {
     /// `None` while a call for this attachment is in flight.
     held: Option<Box<dyn Attachment>>,
-    queued: VecDeque<Queued>,
+    queued: VecDeque<BackendCommand>,
     /// Core has issued the detach, so a failure of an earlier call is no longer reported.
     detaching: bool,
-}
-
-/// A command waiting behind a call in flight.
-struct Queued {
-    command: BackendCommand,
-    /// For an automatic reply, the ownership generation core authorized it under.
-    authorized: Option<OwnershipGeneration>,
-}
-
-impl Queued {
-    fn plain(command: BackendCommand) -> Queued {
-        Queued {
-            command,
-            authorized: None,
-        }
-    }
 }
 
 enum Finished {
@@ -188,22 +173,16 @@ impl Driver {
         match command {
             BackendCommand::Detach { .. } => {
                 slot.detaching = true;
-                slot.queued.push_back(Queued::plain(command));
+                slot.queued.push_back(command);
             }
             BackendCommand::Credit { bytes, .. } => {
-                let tail = slot.queued.back_mut().map(|queued| &mut queued.command);
-                if let Some(BackendCommand::Credit { bytes: tail, .. }) = tail {
+                if let Some(BackendCommand::Credit { bytes: tail, .. }) = slot.queued.back_mut() {
                     *tail = tail.saturating_add(bytes);
                 } else {
-                    slot.queued.push_back(Queued::plain(command));
+                    slot.queued.push_back(command);
                 }
             }
-            // Core authorized the reply just now, so the generation it holds is the one.
-            BackendCommand::WriteAutomatic { .. } if !full => slot.queued.push_back(Queued {
-                command,
-                authorized: self.core.ownership_generation(attachment),
-            }),
-            _ if !full => slot.queued.push_back(Queued::plain(command)),
+            _ if !full => slot.queued.push_back(command),
             _ => {
                 if let Some(kind) = refusal(&command) {
                     let failure = BackendError::Failed(QUEUE_FULL.into());
@@ -223,19 +202,19 @@ impl Driver {
             if slot.held.is_none() {
                 return;
             }
-            let Some(Queued {
-                command,
-                authorized,
-            }) = slot.queued.pop_front()
-            else {
+            let Some(command) = slot.queued.pop_front() else {
                 return;
             };
-            if let BackendCommand::WriteAutomatic { generation, .. } = &command {
-                let current = authorized.is_some_and(|ownership| {
-                    self.core
-                        .automatic_reply_current(attachment, *generation, ownership)
-                });
-                if !current {
+            if let BackendCommand::WriteAutomatic {
+                generation,
+                ownership,
+                ..
+            } = &command
+            {
+                if !self
+                    .core
+                    .automatic_reply_current(attachment, *generation, *ownership)
+                {
                     continue;
                 }
             }

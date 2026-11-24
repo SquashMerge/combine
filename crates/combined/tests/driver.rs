@@ -1295,3 +1295,52 @@ fn accepted_input_queued_with_a_stale_reply_is_still_written_after_a_hand_off() 
     pulled.extend(env.pull());
     assert!(errors(&pulled).is_empty(), "{pulled:?}");
 }
+
+#[test]
+fn a_reply_batched_with_a_hand_off_and_regain_keeps_its_original_authorization() {
+    let mut env = Env::new();
+    let a = live_owner(&mut env, 1);
+    let b = second_viewer(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    let base = env.stub.log_of("fake:1").len();
+    issue(&mut env, &a, Call::Write);
+    let mut pulled = env.pull();
+
+    // Core takes all of these before the driver sees any of their effects.
+    env.send(reply(&a, "a1"));
+    env.send(input(&a, "w1"));
+    env.send(ClientMessage::RequestOwnership(RequestOwnership {
+        attachment: b,
+    }));
+    env.send(ClientMessage::RequestOwnership(RequestOwnership {
+        attachment: a.id,
+    }));
+    env.send(input(&a, "w2"));
+    env.run();
+    let ownership = env
+        .driver
+        .core()
+        .ownership(&TermId("fake:1".into()))
+        .unwrap();
+    assert_eq!(ownership.owner, Some(a.id));
+    assert!(ownership.generation.0 > a.ownership.0);
+    assert!(since(&env, "fake:1", base).is_empty());
+
+    release_and_drain(&mut env, release);
+    assert_eq!(
+        since(&env, "fake:1", base),
+        entries(
+            &[
+                "write held",
+                "write w1",
+                "set_display",
+                "resize 80x24",
+                "focus",
+                "write w2"
+            ],
+            "fake:1"
+        )
+    );
+    pulled.extend(env.pull());
+    assert!(errors(&pulled).is_empty(), "{pulled:?}");
+}

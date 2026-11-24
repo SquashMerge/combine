@@ -1623,6 +1623,7 @@ fn automatic_reply_fence() {
         [BackendCommand::WriteAutomatic {
             attachment: owner,
             generation: BackendGeneration(1),
+            ownership: generation,
             bytes: b"\x1b[0n".to_vec()
         }]
     );

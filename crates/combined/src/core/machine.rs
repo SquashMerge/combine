@@ -826,12 +826,13 @@ impl Core {
         self.command(BackendCommand::WriteAutomatic {
             attachment: id,
             generation: backend_generation,
+            ownership: reply.ownership_generation,
             bytes: reply.bytes,
         });
     }
 
     /// The ownership generation now current for the attachment's terminal.
-    pub fn ownership_generation(&self, id: AttachmentId) -> Option<OwnershipGeneration> {
+    fn ownership_generation(&self, id: AttachmentId) -> Option<OwnershipGeneration> {
         self.attachments
             .get(&id)
             .and_then(|a| self.ownerships.get(&a.terminal.0))
