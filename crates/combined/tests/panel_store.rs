@@ -2644,11 +2644,59 @@ fn a_pin_into_a_skipped_folder_compares_both_files_and_rolls_back_without_a_seco
     assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 1);
     rig.store.pin(&space(), "x", rig.t()).unwrap();
     let (ticket, files) = workspace_saves(&rig.fx()).remove(0);
+    rig.ev();
     rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert!(changed(&rig.ev()).iter().any(|(panel, ..)| panel == "x"));
     assert_eq!(scratch_deletes(&rig.fx()).len(), 1);
-    assert_eq!(rig.get("x").0.lifetime, Lifetime::Persistent);
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Persistent);
+    assert_eq!(view.file_error, None);
     assert!(skipped_of(&rig).is_empty());
     assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 1);
+}
+
+#[test]
+fn a_successful_pin_clears_the_error_of_an_earlier_failed_pin() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.store
+        .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+    rig.fx();
+    assert!(rig.get("x").0.file_error.is_some());
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, files) = workspace_saves(&rig.fx()).remove(0);
+    rig.ev();
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert!(changed(&rig.ev()).iter().any(|(panel, ..)| panel == "x"));
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Persistent);
+    assert_eq!(view.file_error, None);
+}
+
+#[test]
+fn two_failed_pins_in_a_row_carry_one_couldnt_pin_prefix() {
+    let mut rig = Rig::new();
+    rig.screate("x", "a", T).unwrap();
+    let (ticket, _) = saves(&rig.fx()).remove(0);
+    fail_save(&mut rig, ticket, "content.md");
+    rig.fx();
+    for _ in 0..2 {
+        rig.store.pin(&space(), "x", rig.t()).unwrap();
+        let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+        rig.store
+            .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+        rig.fx();
+    }
+    let error = rig.get("x").0.file_error.unwrap();
+    assert_eq!(error.matches("Couldn't pin: ").count(), 1, "{error}");
+    assert_eq!(
+        error.matches("Couldn't save the scratch panel").count(),
+        1,
+        "{error}"
+    );
+    assert!(error.ends_with("retrying."), "{error}");
 }
 
 #[test]

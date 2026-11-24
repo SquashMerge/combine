@@ -213,13 +213,18 @@ impl ScratchStore for FsScratchStore {
         }
         let key = self.root.join(&dir.key);
         let panel = key.join(&dir.panel);
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.root)
-            .map_err(unavailable)?;
-        create_folder(&key)?;
-        create_folder(&panel)?;
+        if !real_dir(&self.root)? {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&self.root)
+                .map_err(unavailable)?;
+        }
+        for folder in [&key, &panel] {
+            if !real_dir(folder)? {
+                create_folder(folder)?;
+            }
+        }
         for folder in [self.root.as_path(), &key, &panel] {
             real_dir(folder)?;
         }

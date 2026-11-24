@@ -44,6 +44,18 @@ fn skipped_dir(dir: &ScratchDir, reason: &str) -> PanelEffect {
     }
 }
 
+/// The scratch-save failure inside a file error, without a `Couldn't pin: ` reason before it.
+fn raw_save_failure(error: &str) -> Option<String> {
+    const RAW: &str = "Couldn't save the scratch panel ";
+    if !error.starts_with("Couldn't pin: ") {
+        return Some(error.to_owned());
+    }
+    error
+        .find(RAW)
+        .and_then(|at| error.get(at..))
+        .map(str::to_owned)
+}
+
 impl SpaceState {
     pub(super) fn scratch_dir(&self, id: &str) -> ScratchDir {
         ScratchDir {
@@ -330,7 +342,9 @@ impl SpaceState {
             rec.pinning = true;
             rec.scratch_unsaved = rec.save_failed || rec.busy.is_some() || !rec.pending.is_empty();
             rec.scratch_failure = if rec.save_failed {
-                rec.file_error.take()
+                rec.file_error
+                    .take()
+                    .and_then(|error| raw_save_failure(&error))
             } else {
                 None
             };
@@ -380,7 +394,9 @@ impl SpaceState {
         let dir = self.scratch_dir(id);
         if let Some(rec) = self.records.get_mut(id) {
             rec.pinning = false;
+            rec.file_error = None;
         }
+        self.changed(out, id);
         out.scratch.stamped.remove(&dir);
         self.delete_scratch_dir(out, dir, None);
         self.service(out, id);
