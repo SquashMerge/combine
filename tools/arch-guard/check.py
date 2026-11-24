@@ -621,7 +621,8 @@ def _rebind(path: str, bindings: dict[str, str]) -> str:
 _INCLUDES = {"include", "include_str", "include_bytes"}
 
 
-def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], root: Path | None = None) -> list[Violation]:
+def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], root: Path | None = None,
+                    reached: set[str] | None = None) -> list[Violation]:
     lines = Lines(src)
     try:
         toks = lex_rust(src)
@@ -643,11 +644,14 @@ def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], r
                 and tok(k + 3).is_("punct", "=") and tok(k + 4).kind == "str"):
             arg = tok(k + 4).text
         elif (t.kind == "ident" and t.text in _INCLUDES and tok(k + 1).is_("punct", "!")
-              and tok(k + 2).is_("punct", "(") and tok(k + 3).kind == "str"):
+              and any(tok(k + 2).is_("punct", d) for d in "([{") and tok(k + 3).kind == "str"):
+            # A macro takes any delimiter: `include!("x")`, `include!["x"]` and `include! { "x" }` all compile.
             arg = tok(k + 3).text
         if arg is None:
             continue
         for target in reach_targets(root, normalize(str(PurePosixPath(rel).parent / arg))):
+            if reached is not None:
+                reached.add(target)
             for rule in cfg.of("path_ban"):
                 if Globs(rule.data["to"]).reaches(target):
                     found.append(Violation(rule.id, rel, lines.line(t.start), f"reaches non-production path {target}"))
@@ -1211,7 +1215,8 @@ def tsx_backstop(src: str, toks: list[Tok], loads: list[tuple[int, str, str | No
             raise LexError(m.start(), "`from` here is not part of a reported import or export")
 
 
-def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> list[Violation]:
+def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None,
+                  reached: set[str] | None = None) -> list[Violation]:
     lines = Lines(src)
     try:
         toks = lex_js(src, jsx=rel.endswith(".tsx"))
@@ -1237,6 +1242,8 @@ def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None) -> 
             continue
         if spec.startswith("."):
             for target in reach_targets(root, normalize(str(PurePosixPath(rel).parent / spec))):
+                if reached is not None:
+                    reached.add(target)
                 for rule in cfg.of("path_ban"):
                     if Globs(rule.data["to"]).reaches(target):
                         found.append(Violation(rule.id, rel, line, f"imports non-production path {target}"))
@@ -1394,17 +1401,15 @@ def run(root: Path, config: Path) -> list[Violation]:
     found += check_cargo(root, cfg, packages, ws_deps)
 
     files, skipped, links = walk(root, cfg.skip)
-    protected = [f"{p.dir}/src/" if p.dir else "src/" for p in packages]
-    protected += [p for r in cfg.rules for p in r.scope_in.prefixes()]
-    for d in skipped:
-        hidden = sorted({p for p in protected if (d + "/").startswith(p) or p.startswith(d + "/")})
-        if hidden:
-            found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which holds production source ({', '.join(hidden)})"))
+    # Every literal destination production code reaches (`#[path]`, `include!`, a relative
+    # import, a symlink): a skip must not hide one, or the guard would pass code it never read.
+    reached: set[str] = set()
 
     for rel in links:  # a production path that is really a non-production one
         if cfg.non_production.match(rel):
             continue
         for target in reach_targets(root, rel)[1:]:
+            reached.add(target)
             for rule in cfg.of("path_ban"):
                 if Globs(rule.data["to"]).reaches(target):
                     found.append(Violation(rule.id, rel, 1, f"symlink to non-production path {target}"))
@@ -1418,9 +1423,19 @@ def run(root: Path, config: Path) -> list[Violation]:
                 found.append(Violation(rule.id, rel, 1, f"{ext} source file"))
         if ext in RUST_EXT:
             owner = _owner(rel, packages)
-            found += check_rust_file(rel, full.read_text(errors="replace"), cfg, owner.bindings if owner else {}, root)
+            found += check_rust_file(rel, full.read_text(errors="replace"), cfg, owner.bindings if owner else {}, root, reached)
         elif ext in JS_EXT:
-            found += check_js_file(rel, full.read_text(errors="replace"), cfg, root)
+            found += check_js_file(rel, full.read_text(errors="replace"), cfg, root, reached)
+
+    protected = [f"{p.dir}/src/" if p.dir else "src/" for p in packages]
+    protected += [p for r in cfg.rules for p in r.scope_in.prefixes()]
+    for d in skipped:
+        hidden = sorted({p for p in protected if (d + "/").startswith(p) or p.startswith(d + "/")})
+        if hidden:
+            found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which holds production source ({', '.join(hidden)})"))
+        sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
+        if sources:
+            found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which production code reaches ({', '.join(sources)})"))
     return sorted(set(found), key=lambda v: (v.path, v.line, v.rule, v.message))
 
 

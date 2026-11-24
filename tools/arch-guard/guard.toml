@@ -16,6 +16,10 @@ skip = [
   "**/node_modules/**",
   "**/__pycache__/**",
   ".reviews/**",
+  # feature-factory run state and sandboxes (gitignored). Slice worktrees and sandbox clones are
+  # full copies of the tree, so reading them reports every production file a second time.
+  ".factory/**",
+  ".factory-sandboxes/**",
 ]
 
 # Cargo features that mark code as test-only, as in .trellis/rules.toml.
