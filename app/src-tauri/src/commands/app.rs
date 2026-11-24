@@ -6,7 +6,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use super::terminals::{self, TauriTerminalSink};
-use super::{hosts, layout, spawn, state};
+use super::{hosts, layout, open_url, spawn, state};
 use crate::hosts::service::{HostsService, ServiceDeps};
 use crate::state::service::ClientStates;
 
@@ -72,7 +72,8 @@ pub fn run() {
             terminals::terminal_set_display,
             terminals::terminal_request_ownership,
             terminals::terminal_input,
-            terminals::terminal_automatic_reply
+            terminals::terminal_automatic_reply,
+            open_url::open_url
         ])
         .build(tauri::generate_context!())
         .expect("Combine failed to start")
