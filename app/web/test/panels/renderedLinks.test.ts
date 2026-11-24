@@ -153,6 +153,24 @@ describe('attachRenderedLinks', () => {
     expect(port.urls).toEqual([]);
   });
 
+  it('leaves an outer anchor alone when the click is inside the container on non-link content', () => {
+    const outer = document.createElement('a');
+    outer.setAttribute('href', 'https://example.com/outer');
+    const inner = document.createElement('div');
+    const text = document.createElement('span');
+    inner.append(text);
+    outer.append(inner);
+    document.body.append(outer);
+    const nested = attachRenderedLinks(inner, port);
+    const event = click(text);
+    const key = press(text, { key: 'Enter' });
+    nested();
+    outer.remove();
+    expect(event.defaultPrevented).toBe(false);
+    expect(key.defaultPrevented).toBe(false);
+    expect(port.urls).toEqual([]);
+  });
+
   it('stops reacting once detached', () => {
     detach();
     const event = click(markdownLink());

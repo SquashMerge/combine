@@ -141,3 +141,12 @@ describe('renderMarkdown', () => {
     });
   });
 });
+
+describe('markdown-it options', () => {
+  it('does not linkify a bare URL', async () => {
+    const fragment = await rendered('see https://example.com/bare and www.example.org now');
+    expect(fragment.querySelector('a')).toBeNull();
+    expect(markers(fragment)).toEqual([]);
+    expect(fragment.textContent).toContain('https://example.com/bare');
+  });
+});

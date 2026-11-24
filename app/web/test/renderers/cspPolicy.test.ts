@@ -74,6 +74,15 @@ describe('cspViolations', () => {
     ['ping', '<a ping="x">t</a>'],
     ['cite', '<blockquote cite="x"></blockquote>'],
     ['xlink:href', '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://evil.example/x.png"/></svg>'],
+    ['action', '<p action="x">t</p>'],
+    ['background', '<p background="x">t</p>'],
+    ['codebase', '<p codebase="x">t</p>'],
+    ['lowsrc', '<p lowsrc="x">t</p>'],
+    ['dynsrc', '<p dynsrc="x">t</p>'],
+    ['longdesc', '<p longdesc="x">t</p>'],
+    ['usemap', '<p usemap="#m">t</p>'],
+    ['manifest', '<p manifest="x">t</p>'],
+    ['icon', '<p icon="x">t</p>'],
     ['data attribute', '<p data-id="1">t</p>'],
     ['marker off an a', '<span data-combine-open-url="https://example.com/">t</span>'],
     ['marker with a bad value', '<a data-combine-open-url="javascript:alert(1)">t</a>'],
@@ -99,6 +108,10 @@ describe('cspViolations', () => {
       '<svg><rect fill="url(#g)"/></svg><img src="data:image/png;base64,iVBORw0KGgo=">' +
       '<a data-combine-open-url="https://example.com/">t</a>';
     expect(cspViolations(dom(html))).toEqual([]);
+  });
+
+  it('reports a frame element', () => {
+    expect(cspViolations(document.createElement('frame')).length).toBeGreaterThan(0);
   });
 
   it('reports a frameset element', () => {
