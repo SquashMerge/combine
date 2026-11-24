@@ -300,6 +300,151 @@ fn missing_optional_fields_decode_as_none() {
 }
 
 #[test]
+fn get_panel_round_trips() {
+    round_trip!(client_goldens(), "get_panel", "get_panel", ClientMessage);
+}
+
+#[test]
+fn report_render_round_trips() {
+    round_trip!(
+        client_goldens(),
+        "report_render",
+        "report_render",
+        ClientMessage
+    );
+}
+
+#[test]
+fn report_render_failed_round_trips() {
+    round_trip!(
+        client_goldens(),
+        "report_render_failed",
+        "report_render",
+        ClientMessage
+    );
+}
+
+#[test]
+fn close_panel_round_trips() {
+    round_trip!(
+        client_goldens(),
+        "close_panel",
+        "close_panel",
+        ClientMessage
+    );
+}
+
+#[test]
+fn pin_panel_round_trips() {
+    round_trip!(client_goldens(), "pin_panel", "pin_panel", ClientMessage);
+}
+
+#[test]
+fn mutate_layout_with_panel_ops_round_trips() {
+    round_trip!(
+        client_goldens(),
+        "mutate_layout_panel_ops",
+        "mutate_layout",
+        ClientMessage
+    );
+}
+
+#[test]
+fn mcp_open_round_trips() {
+    round_trip!(client_goldens(), "mcp_open", "mcp_open", ClientMessage);
+}
+
+#[test]
+fn mcp_open_cwd_only_round_trips() {
+    round_trip!(
+        client_goldens(),
+        "mcp_open_cwd_only",
+        "mcp_open",
+        ClientMessage
+    );
+}
+
+#[test]
+fn mcp_client_round_trips() {
+    round_trip!(client_goldens(), "mcp_client", "mcp", ClientMessage);
+}
+
+#[test]
+fn panels_round_trips() {
+    round_trip!(daemon_goldens(), "panels", "panels", DaemonMessage);
+}
+
+#[test]
+fn panels_push_round_trips() {
+    round_trip!(daemon_goldens(), "panels_push", "panels", DaemonMessage);
+}
+
+#[test]
+fn panel_round_trips() {
+    round_trip!(daemon_goldens(), "panel", "panel", DaemonMessage);
+}
+
+#[test]
+fn panel_closed_round_trips() {
+    round_trip!(
+        daemon_goldens(),
+        "panel_closed",
+        "panel_closed",
+        DaemonMessage
+    );
+}
+
+#[test]
+fn panel_pinned_round_trips() {
+    round_trip!(
+        daemon_goldens(),
+        "panel_pinned",
+        "panel_pinned",
+        DaemonMessage
+    );
+}
+
+#[test]
+fn mcp_opened_round_trips() {
+    round_trip!(daemon_goldens(), "mcp_opened", "mcp_opened", DaemonMessage);
+}
+
+#[test]
+fn mcp_daemon_round_trips() {
+    round_trip!(daemon_goldens(), "mcp_daemon", "mcp", DaemonMessage);
+}
+
+#[test]
+fn error_unknown_panel_round_trips() {
+    round_trip!(
+        daemon_goldens(),
+        "error_unknown_panel",
+        "error",
+        DaemonMessage
+    );
+}
+
+#[test]
+fn error_unknown_caller_round_trips() {
+    round_trip!(
+        daemon_goldens(),
+        "error_unknown_caller",
+        "error",
+        DaemonMessage
+    );
+}
+
+#[test]
+fn error_panel_limit_round_trips() {
+    round_trip!(
+        daemon_goldens(),
+        "error_panel_limit",
+        "error",
+        DaemonMessage
+    );
+}
+
+#[test]
 fn error_codes_encode_as_snake_case() {
     let codes = [
         (ErrorCode::VersionMismatch, "version_mismatch"),
@@ -310,6 +455,9 @@ fn error_codes_encode_as_snake_case() {
         (ErrorCode::StaleGeneration, "stale_generation"),
         (ErrorCode::WatchOnly, "watch_only"),
         (ErrorCode::InvalidRequest, "invalid_request"),
+        (ErrorCode::UnknownPanel, "unknown_panel"),
+        (ErrorCode::UnknownCaller, "unknown_caller"),
+        (ErrorCode::PanelLimit, "panel_limit"),
         (ErrorCode::Internal, "internal"),
     ];
     for (code, name) in codes {
@@ -387,6 +535,16 @@ fn cursor_helper_names_each_event_cursor() {
         ("ownership", None),
         ("ownership_none", None),
         ("error", None),
+        ("panels", None),
+        ("panels_push", None),
+        ("panel", None),
+        ("panel_closed", None),
+        ("panel_pinned", None),
+        ("mcp_opened", None),
+        ("mcp_daemon", None),
+        ("error_unknown_panel", None),
+        ("error_unknown_caller", None),
+        ("error_panel_limit", None),
     ];
     let goldens = daemon_goldens();
     for (key, expected) in with_cursor {

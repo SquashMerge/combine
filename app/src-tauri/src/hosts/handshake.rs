@@ -104,6 +104,9 @@ fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::TemplateChanged => "template_changed",
         ErrorCode::CwdRefused => "cwd_refused",
         ErrorCode::SpawnFailed => "spawn_failed",
+        ErrorCode::UnknownPanel => "unknown_panel",
+        ErrorCode::UnknownCaller => "unknown_caller",
+        ErrorCode::PanelLimit => "panel_limit",
         ErrorCode::Internal => "internal",
     }
 }
@@ -219,6 +222,9 @@ mod tests {
             (ErrorCode::TemplateChanged, "template_changed"),
             (ErrorCode::CwdRefused, "cwd_refused"),
             (ErrorCode::SpawnFailed, "spawn_failed"),
+            (ErrorCode::UnknownPanel, "unknown_panel"),
+            (ErrorCode::UnknownCaller, "unknown_caller"),
+            (ErrorCode::PanelLimit, "panel_limit"),
             (ErrorCode::Internal, "internal"),
         ];
         for (code, name) in codes {

@@ -5,13 +5,14 @@ use std::fmt::{self, Write as _};
 use serde::Deserialize;
 
 use crate::client::{
-    Ack, Attach, AutomaticReply, ClientMessage, Detach, Focus, Hello, Input, ListTemplates,
-    MutateLayout, RequestOwnership, Resize, Resume, SetDisplay, SpawnTerminal, UnwatchLayout,
-    WatchLayout, WatchTerminals,
+    Ack, Attach, AutomaticReply, ClientMessage, ClosePanel, Detach, Focus, GetPanel, Hello, Input,
+    ListTemplates, McpOpen, MutateLayout, PinPanel, ReportRender, RequestOwnership, Resize, Resume,
+    SetDisplay, SpawnTerminal, UnwatchLayout, WatchLayout, WatchTerminals,
 };
 use crate::daemon::{
-    Attached, Closed, DaemonMessage, Data, ErrorMessage, Facts, Gap, Layout, Lost, Ownership,
-    Resized, Resumed, Resynced, Spawned, Started, Templates, Terminals, Welcome,
+    Attached, Closed, DaemonMessage, Data, ErrorMessage, Facts, Gap, Layout, Lost, McpOpened,
+    Ownership, Panel, PanelClosed, PanelPinned, Panels, Resized, Resumed, Resynced, Spawned,
+    Started, Templates, Terminals, Welcome,
 };
 use crate::error::{DecodeError, EncodeError};
 use crate::frame::{
@@ -19,6 +20,7 @@ use crate::frame::{
     MAX_FRAME_LEN,
 };
 use crate::ids::{AttachmentId, Cursor, Epoch, OwnershipGeneration, Seq};
+use crate::mcp::Mcp;
 
 pub(crate) mod sealed {
     pub trait Sealed: Sized {
@@ -100,7 +102,7 @@ pub(crate) fn floor_char_boundary(s: &str, mut index: usize) -> usize {
     index
 }
 
-fn bad_json(error: &dyn fmt::Display) -> DecodeError {
+pub(crate) fn bad_json(error: &dyn fmt::Display) -> DecodeError {
     let mut detail = CappedText::new();
     let _ = write!(detail, "{error}");
     DecodeError::BadJson {
@@ -201,6 +203,12 @@ impl sealed::Sealed for ClientMessage {
                     "mutate_layout" => Self::MutateLayout(parse::<MutateLayout>(text)?),
                     "list_templates" => Self::ListTemplates(parse::<ListTemplates>(text)?),
                     "spawn_terminal" => Self::SpawnTerminal(parse::<SpawnTerminal>(text)?),
+                    "get_panel" => Self::GetPanel(parse::<GetPanel>(text)?),
+                    "report_render" => Self::ReportRender(parse::<ReportRender>(text)?),
+                    "close_panel" => Self::ClosePanel(parse::<ClosePanel>(text)?),
+                    "pin_panel" => Self::PinPanel(parse::<PinPanel>(text)?),
+                    "mcp_open" => Self::McpOpen(parse::<McpOpen>(text)?),
+                    "mcp" => Self::Mcp(parse::<Mcp>(text)?),
                     other => return Err(unknown_message_type(other)),
                 })
             }
@@ -253,6 +261,12 @@ impl sealed::Sealed for DaemonMessage {
                     "layout" => Self::Layout(parse::<Layout>(text)?),
                     "templates" => Self::Templates(parse::<Templates>(text)?),
                     "spawned" => Self::Spawned(parse::<Spawned>(text)?),
+                    "panels" => Self::Panels(parse::<Panels>(text)?),
+                    "panel" => Self::Panel(parse::<Panel>(text)?),
+                    "panel_closed" => Self::PanelClosed(parse::<PanelClosed>(text)?),
+                    "panel_pinned" => Self::PanelPinned(parse::<PanelPinned>(text)?),
+                    "mcp_opened" => Self::McpOpened(parse::<McpOpened>(text)?),
+                    "mcp" => Self::Mcp(parse::<Mcp>(text)?),
                     "started" => Self::Started(parse::<Started>(text)?),
                     "resized" => Self::Resized(parse::<Resized>(text)?),
                     "facts" => Self::Facts(parse::<Facts>(text)?),

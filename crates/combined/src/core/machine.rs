@@ -35,6 +35,8 @@ const UNEXPECTED_HELLO: &str = "unexpected hello";
 const UNEXPECTED_WATCH: &str = "unexpected watch_terminals";
 const UNEXPECTED_LAYOUT: &str = "unexpected layout message";
 const UNEXPECTED_SPAWN: &str = "unexpected spawn message";
+const UNEXPECTED_PANEL: &str = "panel requests are not supported by this daemon yet";
+const UNEXPECTED_MCP: &str = "the MCP channel is not supported by this daemon yet";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
 const REFUSED_INPUT: &str = "the backend refused input for this attachment";
@@ -431,6 +433,35 @@ impl Core {
                 Some(spawn.request),
                 None,
             ),
+            ClientMessage::GetPanel(get) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_PANEL,
+                Some(get.request),
+                None,
+            ),
+            ClientMessage::ClosePanel(close) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_PANEL,
+                Some(close.request),
+                None,
+            ),
+            ClientMessage::PinPanel(pin) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_PANEL,
+                Some(pin.request),
+                None,
+            ),
+            ClientMessage::McpOpen(open) => self.send_error(
+                connection,
+                ErrorCode::InvalidRequest,
+                UNEXPECTED_MCP,
+                Some(open.request),
+                None,
+            ),
+            ClientMessage::ReportRender(_) | ClientMessage::Mcp(_) => {}
             ClientMessage::UnwatchLayout(_) => self.send_error(
                 connection,
                 ErrorCode::InvalidRequest,
