@@ -142,6 +142,9 @@ pub struct LayoutSnapshot {
 /// One change to a layout, tagged by `op`. A split is addressed by the set of
 /// tile IDs under it, in any order. `new_tile` is chosen by the client.
 ///
+/// `add_panel` and `remove_panel` put a panel ID into the tree and take one
+/// out; neither creates or closes a panel.
+///
 /// It decodes through a flat struct, like [`LayoutNode`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", try_from = "RawOp")]
@@ -168,6 +171,16 @@ pub enum LayoutOp {
     },
     CloseTile {
         tile: String,
+    },
+    /// Puts a panel ID that isn't in the tree into it. `tile` is a hint naming
+    /// the tile to add it to.
+    AddPanel {
+        panel: String,
+        tile: Option<String>,
+    },
+    /// Takes a panel ID out of the tree. The panel itself stays.
+    RemovePanel {
+        panel: String,
     },
 }
 
@@ -213,6 +226,13 @@ impl TryFrom<RawOp> for LayoutOp {
             }),
             "close_tile" => Ok(LayoutOp::CloseTile {
                 tile: raw.tile.ok_or_else(|| need("tile"))?,
+            }),
+            "add_panel" => Ok(LayoutOp::AddPanel {
+                panel: raw.panel.ok_or_else(|| need("panel"))?,
+                tile: raw.tile,
+            }),
+            "remove_panel" => Ok(LayoutOp::RemovePanel {
+                panel: raw.panel.ok_or_else(|| need("panel"))?,
             }),
             other => Err(format!("unknown op `{}`", clip(other))),
         }

@@ -53,11 +53,6 @@ fn is_malformed(json: &str) -> bool {
 }
 
 #[test]
-fn protocol_version_is_4() {
-    assert_eq!(PROTOCOL_VERSION, 4);
-}
-
-#[test]
 fn list_templates_round_trips() {
     client_round_trip(
         LIST_JSON,

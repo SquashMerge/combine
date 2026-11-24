@@ -10,6 +10,8 @@ use crate::ids::{
     AttachmentId, BackendGeneration, Cursor, HostId, OwnershipGeneration, RequestId, Seq, TermId,
 };
 use crate::layout::LayoutSnapshot;
+use crate::mcp::Mcp;
+use crate::panels::{PanelError, PanelState, PanelSummary, Renderer};
 use crate::spawn::{SkippedPanel, TemplateInfo};
 use crate::terminals::{SpaceInfo, TerminalInfo};
 
@@ -97,6 +99,12 @@ pub enum ErrorCode {
     CwdRefused,
     /// The backend couldn't start the terminal.
     SpawnFailed,
+    /// A panel request named a panel the space doesn't have.
+    UnknownPanel,
+    /// `mcp_open` named a caller that no terminal or space matches.
+    UnknownCaller,
+    /// Creating a panel would take its space past the panel limit.
+    PanelLimit,
     /// Anything else.
     Internal,
 }
@@ -160,6 +168,62 @@ pub struct Spawned {
     pub request: RequestId,
     pub space: String,
     pub terminal: TermId,
+}
+
+/// A space's panels, for a connection watching its layout. With
+/// `request: Some(..)` it follows the `layout` that answers a `watch_layout`
+/// with that request; with `request: None` it is a push after a change, at
+/// most once per flush. `panels` is sorted by `id`; `skipped` names the panel
+/// folders that offer no panel, sorted by `panel`. `error` is set when the
+/// panels couldn't be listed. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Panels {
+    pub request: Option<RequestId>,
+    pub space: String,
+    pub panels: Vec<PanelSummary>,
+    pub skipped: Vec<SkippedPanel>,
+    pub error: Option<String>,
+}
+
+/// One panel's current revision, answering a `get_panel` with that `request`.
+/// `source` is the revision's full text; `error` is set while `state` is
+/// `failed`. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Panel {
+    pub request: RequestId,
+    pub space: String,
+    pub id: String,
+    pub revision: u64,
+    pub renderer: Renderer,
+    pub source: String,
+    pub state: PanelState,
+    pub error: Option<PanelError>,
+}
+
+/// The panel is closed, answering a `close_panel` with that `request`. It is
+/// control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelClosed {
+    pub request: RequestId,
+    pub space: String,
+    pub panel: String,
+}
+
+/// The panel is kept in the project, answering a `pin_panel` with that
+/// `request`. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelPinned {
+    pub request: RequestId,
+    pub space: String,
+    pub panel: String,
+}
+
+/// The MCP channel is open, answering an `mcp_open` with that `request`.
+/// `space` is the space the caller's panels go to. It is control traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpOpened {
+    pub request: RequestId,
+    pub space: String,
 }
 
 /// Whether the backend reproduced the screen exactly.
@@ -273,6 +337,13 @@ pub enum DaemonMessage {
     Layout(Layout),
     Templates(Templates),
     Spawned(Spawned),
+    Panels(Panels),
+    Panel(Panel),
+    PanelClosed(PanelClosed),
+    PanelPinned(PanelPinned),
+    McpOpened(McpOpened),
+    /// One JSON-RPC message from the daemon's MCP server.
+    Mcp(Mcp),
     Started(Started),
     #[serde(skip)]
     Data(Data),
@@ -297,6 +368,12 @@ impl DaemonMessage {
             Self::Layout(_) => "layout",
             Self::Templates(_) => "templates",
             Self::Spawned(_) => "spawned",
+            Self::Panels(_) => "panels",
+            Self::Panel(_) => "panel",
+            Self::PanelClosed(_) => "panel_closed",
+            Self::PanelPinned(_) => "panel_pinned",
+            Self::McpOpened(_) => "mcp_opened",
+            Self::Mcp(_) => "mcp",
             Self::Started(_) => "started",
             Self::Data(_) => "data",
             Self::Resized(_) => "resized",
@@ -333,7 +410,9 @@ impl DaemonMessage {
     /// The stream is an attachment's seven events, in cursor order, plus the
     /// in-order `gap { request: None }` after the last of them. Control
     /// traffic (`welcome`, `attached`, `resumed`, a `gap` answering a resume,
-    /// `ownership`, `error`, `terminals`, `layout`, `templates` and `spawned`) is queued ahead of output.
+    /// `ownership`, `error`, `terminals`, `layout`, `templates`, `spawned`,
+    /// `panels`, `panel`, `panel_closed`, `panel_pinned`, `mcp_opened` and
+    /// `mcp`) is queued ahead of output.
     pub fn stream_attachment(&self) -> Option<AttachmentId> {
         match self {
             Self::Gap(gap) if gap.request.is_none() => Some(gap.attachment),

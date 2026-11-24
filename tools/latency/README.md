@@ -6,7 +6,7 @@ It needs only the system `python3` and its standard library. Run it with `python
 
 ## What it measures
 
-The harness starts the bridge command with piped stdin and stdout and speaks Combine's wire protocol (SPEC.md, "Wire protocol", version 4) over those pipes:
+The harness starts the bridge command with piped stdin and stdout and speaks Combine's wire protocol (SPEC.md, "Wire protocol", version 5) over those pipes:
 
 1. It sends `hello` and reads `welcome`.
 2. It sends `watch_terminals` and picks the terminal named by `--terminal`, or the one running terminal carrying `--label key=value`.

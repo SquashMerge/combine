@@ -18,9 +18,9 @@ _SPEC.loader.exec_module(el)
 
 class Encoding(unittest.TestCase):
     def test_hello_frame(self):
-        payload = b'{"type":"hello","protocol_version":4}'
+        payload = b'{"type":"hello","protocol_version":5}'
         self.assertEqual(
-            el.encode_control({"type": "hello", "protocol_version": 4}),
+            el.encode_control({"type": "hello", "protocol_version": 5}),
             (len(payload) + 1).to_bytes(4, "big") + b"\x01" + payload,
         )
 
@@ -67,7 +67,7 @@ class Decoding(unittest.TestCase):
         self.assertIsNone(decoder.next_frame())
 
     def test_frames_split_across_reads(self):
-        stream = el.encode_control({"type": "welcome", "protocol_version": 4, "host_id": "h"})
+        stream = el.encode_control({"type": "welcome", "protocol_version": 5, "host_id": "h"})
         stream += self.data_frame(1, 1, 1, b"x")
         decoder = el.FrameDecoder()
         got = []

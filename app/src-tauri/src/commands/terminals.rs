@@ -149,6 +149,12 @@ impl IpcTerminalEvent {
             | DaemonMessage::Layout(_)
             | DaemonMessage::Templates(_)
             | DaemonMessage::Spawned(_)
+            | DaemonMessage::Panels(_)
+            | DaemonMessage::Panel(_)
+            | DaemonMessage::PanelClosed(_)
+            | DaemonMessage::PanelPinned(_)
+            | DaemonMessage::McpOpened(_)
+            | DaemonMessage::Mcp(_)
             | DaemonMessage::Data(_) => return None,
         })
     }
@@ -837,5 +843,38 @@ mod tests {
             structured::<Display>(json!({ "foreground": 1 })).map(|_| ()),
             Err("malformed".to_string())
         );
+    }
+
+    #[test]
+    fn v5_daemon_messages_are_not_terminal_events() {
+        let space = "/Users/me/src/trellis";
+        let messages = [
+            json!({
+                "type": "panels", "request": 5, "space": space,
+                "panels": [{
+                    "id": "classes", "title": "Class diagram", "renderer": "mermaid",
+                    "revision": 7, "state": "validated", "error": null,
+                    "created_by": { "type": "agent", "slot": "claude" }
+                }],
+                "skipped": [], "error": null
+            }),
+            json!({
+                "type": "panel", "request": 12, "space": space, "id": "classes",
+                "revision": 7, "renderer": "mermaid",
+                "source": "classDiagram\n  Animal <|-- Duck\n",
+                "state": "validated", "error": null
+            }),
+            json!({ "type": "panel_closed", "request": 13, "space": space, "panel": "scratch-1" }),
+            json!({ "type": "panel_pinned", "request": 14, "space": space, "panel": "classes" }),
+            json!({ "type": "mcp_opened", "request": 1, "space": space }),
+            json!({
+                "type": "mcp",
+                "message": { "jsonrpc": "2.0", "id": 1, "result": { "isError": false } }
+            }),
+        ];
+        for message in &messages {
+            let decoded = decode(message);
+            assert!(IpcTerminalEvent::from_message(&decoded).is_none());
+        }
     }
 }
