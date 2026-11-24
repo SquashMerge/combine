@@ -1,0 +1,38 @@
+# Dependency update PRs. Every PR still needs ./tools/verify and an opencode review before it merges
+# (AGENTS.md). Versions are pinned exactly in Cargo.toml and app/web/package.json, and Dependabot
+# keeps them exact when it bumps them.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(cargo)"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+        # The JS engine for loaders and headless Mermaid validation gets a PR of its own: a bump needs
+        # the diagram-check tests and the tools/diagram-bench benchmark (docs/m2-s2-bench.md) re-run.
+        exclude-patterns: ["rquickjs*"]
+
+  - package-ecosystem: npm
+    directory: "/app/web"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(web)"
+    groups:
+      web-minor-and-patch:
+        update-types: ["minor", "patch"]
+        # Pele always gets a PR of its own, for every new release, so a new version is never missed or
+        # buried in a group. The daemon validates diagrams with its own vendored copy of the same
+        # release (crates/combined/src/adapters/loader/vendor/, PELE_VERSION and the hashes in
+        # adapters/loader/pele.rs), which Dependabot can't see. A Pele PR fails
+        # app/web/test/renderers/pins.test.ts on purpose until the vendored copy, its hashes and the
+        # SPEC stack line are updated to the same release in that PR.
+        exclude-patterns: ["pele"]
