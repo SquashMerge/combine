@@ -1,0 +1,80 @@
+.combine-markdown {
+  background: Canvas;
+  color: CanvasText;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.combine-markdown pre {
+  background: ButtonFace;
+  color: ButtonText;
+  padding: 8px 12px;
+  overflow: auto;
+}
+
+.combine-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.combine-markdown blockquote {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 3px solid GrayText;
+  color: GrayText;
+}
+
+.combine-markdown table {
+  border-collapse: collapse;
+}
+
+.combine-markdown th,
+.combine-markdown td {
+  border: 1px solid GrayText;
+  padding: 4px 8px;
+}
+
+.combine-markdown img {
+  max-width: 100%;
+}
+
+.combine-markdown [data-combine-open-url] {
+  color: LinkText;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.combine-markdown [data-combine-open-url]:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+
+.combine-markdown .hljs-comment,
+.combine-markdown .hljs-quote,
+.combine-markdown .hljs-meta {
+  color: GrayText;
+  font-style: italic;
+}
+
+.combine-markdown .hljs-keyword,
+.combine-markdown .hljs-built_in,
+.combine-markdown .hljs-type,
+.combine-markdown .hljs-literal,
+.combine-markdown .hljs-selector-tag,
+.combine-markdown .hljs-section {
+  font-weight: 600;
+}
+
+.combine-markdown .hljs-string,
+.combine-markdown .hljs-number,
+.combine-markdown .hljs-regexp,
+.combine-markdown .hljs-symbol,
+.combine-markdown .hljs-attr,
+.combine-markdown .hljs-attribute,
+.combine-markdown .hljs-title,
+.combine-markdown .hljs-addition {
+  color: LinkText;
+}
+
+.combine-markdown .hljs-deletion {
+  color: #b42318;
+}

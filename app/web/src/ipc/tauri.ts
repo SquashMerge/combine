@@ -10,13 +10,14 @@ import {
   HOSTS_SNAPSHOT_COMMAND,
   LAYOUT_EVENT,
   MUTATE_LAYOUT_COMMAND,
+  OPEN_URL_COMMAND,
   RETRY_HOST_COMMAND,
   SET_CLIENT_SPACE_STATE_COMMAND,
   SET_LAST_SPACE_COMMAND,
   UNWATCH_LAYOUT_COMMAND,
   WATCH_LAYOUT_COMMAND,
 } from './names';
-import type { ClientStatePort, HostsPort, LayoutPort } from './port';
+import type { ClientStatePort, HostsPort, LayoutPort, OpenUrlPort } from './port';
 
 export function createTauriHostsPort(): HostsPort {
   return {
@@ -61,6 +62,18 @@ export function createTauriLayoutPort(): LayoutPort {
     },
     onLayoutEvent(listener) {
       return listen(LAYOUT_EVENT, (event) => listener(parseLayoutEvent(event.payload)));
+    },
+  };
+}
+
+export function createTauriOpenUrlPort(): OpenUrlPort {
+  return {
+    async openUrl(url) {
+      try {
+        await invoke(OPEN_URL_COMMAND, { url });
+      } catch {
+        // Refused or failed: the link stays inert.
+      }
     },
   };
 }
