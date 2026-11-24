@@ -10,16 +10,15 @@ function anchorWithin(container: HTMLElement, target: EventTarget | null): Eleme
 
 /**
  * Routes clicks and Enter on rendered links to the system browser. An anchor is never followed
- * in the webview; only one carrying the sanitizer's marker is passed on to the port.
+ * in the webview; only one carrying the sanitizer's marker is passed on to the port. The marker
+ * is read from the nearest anchor only, so an unmarked anchor nested in a marked one opens nothing.
  */
 export function attachRenderedLinks(container: HTMLElement, port: OpenUrlPort): () => void {
   const follow = (event: Event): void => {
-    if (anchorWithin(container, event.target) === null) return;
+    const anchor = anchorWithin(container, event.target);
+    if (anchor === null) return;
     event.preventDefault();
-    const target = event.target as Element;
-    const marked = target.closest(`[${OPEN_URL_ATTRIBUTE}]`);
-    if (marked === null || !container.contains(marked)) return;
-    const url = marked.getAttribute(OPEN_URL_ATTRIBUTE);
+    const url = anchor.getAttribute(OPEN_URL_ATTRIBUTE);
     if (url !== null) void port.openUrl(url);
   };
   const onKeyDown = (event: KeyboardEvent): void => {

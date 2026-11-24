@@ -3,6 +3,7 @@ import { attachRenderedLinks } from '../../src/panels/renderedLinks';
 import { OPEN_URL_ATTRIBUTE } from '../../src/renderers/links';
 import { renderMarkdown } from '../../src/renderers/markdown/render';
 import { renderMermaid } from '../../src/renderers/mermaid/render';
+import { sanitize } from '../../src/renderers/sanitize/sanitize';
 import { MERMAID_FIXTURES } from '../fixtures/renderers';
 import { stubCanvas } from '../support/canvas';
 import { MemoryOpenUrlPort } from '../support/memoryOpenUrlPort';
@@ -169,6 +170,34 @@ describe('attachRenderedLinks', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(key.defaultPrevented).toBe(false);
     expect(port.urls).toEqual([]);
+  });
+
+  it('opens nothing for an unmarked anchor nested in a marked one', () => {
+    const nested = sanitize(
+      '<svg><a href="https://outer.example/"><a href="/inert"><text>inner</text></a></a></svg>',
+      'svg',
+    );
+    container.append(nested);
+    const inner = container.querySelector(`svg a[${OPEN_URL_ATTRIBUTE}] a`);
+    const text = inner?.querySelector('text');
+    if (inner === null || inner === undefined || text === null || text === undefined) {
+      throw new Error('expected an unmarked anchor inside a marked one');
+    }
+    expect(inner.hasAttribute(OPEN_URL_ATTRIBUTE)).toBe(false);
+    const clicked = click(text);
+    const entered = press(inner, { key: 'Enter' });
+    expect(clicked.defaultPrevented).toBe(true);
+    expect(entered.defaultPrevented).toBe(true);
+    expect(port.urls).toEqual([]);
+  });
+
+  it('still opens a marked anchor from its own child', () => {
+    const nested = sanitize('<svg><a href="https://outer.example/"><text>outer</text></a></svg>', 'svg');
+    container.append(nested);
+    const text = container.querySelector(`svg a[${OPEN_URL_ATTRIBUTE}="https://outer.example/"] text`);
+    if (text === null) throw new Error('expected a marked anchor with a text child');
+    click(text);
+    expect(port.urls).toEqual(['https://outer.example/']);
   });
 
   it('stops reacting once detached', () => {
