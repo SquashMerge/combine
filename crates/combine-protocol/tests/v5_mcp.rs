@@ -127,8 +127,12 @@ fn mcp_message_must_be_one_json_object() {
     daemon_detail(missing);
     for key in ["mcp_client", "mcp_daemon"] {
         let text = golden_json(key);
-        client_detail(&text[..text.len() - 1]);
-        daemon_detail(&format!("{text} x"));
+        let truncated = &text[..text.len() - 1];
+        let trailing = format!("{text} x");
+        for json in [truncated, trailing.as_str()] {
+            client_detail(json);
+            daemon_detail(json);
+        }
     }
     assert_eq!(client_message(&mcp_text("{}")).message.as_str(), "{}");
 }
@@ -163,24 +167,40 @@ fn mcp_equality_is_by_text() {
     assert_eq!(json_rpc(r#"{"a":1,"b":2}"#), json_rpc(r#"{"a":1,"b":2}"#));
 }
 
-const AC9_MESSAGE: &str = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"create_panel","arguments":{"title":"Flow","source":"graph TD\n  A --> B\n","z_last":true,"a_first":[1,{"nested":{"deeper":[null,false,"é","é"]}}]},"_meta":{"progressToken":42}},"x-unknown":{"big":123456789012345678901234567890,"precise":0.1000000000000000055511151231257827}}"#;
+/// The AC9 message: one raw `é` (two UTF-8 bytes) and one six-character JSON escape of it. The
+/// escape is built from its parts so that nothing can fold it into the raw character.
+fn ac9_message() -> String {
+    let escape = format!("{}u00e9", '\\');
+    let head = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"create_panel","arguments":{"title":"Flow","source":"graph TD\n  A --> B\n","z_last":true,"a_first":[1,{"nested":{"deeper":[null,false,""#;
+    let tail = r#"]}}]},"_meta":{"progressToken":42}},"x-unknown":{"big":123456789012345678901234567890,"precise":0.1000000000000000055511151231257827}}"#;
+    format!("{head}\u{e9}\",\"{escape}\"{tail}")
+}
 
 #[test]
 fn mcp_message_keeps_unknown_and_nested_fields_byte_for_byte() {
-    let frame = control_frame(&mcp_text(AC9_MESSAGE));
-    for message in [
+    let message = ac9_message();
+    let escape = format!("{}u00e9", '\\');
+    assert_eq!(escape.as_bytes(), [0x5c, 0x75, 0x30, 0x30, 0x65, 0x39]);
+    assert!(message.contains('\u{e9}') && message.contains(&escape));
+
+    let frame = control_frame(&mcp_text(&message));
+    for encoded in [
         ClientMessage::decode(&frame).unwrap().0.encode().unwrap(),
         DaemonMessage::decode(&frame).unwrap().0.encode().unwrap(),
     ] {
-        assert_eq!(message, frame);
+        assert_eq!(encoded, frame);
+        let mut needle = vec![0xc3, 0xa9, b'"', b',', b'"'];
+        needle.extend_from_slice(escape.as_bytes());
+        assert!(encoded.windows(needle.len()).any(|w| w == needle));
     }
-    let Ok(ClientMessage::Mcp(mcp)) = decode_client(&mcp_text(AC9_MESSAGE)) else {
+    let Ok(ClientMessage::Mcp(mcp)) = decode_client(&mcp_text(&message)) else {
         panic!("not an mcp message");
     };
-    assert_eq!(mcp.message.as_str(), AC9_MESSAGE);
-    assert!(mcp.message.as_str().contains(r"é"));
+    assert_eq!(mcp.message.as_str(), message);
+    assert!(mcp.message.as_str().contains('\u{e9}'));
+    assert!(mcp.message.as_str().contains(&escape));
     let kept: Value = serde_json::from_str(mcp.message.as_str()).unwrap();
-    let original: Value = serde_json::from_str(AC9_MESSAGE).unwrap();
+    let original: Value = serde_json::from_str(&message).unwrap();
     assert_eq!(kept, original);
 }
 

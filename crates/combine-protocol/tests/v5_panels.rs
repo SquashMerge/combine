@@ -395,6 +395,7 @@ fn every_v5_panel_message_rejects_bad_json() {
         "panel",
         "panel_closed",
         "panel_pinned",
+        "mcp_opened",
     ] {
         let text = golden_json(key);
         daemon_detail(&text[..text.len() - 1]);
