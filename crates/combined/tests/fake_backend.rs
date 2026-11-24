@@ -1075,6 +1075,8 @@ fn testing_files_start_with_the_feature_gate() {
             "fake_backend.rs",
             "file_store.rs",
             "mod.rs",
+            "scratch_store.rs",
+            "wall_clock.rs",
             "world.rs"
         ]
     );
