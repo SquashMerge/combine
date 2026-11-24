@@ -222,7 +222,7 @@ fn record_appends_a_revision_line() {
     assert!(pass.contains(&format!("spec_rev={SPEC_REVISION}")));
     assert!(pass.contains("source_rev="));
     assert!(pass.ends_with("result=pass"));
-    assert_eq!(SPEC_REVISION, 23);
+    assert_eq!(SPEC_REVISION, 24);
 
     let fail = record(
         "case_two",

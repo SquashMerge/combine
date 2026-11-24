@@ -1,6 +1,6 @@
 # M2 plan: agent-built diagrams
 
-This is the working plan for SPEC.md milestone 2 (rev 23). SPEC.md is the source of truth for behavior; this file only orders the work.
+This is the working plan for SPEC.md milestone 2 (rev 24). SPEC.md is the source of truth for behavior; this file only orders the work.
 
 M2 covers "MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation" (SPEC roadmap). M0 handed it this done criterion: **M2 is done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.**
 
@@ -73,9 +73,9 @@ The shortest path to the done criterion is S1 → S2 → S3 → S4 → S9.
 The owner decided these on 2026-11-23. They take the plan's recommendations unless noted otherwise.
 
 - **D1. Where validation runs.** In the daemon, inside the isolate in `adapters/loader/`, behind a `DiagramCheck` port. SPEC requires validation with no client attached, and the JS-engine rule (arch-guard `js-engine-only-in-loader`) puts the engine in this adapter. The client only reports render status.
-- **D2. Which JS engine.** `rquickjs`, pinned exactly. S2's benchmark confirms it; if Pele misses the 5 s wait on a 200 KB diagram, fall back to `deno_core`. M3's loaders use the same engine. This closes SPEC's open question on `rquickjs` versus `deno_core` once S2 confirms.
-- **D3. Pele and Mermaid versions.** Pin the upstream npm `pele` exactly, at 1.10.0 or later. Vendor the same artifact, with its LICENSE and SHA-256, under `adapters/loader/`; a test checks that the two hashes match. Don't use Trellis's patched build. **Spec gap:** SPEC says "Mermaid 12.1.0 syntax", and Pele doesn't name a Mermaid version. S2 confirms the syntax version and fixes SPEC and the tool descriptions.
-- **D4. Render or parse only.** Full `render()` is expected, and S2 proves it. Pele measures text without a DOM and reports `PeleError { code, line, column, snippet }`. If `render()` can't run headless, `parse()` gives `validated (parser only)`. This closes the open question.
+- **D2. Which JS engine.** `rquickjs`, pinned exactly. S2's benchmark confirms it; if Pele misses the 5 s wait on a 200 KB diagram, fall back to `deno_core`. M3's loaders use the same engine. This closes SPEC's open question on `rquickjs` versus `deno_core` once S2 confirms. S2 outcome: confirmed, rquickjs 0.14.0 (docs/m2-s2-spike.md, docs/m2-s2-bench.md).
+- **D3. Pele and Mermaid versions.** Pin the upstream npm `pele` exactly, at 1.10.0 or later. Vendor the same artifact, with its LICENSE and SHA-256, under `adapters/loader/`; a test checks that the two hashes match. Don't use Trellis's patched build. **Spec gap:** SPEC says "Mermaid 12.1.0 syntax", and Pele doesn't name a Mermaid version. S2 confirms the syntax version and fixes SPEC and the tool descriptions. S2 outcome: Pele 1.13.0, whose README targets Mermaid 12.1.0, so SPEC stands.
+- **D4. Render or parse only.** Full `render()` is expected, and S2 proves it. Pele measures text without a DOM and reports `PeleError { code, line, column, snippet }`. If `render()` can't run headless, `parse()` gives `validated (parser only)`. This closes the open question. S2 outcome: full render() runs headless.
 - **D5. How the MCP channel connects.** Over `combined.sock` (wire v5, `mcp_open` then `mcp` frames), on the same host, never over ssh. The shim duplicates the daemon's socket lookup, and a test pins that the two agree. SPEC should say "the daemon's Unix socket".
 - **D6. Connection cap.** MCP connections get their own cap, separate from the 64 client connections. SPEC changes in S4.
 - **D7. MCP library.** `rmcp`, pinned exactly, if its transport fits our frames. Otherwise implement only `initialize`, `tools/list`, `tools/call` and `ping`.

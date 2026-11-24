@@ -1070,6 +1070,7 @@ fn testing_files_start_with_the_feature_gate() {
         names,
         [
             "control.rs",
+            "diagram_check.rs",
             "fake_attachment.rs",
             "fake_backend.rs",
             "file_store.rs",
