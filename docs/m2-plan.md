@@ -62,7 +62,7 @@ The shortest path to the done criterion is S1 → S2 → S3 → S4 → S9.
 
 ## How the work runs
 
-- **One GitHub issue per slice**, in milestone M2, each run through `/feature-factory:feature <issue>`. S1 is the pilot.
+- **One GitHub issue per slice**, in milestone M2, each run through `/feature-factory:feature <issue>`. S1 is the pilot. The issues: S1 #44, S2 #45, S3 #46, S4 #47, S5 #48, S6 #49, S7 #50, S8 #51, S9 #52.
 - **One worktree and one `CARGO_TARGET_DIR` per slice.** S2's benchmark runs through `heavy.sh`.
 - **Real cores are isolated.** S9's agent runs in an isolated core. Never register `combine mcp` in the user-global agent config: every agent on the machine, including those on the default core, would reach the daemon. Use a project `.mcp.json` or `--mcp-config`.
 
