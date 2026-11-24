@@ -644,7 +644,8 @@ def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], r
                 and tok(k + 3).is_("punct", "=") and tok(k + 4).kind == "str"):
             arg = tok(k + 4).text
         elif (t.kind == "ident" and t.text in _INCLUDES and tok(k + 1).is_("punct", "!")
-              and tok(k + 2).is_("punct", "(") and tok(k + 3).kind == "str"):
+              and any(tok(k + 2).is_("punct", d) for d in "([{") and tok(k + 3).kind == "str"):
+            # A macro takes any delimiter: `include!("x")`, `include!["x"]` and `include! { "x" }` all compile.
             arg = tok(k + 3).text
         if arg is None:
             continue

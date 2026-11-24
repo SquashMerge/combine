@@ -485,6 +485,27 @@ class GuardTest(unittest.TestCase):
             ("guard-skip", ".factory-sandboxes"),
         )
 
+    def test_brace_and_bracket_include_into_either_scratch_root_is_reported(self):
+        for root in (".factory", ".factory-sandboxes"):
+            for call in ('include! {{ "../../../{r}/payload.rs" }}', 'include!["../../../{r}/payload.rs"];'):
+                with self.subTest(root=root, call=call):
+                    self.assertFlags(
+                        {
+                            "crates/combined/src/main.rs": call.format(r=root) + "\nfn main() {}\n",
+                            f"{root}/payload.rs": "use rquickjs::Runtime;\n",
+                        },
+                        ("guard-skip", root),
+                    )
+
+    def test_brace_and_bracket_include_reach_banned_paths(self):
+        # The same delimiters reach a `path_ban` target outside any skip.
+        for call in ('include! { "../../../spike/x.rs" }', 'include!["../../../spike/x.rs"];'):
+            with self.subTest(call=call):
+                self.assertFlags(
+                    {"crates/combined/src/main.rs": call + "\nfn main() {}\n", "spike/x.rs": "\n"},
+                    ("no-production-dependency-on-non-production", "crates/combined/src/main.rs"),
+                )
+
     def test_frontend_import_into_factory_run_state_is_reported(self):
         self.assertFlags(
             {
