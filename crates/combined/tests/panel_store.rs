@@ -4,14 +4,14 @@
 use combine_protocol::{PanelState, Renderer};
 use combined::core::PanelRead;
 use combined::core::{
-    panel_reply_len, Core, CoreConfig, FileWrite, IdSource, PanelApiError, PanelCreate,
-    PanelEffect, PanelEvent, PanelFolder, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd,
-    SaveReport, SaveTicket,
+    encode_scratch_meta, panel_reply_len, Core, CoreConfig, FileWrite, IdSource, PanelApiError,
+    PanelCreate, PanelEffect, PanelEvent, PanelFolder, PanelStore, PanelTiming, PanelUpdate,
+    PanelView, SaveEnd, SaveReport, SaveTicket, SCRATCH_ID_OPEN, SCRATCH_TTL_MS,
 };
 use combined::model::{ContentHash, Lifetime, Millis, SpaceId};
 use combined::ports::{
     Capabilities, DiagramCheckError, DiagramFailure, DiagramVerdict, DirListing, EntryKind,
-    FailureCode, FileMark, ListedEntry, ScratchListing, StoreError,
+    FailureCode, FileMark, ListedEntry, ScratchDir, ScratchListing, StoreError,
 };
 use sha2::{Digest, Sha256};
 
@@ -1348,9 +1348,14 @@ fn duplicate_keys_return_the_panel_whose_id_sorts_first() {
     let json = br#"{"version":1,"renderer":"markdown","idempotency_key":"k"}"#;
     let mut rig = Rig::new();
     rig.store
-        .apply_listing(&space(), listing(&["b", "a"]), rig.t());
+        .apply_listing(&space(), listing(&["b", "c"]), rig.t());
     rig.fx();
     rig.pair("b", found(json), found(b"b"));
+    rig.pair("c", found(json), found(b"c"));
+    rig.store.close(&space(), "b", rig.t()).unwrap();
+    rig.store
+        .apply_listing(&space(), listing(&["a", "b", "c"]), rig.t());
+    rig.fx();
     rig.pair("a", found(json), found(b"a"));
     let mut create = create_of("z", Renderer::Markdown, "new");
     create.idempotency_key = Some("k".to_owned());
@@ -1364,7 +1369,7 @@ fn duplicate_keys_return_the_panel_whose_id_sorts_first() {
         .store
         .create(&space(), create, rig.t(), 0, &mut rig.ids)
         .unwrap();
-    assert_eq!(view.id, "b");
+    assert_eq!(view.id, "c");
 }
 
 // ---- AC8
@@ -2064,4 +2069,1177 @@ fn field_rules_refuse_before_any_work() {
         "update must change the content or the title"
     );
     assert!(rig.fx().is_empty());
+}
+
+// ---- scratch panels (A2)
+
+const EVERY: u64 = 3_600_000;
+const DAY: u64 = 86_400_000;
+const T: u64 = 1_000;
+
+fn sdir(id: &str) -> ScratchDir {
+    ScratchDir {
+        key: space().sha256_hex(),
+        panel: id.to_owned(),
+    }
+}
+
+fn meta_json(changed_at_ms: u64) -> Vec<u8> {
+    encode_scratch_meta(&space(), changed_at_ms)
+}
+
+fn scratch_of(id: &str, content: &str) -> PanelCreate {
+    let mut create = create_of(id, Renderer::Markdown, content);
+    create.lifetime = Lifetime::Scratch;
+    create
+}
+
+fn scratch_saves(effects: &[PanelEffect]) -> Vec<(SaveTicket, ScratchDir, Vec<FileWrite>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            PanelEffect::Save {
+                ticket,
+                at: PanelFolder::Scratch(dir),
+                files,
+            } => Some((*ticket, dir.clone(), files.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn scratch_deletes(effects: &[PanelEffect]) -> Vec<(SaveTicket, ScratchDir)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            PanelEffect::Delete {
+                ticket,
+                at: PanelFolder::Scratch(dir),
+                files,
+            } => {
+                assert!(files.is_empty());
+                Some((*ticket, dir.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn workspace_saves(effects: &[PanelEffect]) -> Vec<(SaveTicket, Vec<FileWrite>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            PanelEffect::Save {
+                ticket,
+                at: PanelFolder::Workspace { .. },
+                files,
+            } => Some((*ticket, files.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn skipped_of(rig: &Rig) -> Vec<(String, String)> {
+    rig.store
+        .list(&space())
+        .unwrap()
+        .skipped
+        .into_iter()
+        .map(|skip| (skip.panel, skip.reason))
+        .collect()
+}
+
+fn open_skip(id: &str) -> Vec<(String, String)> {
+    vec![(id.to_owned(), SCRATCH_ID_OPEN.to_owned())]
+}
+
+fn has_listing(events: &[PanelEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, PanelEvent::Listing { .. }))
+}
+
+impl Rig {
+    fn screate(&mut self, id: &str, content: &str, wall: u64) -> Result<PanelView, PanelApiError> {
+        self.store.create(
+            &space(),
+            scratch_of(id, content),
+            self.t(),
+            wall,
+            &mut self.ids,
+        )
+    }
+
+    /// Creates a Scratch Markdown panel and applies its Save.
+    fn ssaved(&mut self, id: &str, content: &str, wall: u64) -> PanelView {
+        let view = self.screate(id, content, wall).unwrap();
+        self.finish_save();
+        self.fx();
+        self.ev();
+        view
+    }
+
+    fn supdate(
+        &mut self,
+        id: &str,
+        update: PanelUpdate,
+        wall: u64,
+    ) -> Result<PanelView, PanelApiError> {
+        self.store
+            .update(&space(), id, update, self.t(), wall, &mut self.ids)
+    }
+
+    fn sweep(&mut self, now: u64, wall: u64) -> Vec<PanelEffect> {
+        self.set(now);
+        self.store.tick(self.t(), wall);
+        self.fx()
+    }
+
+    /// A loaded space whose scratch folders `(id, changed_at_ms)` were read at start.
+    fn from_scratch(items: &[(&str, u64)]) -> Rig {
+        let timing = PanelTiming::default();
+        let mut rig = Rig {
+            store: PanelStore::new(timing),
+            ids: Counter(1_000),
+            now: 10_000,
+            timing,
+        };
+        rig.store.start(rig.t());
+        rig.store.add_space(&space(), rig.t());
+        rig.store.apply_listing(&space(), Ok(None), rig.t());
+        let dirs = items.iter().map(|(id, _)| sdir(id)).collect();
+        rig.store.apply_scratch_listing(
+            Ok(ScratchListing {
+                dirs,
+                truncated: false,
+            }),
+            rig.t(),
+        );
+        for (id, at) in items {
+            let now = rig.t();
+            let folder = PanelFolder::Scratch(sdir(id));
+            rig.store.apply_read(
+                &folder,
+                "scratch.json",
+                found(&meta_json(*at)),
+                now,
+                &mut rig.ids,
+            );
+            rig.store
+                .apply_read(&folder, "panel.json", found(md_json()), now, &mut rig.ids);
+            rig.store.apply_read(
+                &folder,
+                "content.md",
+                found(id.as_bytes()),
+                now,
+                &mut rig.ids,
+            );
+        }
+        rig.fx();
+        rig.ev();
+        rig
+    }
+
+    /// A scratch panel `x` open while the folder `panels/x` appeared outside. Returns every
+    /// effect taken on the way.
+    fn shadowed() -> (Rig, Vec<PanelEffect>) {
+        let mut rig = Rig::new();
+        rig.ssaved("x", "s1", T);
+        rig.store
+            .apply_change(&space(), "panels/x/panel.json", rig.t());
+        rig.store.apply_change(&space(), "panels", rig.t());
+        rig.tick(rig.timing.debounce_ms);
+        let mut all = rig.fx();
+        rig.store.apply_listing(&space(), listing(&["x"]), rig.t());
+        all.extend(rig.fx());
+        (rig, all)
+    }
+}
+
+fn no_workspace_read_of(effects: &[PanelEffect], id: &str) {
+    assert!(
+        reads(effects).iter().all(|(panel, _)| panel != id),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn scratch_create_saves_scratch_json_first_under_the_space_key() {
+    let mut rig = Rig::new();
+    let view = rig.screate("x", "hello", 5_000).unwrap();
+    assert_eq!(view.lifetime, Lifetime::Scratch);
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (_, dir, files) = all.remove(0);
+    assert_eq!(dir, sdir("x"));
+    assert_eq!(dir.key, space().sha256_hex());
+    let names: Vec<&str> = files.iter().map(|f| f.file).collect();
+    assert_eq!(names, ["scratch.json", "content.md", "panel.json"]);
+    assert!(files.iter().all(|f| f.expected.is_none()));
+    assert_eq!(files[0].bytes, meta_json(5_000));
+    assert!(workspace_saves(&fx).is_empty());
+}
+
+#[test]
+fn scratch_panel_expires_7_days_after_its_last_change() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    assert!(scratch_deletes(&rig.sweep(20_000, T + SCRATCH_TTL_MS - 1)).is_empty());
+    let fx = rig.sweep(20_000 + EVERY, T + SCRATCH_TTL_MS);
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+    assert_eq!(scratch_deletes(&fx)[0].1, sdir("x"));
+    assert_eq!(
+        rig.ev()
+            .iter()
+            .filter(|e| matches!(
+                e,
+                PanelEvent::Changed {
+                    state: PanelState::Removed,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(rig.get("x").0.state, PanelState::Removed);
+}
+
+#[test]
+fn a_scratch_panel_created_this_run_expires_without_a_restart() {
+    let mut rig = Rig::new();
+    assert!(scratch_deletes(&rig.sweep(20_000, 0)).is_empty());
+    rig.ssaved("x", "a", 50_000);
+    assert!(scratch_deletes(&rig.sweep(20_000 + EVERY, 50_000 + SCRATCH_TTL_MS - 1)).is_empty());
+    let fx = rig.sweep(20_000 + 2 * EVERY, 50_000 + SCRATCH_TTL_MS);
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+}
+
+#[test]
+fn update_restamps_changed_at() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.supdate("x", content_update("b"), T + 9_000).unwrap();
+    let fx = rig.fx();
+    let (_, dir, files) = scratch_saves(&fx).remove(0);
+    assert_eq!(dir, sdir("x"));
+    let names: Vec<&str> = files.iter().map(|f| f.file).collect();
+    assert_eq!(names, ["scratch.json", "content.md"]);
+    assert_eq!(files[0].bytes, meta_json(T + 9_000));
+    rig.supdate("x", title_update(Some("t")), T + 9_500)
+        .unwrap();
+}
+
+#[test]
+fn an_update_on_day_6_prevents_expiry_on_day_7() {
+    let mut rig = Rig::from_scratch(&[("x", T)]);
+    rig.supdate("x", content_update("n"), T + 6 * DAY).unwrap();
+    rig.finish_save();
+    rig.fx();
+    assert!(scratch_deletes(&rig.sweep(20_000, T + 7 * DAY + 1)).is_empty());
+    let fx = rig.sweep(20_000 + EVERY, T + 13 * DAY + 1);
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+}
+
+#[test]
+fn close_deletes_a_scratch_panel_and_reports_removed() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    let view = rig.store.close(&space(), "x", rig.t()).unwrap();
+    assert_eq!(view.state, PanelState::Removed);
+    assert_eq!(view.lifetime, Lifetime::Scratch);
+    let fx = rig.fx();
+    assert_eq!(
+        scratch_deletes(&fx),
+        [(scratch_deletes(&fx)[0].0, sdir("x"))]
+    );
+    assert_eq!(rig.get("x").0.state, PanelState::Removed);
+    assert!(rig.store.list(&space()).unwrap().panels.is_empty());
+    assert!(changed(&rig.ev())
+        .iter()
+        .any(|(_, _, state)| *state == PanelState::Removed));
+}
+
+#[test]
+fn pin_writes_into_workspace_then_deletes_scratch() {
+    let mut rig = Rig::new();
+    let before = rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let fx = rig.fx();
+    let (ticket, files) = workspace_saves(&fx).remove(0);
+    assert_eq!(files[0].file, "content.md");
+    assert_eq!(files[0].expected, None);
+    assert_eq!(files[1].file, "panel.json");
+    assert_eq!(files[1].expected, Some(FileMark::Missing));
+    assert!(scratch_deletes(&fx).is_empty());
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Persistent);
+    assert_eq!(view.revision, before.revision);
+    assert_eq!(view.state, before.state);
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    let fx = rig.fx();
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+    assert_eq!(scratch_deletes(&fx)[0].1, sdir("x"));
+    assert_eq!(rig.get("x").0.lifetime, Lifetime::Persistent);
+}
+
+#[test]
+fn pin_of_a_persistent_panel_is_not_scratch() {
+    let mut rig = Rig::new();
+    rig.saved("p", "one");
+    assert_eq!(
+        rig.store.pin(&space(), "p", rig.t()).unwrap_err(),
+        PanelApiError::NotScratch { id: "p".to_owned() }
+    );
+    assert!(rig.fx().is_empty());
+}
+
+#[test]
+fn scratch_folder_without_valid_scratch_json_is_never_swept() {
+    let timing = PanelTiming::default();
+    let mut store = started_store(timing);
+    let mut ids = Counter(1);
+    store.add_space(&space(), Millis(0));
+    store.apply_listing(&space(), Ok(None), Millis(0));
+    store.take_effects();
+    store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: vec![sdir("a"), sdir("b")],
+            truncated: false,
+        }),
+        Millis(0),
+    );
+    store.apply_read(
+        &PanelFolder::Scratch(sdir("a")),
+        "scratch.json",
+        PanelRead::Missing,
+        Millis(0),
+        &mut ids,
+    );
+    store.apply_read(
+        &PanelFolder::Scratch(sdir("b")),
+        "scratch.json",
+        found(b"{"),
+        Millis(0),
+        &mut ids,
+    );
+    store.take_effects();
+    for n in 0..3 {
+        store.tick(Millis(n * EVERY), 100 * DAY);
+        assert!(scratch_deletes(&store.take_effects()).is_empty());
+    }
+}
+
+#[test]
+fn a_pinned_panel_is_never_swept() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    rig.finish_save();
+    rig.fx();
+    let revision = rig.get("x").0.revision;
+    rig.ev();
+    assert!(scratch_deletes(&rig.sweep(20_000, T + 8 * DAY)).is_empty());
+    let view = rig.get("x").0;
+    assert_eq!(
+        (view.lifetime, view.revision),
+        (Lifetime::Persistent, revision)
+    );
+    assert!(rig.ev().is_empty());
+}
+
+#[test]
+fn a_sweep_skips_a_pin_in_flight() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, files) = workspace_saves(&rig.fx()).remove(0);
+    assert!(scratch_deletes(&rig.sweep(20_000, T + SCRATCH_TTL_MS + 1)).is_empty());
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert_eq!(scratch_deletes(&rig.fx()).len(), 1);
+    assert!(scratch_deletes(&rig.sweep(20_000 + EVERY, T + 2 * SCRATCH_TTL_MS)).is_empty());
+}
+
+#[test]
+fn close_remove_and_pin_clear_the_stamp() {
+    for how in ["close", "remove", "pin"] {
+        let mut rig = Rig::new();
+        rig.ssaved("x", "a", T);
+        match how {
+            "close" => {
+                rig.store.close(&space(), "x", rig.t()).unwrap();
+            }
+            "remove" => {
+                rig.store.remove(&space(), "x", rig.t()).unwrap();
+            }
+            _ => {
+                rig.store.pin(&space(), "x", rig.t()).unwrap();
+                rig.finish_save();
+            }
+        }
+        rig.fx();
+        assert!(
+            scratch_deletes(&rig.sweep(20_000, T + 3 * SCRATCH_TTL_MS)).is_empty(),
+            "{how}"
+        );
+    }
+}
+
+fn duplicate_rig() -> Rig {
+    let timing = PanelTiming::default();
+    let mut rig = Rig {
+        store: PanelStore::new(timing),
+        ids: Counter(1_000),
+        now: 10_000,
+        timing,
+    };
+    rig.store.start(rig.t());
+    rig.store.add_space(&space(), rig.t());
+    rig.store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: vec![sdir("x")],
+            truncated: false,
+        }),
+        rig.t(),
+    );
+    rig.store.apply_listing(&space(), listing(&["x"]), rig.t());
+    rig.fx();
+    let now = rig.t();
+    rig.store.apply_read(
+        &PanelFolder::Scratch(sdir("x")),
+        "scratch.json",
+        found(&meta_json(T)),
+        now,
+        &mut rig.ids,
+    );
+    let fx = rig.fx();
+    assert!(fx.iter().all(|effect| !matches!(
+        effect,
+        PanelEffect::Read {
+            at: PanelFolder::Scratch(_),
+            ..
+        }
+    )));
+    assert_eq!(logs(&fx).len(), 1, "{fx:?}");
+    assert!(logs(&fx)[0].contains("isn't loaded"));
+    rig.pair("x", found(md_json()), found(b"workspace"));
+    rig.fx();
+    rig.ev();
+    rig
+}
+
+#[test]
+fn a_sweep_deletes_the_expired_duplicate_folder() {
+    let mut rig = duplicate_rig();
+    let fx = rig.sweep(20_000, T + SCRATCH_TTL_MS + 1);
+    let gone = scratch_deletes(&fx);
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].1, sdir("x"));
+    rig.store.apply_deleted(gone[0].0, done(&[]), rig.t());
+    assert!(scratch_deletes(&rig.sweep(20_000 + EVERY, T + SCRATCH_TTL_MS + 2)).is_empty());
+}
+
+#[test]
+fn an_interrupted_pin_duplicate_never_removes_the_live_persistent_panel() {
+    let mut rig = duplicate_rig();
+    let before = rig.get("x").0;
+    let fx = rig.sweep(20_000, T + SCRATCH_TTL_MS + 1);
+    for (ticket, _) in scratch_deletes(&fx) {
+        rig.store.apply_deleted(ticket, done(&[]), rig.t());
+    }
+    let after = rig.get("x").0;
+    assert_eq!(
+        (after.state, after.revision, after.lifetime),
+        (before.state, before.revision, before.lifetime)
+    );
+    assert!(rig.ev().is_empty());
+}
+
+fn shadow_release(how: &str) {
+    let (mut rig, all) = Rig::shadowed();
+    no_workspace_read_of(&all, "x");
+    let panels = rig.store.list(&space()).unwrap().panels;
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].lifetime, Lifetime::Scratch);
+    assert_eq!(skipped_of(&rig), open_skip("x"));
+    let (view, source) = rig.get("x");
+    assert_eq!((view.lifetime, source.as_str()), (Lifetime::Scratch, "s1"));
+    assert!(has_listing(&rig.ev()));
+    for n in 0..99 {
+        rig.md(&format!("p{n:02}"), "x");
+    }
+    assert_eq!(
+        rig.create("extra", Renderer::Markdown, "x").unwrap_err(),
+        PanelApiError::PanelLimit {
+            count: 100,
+            limit: 100
+        }
+    );
+    rig.fx();
+    let scratch_rev = rig.get("x").0.revision;
+    let fx = match how {
+        "close" => {
+            rig.store.close(&space(), "x", rig.t()).unwrap();
+            rig.fx()
+        }
+        "remove" => {
+            rig.store.remove(&space(), "x", rig.t()).unwrap();
+            rig.fx()
+        }
+        _ => {
+            let now = rig.now + EVERY;
+            rig.sweep(now, T + SCRATCH_TTL_MS + 1)
+        }
+    };
+    assert_eq!(scratch_deletes(&fx).len(), 1, "{how}");
+    assert_eq!(reads(&fx), [("x".to_owned(), "panel.json")], "{how}");
+    assert!(skipped_of(&rig).is_empty());
+    rig.pair("x", found(md_json()), found(b"w1"));
+    let (view, source) = rig.get("x");
+    assert_eq!(view.lifetime, Lifetime::Persistent);
+    assert_eq!(source, "w1");
+    assert_eq!(view.state, PanelState::Validated);
+    assert!(view.revision > scratch_rev);
+    let mine = rig.store.list(&space()).unwrap().panels;
+    assert_eq!(mine.iter().filter(|p| p.id == "x").count(), 1);
+}
+
+#[test]
+fn a_workspace_folder_with_a_live_scratch_id_is_skipped_until_the_scratch_panel_goes() {
+    for how in ["close", "remove", "sweep"] {
+        shadow_release(how);
+    }
+}
+
+#[test]
+fn a_pin_into_a_skipped_folder_compares_both_files_and_rolls_back_without_a_second_record() {
+    let (mut rig, _) = Rig::shadowed();
+    rig.ev();
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let fx = rig.fx();
+    let (ticket, files) = workspace_saves(&fx).remove(0);
+    assert_eq!(files[0].file, "content.md");
+    assert_eq!(files[0].expected, Some(FileMark::Missing));
+    assert_eq!(files[1].file, "panel.json");
+    assert_eq!(files[1].expected, Some(FileMark::Missing));
+    assert!(skipped_of(&rig).is_empty());
+    rig.store.apply_saved(
+        ticket,
+        SaveReport {
+            written: Vec::new(),
+            end: SaveEnd::Conflict { file: "content.md" },
+        },
+        rig.t(),
+    );
+    let fx = rig.fx();
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Scratch);
+    assert_eq!(
+        view.file_error.as_deref(),
+        Some("Couldn't pin: .workspace/panels/x/content.md changed while it was written")
+    );
+    assert!(deletes(&fx).is_empty());
+    no_workspace_read_of(&fx, "x");
+    assert_eq!(skipped_of(&rig), open_skip("x"));
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 1);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, files) = workspace_saves(&rig.fx()).remove(0);
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert_eq!(scratch_deletes(&rig.fx()).len(), 1);
+    assert_eq!(rig.get("x").0.lifetime, Lifetime::Persistent);
+    assert!(skipped_of(&rig).is_empty());
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 1);
+}
+
+#[test]
+fn a_failed_pin_deletes_only_what_it_wrote() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, files) = workspace_saves(&rig.fx()).remove(0);
+    let written = vec![("content.md", hash_of(&files[0].bytes))];
+    rig.store.apply_saved(
+        ticket,
+        SaveReport {
+            written,
+            end: SaveEnd::Conflict { file: "panel.json" },
+        },
+        rig.t(),
+    );
+    let fx = rig.fx();
+    let del = deletes(&fx);
+    assert_eq!(del.len(), 1);
+    assert_eq!(
+        del[0].1,
+        [("content.md", FileMark::Hash(hash_of(&files[0].bytes)))]
+    );
+    assert_eq!(lists(&fx), 1);
+    assert_eq!(rig.get("x").0.lifetime, Lifetime::Scratch);
+}
+
+#[test]
+fn a_read_deferred_by_a_pin_is_not_emitted_after_its_rollback() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "s1", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.store
+        .apply_change(&space(), "panels/x/content.md", rig.t());
+    rig.tick(rig.timing.debounce_ms);
+    no_workspace_read_of(&rig.fx(), "x");
+    rig.store.apply_saved(
+        ticket,
+        SaveReport {
+            written: Vec::new(),
+            end: SaveEnd::Conflict { file: "panel.json" },
+        },
+        rig.t(),
+    );
+    let fx = rig.fx();
+    no_workspace_read_of(&fx, "x");
+    assert_eq!(lists(&fx), 1);
+    let (view, source) = rig.get("x");
+    assert_eq!((view.lifetime, source.as_str()), (Lifetime::Scratch, "s1"));
+    assert_eq!(skipped_of(&rig), open_skip("x"));
+    assert_eq!(rig.store.list(&space()).unwrap().panels.len(), 1);
+    rig.store.apply_listing(&space(), listing(&["x"]), rig.t());
+    rig.tick(rig.timing.debounce_ms);
+    no_workspace_read_of(&rig.fx(), "x");
+}
+
+#[test]
+fn a_workspace_read_for_an_id_that_became_scratch_held_is_dropped() {
+    let mut rig = Rig::new();
+    rig.store.apply_listing(&space(), listing(&["x"]), rig.t());
+    rig.fx();
+    rig.store.apply_read(
+        &at("x"),
+        "panel.json",
+        PanelRead::Missing,
+        rig.t(),
+        &mut rig.ids,
+    );
+    rig.store
+        .apply_change(&space(), "panels/x/panel.json", rig.t());
+    rig.tick(rig.timing.debounce_ms);
+    assert_eq!(reads(&rig.fx()), [("x".to_owned(), "panel.json")]);
+    rig.ssaved("x", "s1", T);
+    rig.store.apply_read(
+        &at("x"),
+        "panel.json",
+        found(md_json()),
+        rig.t(),
+        &mut rig.ids,
+    );
+    let fx = rig.fx();
+    assert!(reads(&fx).is_empty(), "{fx:?}");
+    let panels = rig.store.list(&space()).unwrap().panels;
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].lifetime, Lifetime::Scratch);
+    assert_eq!(rig.get("x").1, "s1");
+    assert_eq!(skipped_of(&rig), open_skip("x"));
+    assert!(has_listing(&rig.ev()));
+    rig.store.close(&space(), "x", rig.t()).unwrap();
+    let fx = rig.fx();
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+    assert_eq!(reads(&fx), [("x".to_owned(), "panel.json")]);
+    rig.store.apply_read(
+        &at("x"),
+        "panel.json",
+        PanelRead::Missing,
+        rig.t(),
+        &mut rig.ids,
+    );
+    assert!(rig.create("x", Renderer::Markdown, "p").is_ok());
+}
+
+#[test]
+fn a_sweep_done_never_clears_a_newer_stamp() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    let n1 = 20_000;
+    let fx = rig.sweep(n1, T + SCRATCH_TTL_MS + 1);
+    let (ticket, _) = scratch_deletes(&fx).remove(0);
+    assert!(changed(&rig.ev())
+        .iter()
+        .any(|(_, _, state)| *state == PanelState::Removed));
+    let w = T + SCRATCH_TTL_MS + 2;
+    rig.screate("x", "b", w).unwrap();
+    rig.finish_save();
+    rig.fx();
+    rig.store.apply_deleted(ticket, done(&[]), rig.t());
+    assert!(scratch_deletes(&rig.sweep(n1 + EVERY, w + SCRATCH_TTL_MS - 1)).is_empty());
+    let fx = rig.sweep(n1 + 2 * EVERY, w + SCRATCH_TTL_MS);
+    assert_eq!(scratch_deletes(&fx).len(), 1);
+}
+
+#[test]
+fn a_failed_scratch_listing_still_lists_and_creates_workspace_panels() {
+    let timing = PanelTiming::default();
+    let t0 = Millis(10_000);
+    let gone = "the scratch panels couldn't be listed: gone".to_owned();
+    let mut store = PanelStore::new(timing);
+    let mut ids = Counter(1_000);
+    store.start(t0);
+    store.add_space(&space(), t0);
+    store.apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), t0);
+    assert_eq!(logs(&store.take_effects()), std::slice::from_ref(&gone));
+    assert!(store
+        .next_deadline()
+        .is_some_and(|d| d <= t0.saturating_add(Millis(timing.retry_ms))));
+    store.apply_listing(&space(), listing(&["a"]), t0);
+    store.take_effects();
+    store.apply_read(&at("a"), "panel.json", found(md_json()), t0, &mut ids);
+    store.apply_read(&at("a"), "content.md", found(b"A"), t0, &mut ids);
+    let list = store.list(&space()).unwrap();
+    assert_eq!(list.panels.len(), 1);
+    assert_eq!(list.panels[0].state, PanelState::Validated);
+    assert_eq!(
+        list.error.as_deref(),
+        Some("Couldn't list the scratch panels (gone)")
+    );
+    assert_eq!(store.get(&space(), "a").unwrap().1, "A");
+    assert_eq!(
+        store.get(&space(), "zz").unwrap_err(),
+        PanelApiError::Store(gone.clone())
+    );
+    store
+        .create(
+            &space(),
+            create_of("b", Renderer::Markdown, "B"),
+            t0,
+            0,
+            &mut ids,
+        )
+        .unwrap();
+    assert_eq!(saves(&store.take_effects()).len(), 1);
+    assert_eq!(store.list(&space()).unwrap().panels.len(), 2);
+    assert_eq!(
+        store
+            .create(&space(), scratch_of("c", "C"), t0, 0, &mut ids)
+            .unwrap_err(),
+        PanelApiError::Store(gone)
+    );
+    assert!(store.take_effects().is_empty());
+    let t1 = t0.saturating_add(Millis(timing.retry_ms));
+    store.apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), t1);
+    assert!(logs(&store.take_effects()).is_empty());
+    let t2 = t1.saturating_add(Millis(timing.retry_ms));
+    store.tick(t2, 0);
+    assert!(store
+        .take_effects()
+        .iter()
+        .any(|effect| matches!(effect, PanelEffect::ListScratch)));
+    store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: vec![sdir("d")],
+            truncated: false,
+        }),
+        t2,
+    );
+    let fx = store.take_effects();
+    assert!(fx.iter().any(|effect| matches!(
+        effect,
+        PanelEffect::Read {
+            at: PanelFolder::Scratch(_),
+            file: "scratch.json"
+        }
+    )));
+    assert_eq!(
+        store.get(&space(), "d").unwrap_err(),
+        PanelApiError::SpaceLoading
+    );
+    assert_eq!(
+        store
+            .create(
+                &space(),
+                create_of("e", Renderer::Markdown, "E"),
+                t2,
+                0,
+                &mut ids
+            )
+            .unwrap_err(),
+        PanelApiError::SpaceLoading
+    );
+    assert_eq!(store.list(&space()).unwrap().error, None);
+    let folder = PanelFolder::Scratch(sdir("d"));
+    store.apply_read(&folder, "scratch.json", found(&meta_json(T)), t2, &mut ids);
+    store.apply_read(&folder, "panel.json", found(md_json()), t2, &mut ids);
+    store.apply_read(&folder, "content.md", found(b"D"), t2, &mut ids);
+    let (view, source) = store.get(&space(), "d").unwrap();
+    assert_eq!((view.lifetime, source), (Lifetime::Scratch, "D"));
+    assert!(store
+        .create(&space(), scratch_of("c", "C"), t2, 0, &mut ids)
+        .is_ok());
+}
+
+#[test]
+fn bad_scratch_folders_at_load_are_skipped_logged_once_and_never_deleted() {
+    let timing = PanelTiming::default();
+    let mut store = started_store(PanelTiming::default());
+    let mut ids = Counter(1_000);
+    let now = Millis(10_000);
+    let k = space().sha256_hex();
+    let s = space().0;
+    store.add_space(&space(), now);
+    store.apply_listing(&space(), Ok(None), now);
+    store.take_effects();
+    let names = ["a", "b", "c", "d", "e", "f", "g"];
+    store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: names.iter().map(|n| sdir(n)).collect(),
+            truncated: false,
+        }),
+        now,
+    );
+    let mut all = store.take_effects();
+    let meta = found(&meta_json(T));
+    let json = |read: PanelRead, id: &str, store: &mut PanelStore, ids: &mut Counter| {
+        store.apply_read(
+            &PanelFolder::Scratch(sdir(id)),
+            "scratch.json",
+            read,
+            now,
+            ids,
+        );
+    };
+    for id in ["a", "b", "c", "d"] {
+        json(meta.clone(), id, &mut store, &mut ids);
+    }
+    json(found(b"{"), "e", &mut store, &mut ids);
+    json(
+        PanelRead::Failed("denied".into()),
+        "f",
+        &mut store,
+        &mut ids,
+    );
+    json(PanelRead::Missing, "g", &mut store, &mut ids);
+    all.extend(store.take_effects());
+    let panel = |store: &mut PanelStore, ids: &mut Counter, id: &str, file: &str, read| {
+        store.apply_read(&PanelFolder::Scratch(sdir(id)), file, read, now, ids);
+    };
+    panel(&mut store, &mut ids, "a", "panel.json", found(b"{"));
+    panel(&mut store, &mut ids, "b", "panel.json", PanelRead::Missing);
+    panel(
+        &mut store,
+        &mut ids,
+        "c",
+        "panel.json",
+        found(br#"{"version":1,"title":"t","slot":"s","argv":["sh"]}"#),
+    );
+    panel(&mut store, &mut ids, "d", "panel.json", found(md_json()));
+    panel(
+        &mut store,
+        &mut ids,
+        "d",
+        "content.md",
+        PanelRead::Failed("denied".into()),
+    );
+    all.extend(store.take_effects());
+    let texts = logs(&all);
+    assert_eq!(texts.len(), 7, "{texts:?}");
+    let has = |text: String| assert!(texts.contains(&text), "{text} in {texts:?}");
+    let starts = |prefix: String| {
+        assert!(texts.iter().any(|t| t.starts_with(&prefix)), "{prefix}");
+    };
+    starts(format!(
+        "the scratch folder {k}/e is skipped: scratch.json isn't valid JSON: "
+    ));
+    has(format!(
+        "the scratch folder {k}/f is skipped: couldn't read scratch.json (denied)"
+    ));
+    has(format!(
+        "the scratch folder {k}/g is skipped: scratch.json is missing"
+    ));
+    starts(format!(
+        "the scratch panel a of {s} is skipped: panel.json isn't valid JSON: "
+    ));
+    has(format!(
+        "the scratch panel b of {s} is skipped: no panel.json"
+    ));
+    has(format!(
+        "the scratch panel c of {s} is skipped: not a view panel"
+    ));
+    has(format!(
+        "the scratch panel d of {s} is skipped: couldn't read content.md (denied)"
+    ));
+    store
+        .create(
+            &space(),
+            scratch_of("n", "N"),
+            now,
+            T + SCRATCH_TTL_MS,
+            &mut ids,
+        )
+        .unwrap();
+    store
+        .create(
+            &space(),
+            create_of("p", Renderer::Markdown, "P"),
+            now,
+            0,
+            &mut ids,
+        )
+        .unwrap();
+    let list = store.list(&space()).unwrap();
+    let got: Vec<&str> = list.panels.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(got, ["n", "p"]);
+    store.take_effects();
+    for n in 1..=2 {
+        store.tick(
+            Millis(10_000 + n * timing.sweep_every_ms),
+            T + SCRATCH_TTL_MS + 1,
+        );
+        assert!(scratch_deletes(&store.take_effects()).is_empty());
+    }
+}
+
+#[test]
+fn close_and_recreate_never_start_a_second_check_while_one_runs() {
+    let mut rig = Rig::new();
+    let mut create = scratch_of("x", "g1");
+    create.renderer = Renderer::Mermaid;
+    let first = rig
+        .store
+        .create(&space(), create.clone(), rig.t(), T, &mut rig.ids)
+        .unwrap();
+    assert_eq!(checks(&rig.fx()).len(), 1);
+    rig.store.close(&space(), "x", rig.t()).unwrap();
+    let second = rig
+        .store
+        .create(&space(), create, rig.t(), T, &mut rig.ids)
+        .unwrap();
+    assert!(checks(&rig.fx()).is_empty());
+    rig.verdict("x", first.revision, Ok(DiagramVerdict::Validated));
+    let started = checks(&rig.fx());
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].1, second.revision);
+}
+
+#[test]
+fn key_is_free_after_close_remove_or_expiry() {
+    for how in ["close", "remove", "expiry"] {
+        let mut rig = Rig::new();
+        let mut create = scratch_of("x", "a");
+        create.idempotency_key = Some("k".to_owned());
+        rig.store
+            .create(&space(), create.clone(), rig.t(), T, &mut rig.ids)
+            .unwrap();
+        rig.finish_save();
+        rig.fx();
+        let same = rig
+            .store
+            .create(&space(), create.clone(), rig.t(), T, &mut rig.ids)
+            .unwrap();
+        assert_eq!(same.id, "x");
+        match how {
+            "close" => {
+                rig.store.close(&space(), "x", rig.t()).unwrap();
+            }
+            "remove" => {
+                rig.store.remove(&space(), "x", rig.t()).unwrap();
+            }
+            _ => {
+                rig.sweep(20_000, T + SCRATCH_TTL_MS);
+            }
+        }
+        create.id = Some("y".to_owned());
+        let fresh = rig
+            .store
+            .create(&space(), create, rig.t(), T + SCRATCH_TTL_MS, &mut rig.ids)
+            .unwrap();
+        assert_eq!(fresh.id, "y", "{how}");
+    }
+}
+
+#[test]
+fn templates_and_scratch_panels_count() {
+    let mut rig = Rig::new();
+    let names: Vec<String> = (0..60).map(|n| format!("t{n:02}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    rig.store.apply_listing(&space(), listing(&refs), rig.t());
+    rig.fx();
+    for name in &refs {
+        rig.store.apply_read(
+            &at(name),
+            "panel.json",
+            found(br#"{"version":1}"#),
+            rig.t(),
+            &mut rig.ids,
+        );
+    }
+    for n in 0..40 {
+        rig.screate(&format!("s{n:02}"), "x", T).unwrap();
+    }
+    assert_eq!(
+        rig.screate("extra", "x", T).unwrap_err(),
+        PanelApiError::PanelLimit {
+            count: 100,
+            limit: 100
+        }
+    );
+}
+
+#[test]
+fn the_100_folder_reason_is_true_at_exactly_100_panels() {
+    let mut rig = Rig::new();
+    rig.ssaved("s", "x", T);
+    fill(&mut rig, 99);
+    rig.outside("panels/n/panel.json");
+    assert_eq!(
+        skipped_of(&rig),
+        [(
+            "n".to_owned(),
+            "the space already has 100 panels; this folder isn't read".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_remove_that_conflicts_while_a_check_waits_queues_the_check_again() {
+    let mut rig = Rig::new();
+    rig.mm("a", "g");
+    let fx = rig.fx();
+    assert_eq!(checks(&fx).len(), 1);
+    let (ticket, files) = saves(&fx).remove(0);
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    let revision = rig.get("a").0.revision;
+    rig.verdict("a", revision, unavailable());
+    assert!(checks(&rig.fx()).is_empty());
+    rig.store.remove(&space(), "a", rig.t()).unwrap();
+    let (ticket, _) = deletes(&rig.fx()).remove(0);
+    rig.store.apply_deleted(
+        ticket,
+        SaveReport {
+            written: Vec::new(),
+            end: SaveEnd::Conflict { file: "panel.json" },
+        },
+        rig.t(),
+    );
+    let mut started = checks(&rig.fx());
+    let bytes = |name: &str| {
+        files
+            .iter()
+            .find(|f| f.file == name)
+            .map(|f| f.bytes.clone())
+            .unwrap_or_default()
+    };
+    rig.pair(
+        "a",
+        found(&bytes("panel.json")),
+        found(&bytes("diagram.mmd")),
+    );
+    rig.tick(40_000);
+    started.extend(checks(&rig.fx()));
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0].0, "a");
+}
+
+fn conflict_on_panel_json() -> SaveReport {
+    SaveReport {
+        written: Vec::new(),
+        end: SaveEnd::Conflict { file: "panel.json" },
+    }
+}
+
+fn file_names(files: &[FileWrite]) -> Vec<&'static str> {
+    files.iter().map(|write| write.file).collect()
+}
+
+#[test]
+fn a_failed_pin_after_a_failed_scratch_save_saves_the_scratch_folder_again() {
+    let mut rig = Rig::new();
+    rig.screate("x", "a", T).unwrap();
+    let (ticket, _) = saves(&rig.fx()).remove(0);
+    fail_save(&mut rig, ticket, "content.md");
+    rig.fx();
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.store
+        .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    assert!(scratch_saves(&fx).is_empty(), "{fx:?}");
+    let view = rig.get("x").0;
+    assert_eq!(view.lifetime, Lifetime::Scratch);
+    let error = view.file_error.unwrap();
+    assert!(error.starts_with("Couldn't pin: "), "{error}");
+    assert!(
+        error.contains("Couldn't save the scratch panel x (") && error.ends_with("retrying."),
+        "{error}"
+    );
+    rig.tick(rig.timing.retry_ms - 1);
+    assert!(scratch_saves(&rig.fx()).is_empty());
+    rig.tick(2);
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (ticket, _, files) = all.remove(0);
+    assert_eq!(
+        file_names(&files),
+        ["scratch.json", "content.md", "panel.json"]
+    );
+    rig.store.apply_saved(ticket, done(&files), rig.t());
+    assert_eq!(rig.get("x").0.file_error, None);
+}
+
+#[test]
+fn a_failed_pin_while_a_scratch_save_is_in_flight_saves_the_scratch_folder_again() {
+    let mut rig = Rig::new();
+    rig.screate("x", "a", T).unwrap();
+    let (scratch_ticket, _) = saves(&rig.fx()).remove(0);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (pin_ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    fail_save(&mut rig, scratch_ticket, "content.md");
+    rig.store
+        .apply_saved(pin_ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (_, _, files) = all.remove(0);
+    assert_eq!(
+        file_names(&files),
+        ["scratch.json", "content.md", "panel.json"]
+    );
+}
+
+#[test]
+fn an_update_during_a_pin_restamps_the_scratch_folder_after_a_rollback() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.pin(&space(), "x", rig.t()).unwrap();
+    let (ticket, _) = workspace_saves(&rig.fx()).remove(0);
+    rig.supdate("x", content_update("b"), T + 500).unwrap();
+    rig.fx();
+    rig.store
+        .apply_saved(ticket, conflict_on_panel_json(), rig.t());
+    let fx = rig.fx();
+    let mut all = scratch_saves(&fx);
+    assert_eq!(all.len(), 1, "{fx:?}");
+    let (_, _, files) = all.remove(0);
+    assert_eq!(files[0].file, "scratch.json");
+    assert_eq!(files[0].bytes, meta_json(T + 500));
+}
+
+#[test]
+fn the_scratch_listing_error_emits_listing_when_it_starts_changes_and_clears() {
+    let mut rig = Rig::new();
+    rig.ev();
+    let now = rig.t();
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), now);
+    assert!(has_listing(&rig.ev()));
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("gone".into())), now);
+    assert!(!has_listing(&rig.ev()));
+    rig.store
+        .apply_scratch_listing(Err(StoreError::Unavailable("still".into())), now);
+    assert!(has_listing(&rig.ev()));
+    rig.store.apply_scratch_listing(
+        Ok(ScratchListing {
+            dirs: Vec::new(),
+            truncated: false,
+        }),
+        now,
+    );
+    assert!(has_listing(&rig.ev()));
 }
