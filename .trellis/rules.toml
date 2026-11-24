@@ -150,8 +150,14 @@ paths = ["app/web/src/renderers/**"]
 external = [
   { language = "typescript", package = "@xterm/xterm", stdlib = false },
   { language = "typescript", package = "dompurify", stdlib = false },
+  { language = "typescript", package = "markdown-it", stdlib = false },
+  { language = "typescript", package = "highlight.js", stdlib = false },
+  { language = "typescript", package = "pele", stdlib = false },
   { language = "javascript", package = "@xterm/xterm", stdlib = false },
   { language = "javascript", package = "dompurify", stdlib = false },
+  { language = "javascript", package = "markdown-it", stdlib = false },
+  { language = "javascript", package = "highlight.js", stdlib = false },
+  { language = "javascript", package = "pele", stdlib = false },
 ]
 
 # Where Tauri is called. Renderers (peers) can't reach it; shell and panels sit above it,
