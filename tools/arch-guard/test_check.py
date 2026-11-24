@@ -445,15 +445,65 @@ class GuardTest(unittest.TestCase):
             },
         )
 
-    def test_factory_run_state_and_sandboxes_are_skipped(self):
-        # Slice worktrees and sandbox clones are whole copies of the tree, including the one place
-        # a JS engine may live; reading them would flag that file again under a foreign path.
+    # Slice worktrees and sandbox clones are whole copies of the tree, including the one place a JS
+    # engine may live; reading them would flag that file again under a foreign path. Each root has
+    # its own witness, so removing either skip fails its own test.
+
+    def test_factory_run_state_is_skipped(self):
+        self.assertFlags({".factory/worktrees/46/a1/crates/combined/src/core/x.rs": "use rquickjs::Runtime;\n"})
+
+    def test_factory_sandboxes_are_skipped(self):
+        self.assertFlags({".factory-sandboxes/46/crates/combined/src/core/y.rs": "use rquickjs::Runtime;\n"})
+
+    # A skip must not turn a reachable violation into a clean check: production code that compiles
+    # or imports a file under a skipped root is reported, for each scratch root and each way in.
+
+    def test_path_module_into_factory_run_state_is_reported(self):
         self.assertFlags(
             {
-                ".factory/worktrees/46/a1/crates/combined/src/core/x.rs": "use rquickjs::Runtime;\nuse std::fs;\n",
-                ".factory-sandboxes/46/crates/combined/src/core/y.rs": "use std::process::Command;\n",
+                "crates/combined/src/main.rs": '#[path = "../../../.factory/payload.rs"]\nmod payload;\nfn main() {}\n',
+                ".factory/payload.rs": "pub fn f() { let _ = std::net::TcpListener::bind(\"127.0.0.1:0\"); }\n",
             },
+            ("guard-skip", ".factory"),
         )
+
+    def test_path_module_into_factory_sandboxes_is_reported(self):
+        self.assertFlags(
+            {
+                "crates/combined/src/main.rs": '#[path = "../../../.factory-sandboxes/payload.rs"]\nmod payload;\nfn main() {}\n',
+                ".factory-sandboxes/payload.rs": "pub fn f() { let _ = std::net::TcpListener::bind(\"127.0.0.1:0\"); }\n",
+            },
+            ("guard-skip", ".factory-sandboxes"),
+        )
+
+    def test_include_into_factory_sandboxes_is_reported(self):
+        self.assertFlags(
+            {
+                "crates/combined/src/main.rs": 'include!("../../../.factory-sandboxes/46/payload.rs");\nfn main() {}\n',
+                ".factory-sandboxes/46/payload.rs": "use rquickjs::Runtime;\n",
+            },
+            ("guard-skip", ".factory-sandboxes"),
+        )
+
+    def test_frontend_import_into_factory_run_state_is_reported(self):
+        self.assertFlags(
+            {
+                "app/web/src/main.ts": 'import "../../../.factory/46/shell.ts";\n',
+                ".factory/46/shell.ts": 'import "@tauri-apps/plugin-shell";\n',
+            },
+            ("guard-skip", ".factory"),
+        )
+
+    def test_production_symlink_into_factory_run_state_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in {**BASE, ".factory/46/payload.rs": "use rquickjs::Runtime;\n"}.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            (root / "crates/combined/src/payload.rs").symlink_to("../../../.factory/46/payload.rs")
+            got = {(v.rule, v.path) for v in check.run(root, CONFIG)}
+        # The link is read under its own path as well, so its contents are flagged there too.
+        self.assertEqual(got, {("guard-skip", ".factory"), ("js-engine-only-in-loader", "crates/combined/src/payload.rs")})
 
     # --- Review 2: frontend lexing
 
