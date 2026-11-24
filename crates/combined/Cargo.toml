@@ -12,15 +12,15 @@ test-support = []
 
 [dependencies]
 combine-protocol = { path = "../combine-protocol" }
-async-trait = "=0.1.89"
-futures = { version = "=0.3.32", default-features = false, features = ["std", "executor"] }
+async-trait = "=0.1.92"
+futures = { version = "=0.3.34", default-features = false, features = ["std", "executor"] }
 # Only for the O_NONBLOCK and O_NOFOLLOW open flags of the file store's reads.
 libc = "=0.2.191"
 notify = "=8.2.2"
 # The JS engine, for the loader adapter only (tools/arch-guard: js-engine-only-in-loader).
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.153"
+serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
