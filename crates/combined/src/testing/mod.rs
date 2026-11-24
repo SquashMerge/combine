@@ -1,5 +1,5 @@
 #![cfg(feature = "test-support")]
-//! The in-memory fake TerminalBackend, for tests.
+//! The in-memory fakes, for tests: the TerminalBackend, the file store and the diagram check.
 //!
 //! [`FakeBackend::new`] gives the backend and a [`FakeControl`] handle. The control handle
 //! drives the program in each terminal, injects faults and observes what the backend was asked
@@ -7,6 +7,7 @@
 //! it, or polls an event stream.
 
 mod control;
+mod diagram_check;
 mod fake_attachment;
 mod fake_backend;
 mod file_store;
@@ -17,6 +18,7 @@ use combine_protocol::{Display, TermId};
 use crate::ports::{AttachOptions, Capabilities};
 
 pub use control::FakeControl;
+pub use diagram_check::{FakeAnswer, FakeDiagramCheck, FakeHold};
 pub use fake_backend::FakeBackend;
 pub use file_store::MemoryFileStore;
 
