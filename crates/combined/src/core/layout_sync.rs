@@ -807,6 +807,28 @@ impl Layouts {
         }
     }
 
+    /// The hash of the layout file as the daemon last read or wrote it, `None` when the file was
+    /// missing or too large to hash, or `space` is unknown.
+    pub fn known_hash(&self, space: &SpaceId) -> Option<ContentHash> {
+        self.spaces.get(space).and_then(|state| state.known_hash)
+    }
+
+    /// A write was not made because the file is not what the daemon last saw. The write is no
+    /// longer in flight, the held ops get a new deadline, and `read` (what the server found
+    /// instead) runs through the usual conflict rule, which moves the ops onto the outside edit
+    /// or drops them.
+    pub fn apply_write_conflict(&mut self, space: &SpaceId, read: LayoutRead, now: Millis) {
+        let timing = self.timing;
+        let Some(state) = self.spaces.get_mut(space) else {
+            return;
+        };
+        state.writing = None;
+        if state.pending.is_some() {
+            state.arm_deadline(now, timing);
+        }
+        self.apply_read(space, read, now);
+    }
+
     /// Applies `ops` for `conn`, which must be watching `space` at revision `base`.
     pub fn mutate(
         &mut self,

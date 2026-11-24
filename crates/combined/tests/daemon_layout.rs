@@ -233,15 +233,16 @@ fn own_write_causes_no_reload_end_to_end() {
     assert_eq!(revision, 1);
 
     env.wait_writes(1);
+    // The write is preceded by one comparing read, and followed by the echo's read.
     assert!(
-        wait_until(WAIT, || env.reads() == reads + 1),
+        wait_until(WAIT, || env.reads() == reads + 2),
         "the echo of the write was never re-read"
     );
     assert!(
         client.recv_within(QUIET).is_none(),
         "the write caused a push"
     );
-    assert_eq!(env.reads(), reads + 1);
+    assert_eq!(env.reads(), reads + 2);
 
     env.store
         .write_outside(&env.space, LAYOUT_FILE, outside_layout(0.3));

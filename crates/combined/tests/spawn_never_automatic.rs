@@ -7,7 +7,7 @@ mod layout_support;
 mod spawn_support;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use combine_protocol::{ClientMessage, DaemonMessage, RequestId, WatchLayout};
 use combined::core::LAYOUT_FILE;
@@ -40,6 +40,39 @@ fn rig_with_templates() -> (Rig, Arc<MemoryFileStore>) {
     (rig, store)
 }
 
+/// The template listing count and the two templates' read counts. Nothing in this file mutates
+/// a template's files after the panel store has read them, so the triple must not move.
+fn counts(store: &MemoryFileStore, rig: &Rig) -> (u64, u64, u64) {
+    (
+        store.list_count(&rig.space, "panels"),
+        store.read_count(&rig.space, "panels/agent/panel.json"),
+        store.read_count(&rig.space, "panels/build/panel.json"),
+    )
+}
+
+/// The counts once both templates have been read and nothing has changed for a second, twice
+/// the panel store's debounce: its own listing and reads (it reads each template to tell it
+/// from a view panel) are done by then. Polls every 50 ms and panics after 10 s.
+fn settled_counts(store: &MemoryFileStore, rig: &Rig) -> (u64, u64, u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = counts(store, rig);
+    let mut since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let now = counts(store, rig);
+        if now != last {
+            last = now;
+            since = Instant::now();
+        } else if since.elapsed() >= Duration::from_secs(1) && now.1 >= 1 && now.2 >= 1 {
+            return now;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the template counts never settled: {now:?}"
+        );
+    }
+}
+
 fn watch_layout(client: &mut WireClient, rig: &Rig, request: u64) {
     client.send(&ClientMessage::WatchLayout(WatchLayout {
         request: RequestId(request),
@@ -57,6 +90,7 @@ fn watch_layout(client: &mut WireClient, rig: &Rig, request: u64) {
 #[test]
 fn no_spawn_on_connect_watch_list_and_mutate() {
     let (rig, store) = rig_with_templates();
+    let before = settled_counts(&store, &rig);
     let mut client = rig.client();
     watch_terminals(&mut client, 1);
     watch_layout(&mut client, &rig, 2);
@@ -75,13 +109,11 @@ fn no_spawn_on_connect_watch_list_and_mutate() {
     std::thread::sleep(QUIET);
 
     assert_eq!(spawn_attempts(&rig.control), 1);
-    assert_eq!(store.list_count(&rig.space, "panels"), 0);
-    assert_eq!(store.read_count(&rig.space, "panels/agent/panel.json"), 0);
-    assert_eq!(store.read_count(&rig.space, "panels/build/panel.json"), 0);
+    assert_eq!(counts(&store, &rig), before);
 
     let templates = rig.list(&mut client, 4);
     assert_eq!(templates.templates.len(), 2);
-    assert_eq!(store.list_count(&rig.space, "panels"), 1);
+    assert_eq!(store.list_count(&rig.space, "panels"), before.0 + 1);
     assert_eq!(spawn_attempts(&rig.control), 1);
 }
 
@@ -99,6 +131,7 @@ fn no_spawn_on_layout_or_panel_file_change() {
             &terminal_panel_json(&["zsh"], None),
         );
     }
+    let before = settled_counts(&store, &rig);
     store.write_outside(
         &rig.space,
         LAYOUT_FILE,
@@ -111,7 +144,7 @@ fn no_spawn_on_layout_or_panel_file_change() {
     std::thread::sleep(QUIET);
 
     assert_eq!(spawn_attempts(&rig.control), 1);
-    assert_eq!(store.read_count(&rig.space, "panels/agent/panel.json"), 0);
+    assert_eq!(counts(&store, &rig), before);
 }
 
 #[test]
