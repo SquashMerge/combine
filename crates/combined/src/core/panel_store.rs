@@ -18,8 +18,8 @@ use crate::core::layout_sync::store_error_detail;
 use crate::core::machine::Core;
 use crate::core::panel_file::{
     clip_text, content_file, created_by_refusal, encode_view_panel, panel_reply_len,
-    parse_view_panel, valid_idempotency_key, valid_title, KEY_RULE, PANEL_ERROR_TEXT_MAX,
-    SCRATCH_FILE, SOURCE_MAX_BYTES, TITLE_RULE,
+    parse_view_panel, valid_idempotency_key, valid_placement, valid_title, KEY_RULE,
+    PANEL_ERROR_TEXT_MAX, PLACEMENT_RULE, SCRATCH_FILE, SOURCE_MAX_BYTES, TITLE_RULE,
 };
 use crate::core::panels::{
     panel_folder_refusal, valid_panel_folder, PanelSkip, MAX_PANELS, PANELS_DIR, PANEL_FILE,
@@ -89,6 +89,7 @@ pub struct PanelCreate {
     pub title: Option<String>,
     pub idempotency_key: Option<String>,
     pub created_by: Option<CreatedBy>,
+    pub placement: Option<String>,
     pub content: String,
 }
 
@@ -236,7 +237,11 @@ pub enum PanelApiError {
     PanelLimit { count: usize, limit: usize },
     TooLarge { encoded: usize },
     NotScratch { id: String },
-    Store(String),
+    ListingFailed { detail: String },
+    ScratchListingFailed { detail: String },
+    PanelFileInvalid { reason: String },
+    Unreadable { path: String, detail: String },
+    Stopped,
 }
 
 impl fmt::Display for PanelApiError {
@@ -266,7 +271,21 @@ impl fmt::Display for PanelApiError {
             PanelApiError::NotScratch { id } => {
                 write!(f, "the panel {id} is already in .workspace/")
             }
-            PanelApiError::Store(text) => f.write_str(text),
+            PanelApiError::ListingFailed { detail } => {
+                write!(f, "the space's panels couldn't be listed: {detail}")
+            }
+            PanelApiError::ScratchListingFailed { detail } => {
+                write!(f, "the scratch panels couldn't be listed: {detail}")
+            }
+            PanelApiError::PanelFileInvalid { reason } => write!(
+                f,
+                "panel.json can't be used ({reason}), so the daemon doesn't rewrite it"
+            ),
+            PanelApiError::Unreadable { path, detail } => write!(
+                f,
+                "couldn't read {path} ({detail}), so the panel isn't changed until it can be read"
+            ),
+            PanelApiError::Stopped => f.write_str("the server has stopped"),
         }
     }
 }
@@ -793,9 +812,9 @@ impl SpaceState {
         answer: Missing,
     ) -> Result<PanelView, PanelApiError> {
         if let Some(detail) = &self.listing_failed {
-            return Err(PanelApiError::Store(format!(
-                "the space's panels couldn't be listed: {detail}"
-            )));
+            return Err(PanelApiError::ListingFailed {
+                detail: detail.clone(),
+            });
         }
         if !self.loaded {
             return Err(PanelApiError::SpaceLoading);
@@ -862,9 +881,9 @@ impl SpaceState {
         wall_ms: u64,
     ) -> Result<PanelView, PanelApiError> {
         if let Some(detail) = &self.listing_failed {
-            return Err(PanelApiError::Store(format!(
-                "the space's panels couldn't be listed: {detail}"
-            )));
+            return Err(PanelApiError::ListingFailed {
+                detail: detail.clone(),
+            });
         }
         if !self.loaded {
             return Err(PanelApiError::SpaceLoading);
@@ -890,6 +909,11 @@ impl SpaceState {
         if let Some(created_by) = &create.created_by {
             if let Some((field, rule)) = created_by_refusal(created_by) {
                 return Err(invalid_field(field, rule));
+            }
+        }
+        if let Some(tile) = &create.placement {
+            if !valid_placement(tile) {
+                return Err(invalid_field("placement", PLACEMENT_RULE));
             }
         }
         if let Some(key) = &create.idempotency_key {
@@ -936,6 +960,7 @@ impl SpaceState {
             title: create.title,
             idempotency_key: create.idempotency_key,
             created_by: create.created_by,
+            placement: create.placement,
         };
         let core_error = (create.content.len() > SOURCE_MAX_BYTES)
             .then(|| too_large_source(create.content.len() as u64));
@@ -1005,9 +1030,9 @@ impl SpaceState {
         }
         if update.title.is_some() {
             if let Some(reason) = &rec.invalid {
-                return Err(PanelApiError::Store(format!(
-                    "panel.json can't be used ({reason}), so the daemon doesn't rewrite it"
-                )));
+                return Err(PanelApiError::PanelFileInvalid {
+                    reason: reason.clone(),
+                });
             }
         }
         if let Some(content) = &update.content {
@@ -1968,15 +1993,16 @@ fn invalid_field(field: &'static str, rule: &str) -> PanelApiError {
 }
 
 fn scratch_list_refusal(detail: &str) -> PanelApiError {
-    PanelApiError::Store(format!("the scratch panels couldn't be listed: {detail}"))
+    PanelApiError::ScratchListingFailed {
+        detail: detail.to_owned(),
+    }
 }
 
 fn unread_refusal(id: &str, unread: &UnreadInfo) -> PanelApiError {
-    PanelApiError::Store(format!(
-        "couldn't read {} ({}), so the panel isn't changed until it can be read",
-        file_path(id, unread.file),
-        unread.detail
-    ))
+    PanelApiError::Unreadable {
+        path: file_path(id, unread.file),
+        detail: unread.detail.clone(),
+    }
 }
 
 /// The daemon's panels: every space's records, the checks running, and the work asked for.

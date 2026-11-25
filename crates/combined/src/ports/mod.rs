@@ -1,6 +1,7 @@
-//! Traits core needs from the outside world: the terminal backend, the git probe, the file store, the scratch store, the wall clock, the project folder check and the diagram check.
+//! Traits core needs from the outside world: the terminal backend, the git probe, the caller identity, the file store, the scratch store, the wall clock, the project folder check and the diagram check.
 
 mod backend;
+mod caller_identity;
 mod diagram_check;
 mod file_store;
 mod git_probe;
@@ -12,6 +13,7 @@ pub use backend::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, BackendResult,
     Capabilities, TerminalBackend,
 };
+pub use caller_identity::CallerIdentity;
 pub use diagram_check::{
     DiagramCheck, DiagramCheckError, DiagramFailure, DiagramVerdict, FailureCode,
 };

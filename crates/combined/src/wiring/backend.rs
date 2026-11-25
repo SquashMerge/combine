@@ -8,8 +8,8 @@ use futures::future::BoxFuture;
 
 use super::config::HerdrCoreSource;
 use super::StartError;
-use crate::adapters::herdr_core::{HerdrCoreBackend, HerdrCoreConfig};
-use crate::ports::TerminalBackend;
+use crate::adapters::herdr_core::{HerdrCoreBackend, HerdrCoreCallerIdentity, HerdrCoreConfig};
+use crate::ports::{CallerIdentity, TerminalBackend};
 use crate::rpc::socket::MAX_SOCKET_PATH;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,16 @@ pub async fn build(choice: &BackendChoice) -> Result<Arc<dyn TerminalBackend>, S
             }
         }
         BackendChoice::Fake => fake_backend(),
+    }
+}
+
+/// Who an MCP caller is on this backend; `None` when the backend can't say.
+pub fn caller_identity(choice: &BackendChoice) -> Option<Arc<dyn CallerIdentity>> {
+    match choice {
+        BackendChoice::HerdrCore { socket, .. } => {
+            Some(Arc::new(HerdrCoreCallerIdentity::new(socket.clone())))
+        }
+        BackendChoice::Fake => None,
     }
 }
 

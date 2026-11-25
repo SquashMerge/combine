@@ -495,6 +495,22 @@ fn herdr_core_choice(socket: PathBuf) -> BackendChoice {
     }
 }
 
+#[test]
+fn caller_identity_follows_the_backend_choice() {
+    let scratch = ShortTempDir::new();
+    let socket = scratch.sock("core.sock");
+    let identity = backend::caller_identity(&herdr_core_choice(socket.clone())).unwrap();
+    assert_eq!(
+        identity.terminal("t1", socket.to_str().unwrap()),
+        Some(TermId("hc:t1".to_string()))
+    );
+    assert_eq!(
+        identity.terminal("t1", scratch.sock("other.sock").to_str().unwrap()),
+        None
+    );
+    assert!(backend::caller_identity(&BackendChoice::Fake).is_none());
+}
+
 fn build_error(choice: &BackendChoice) -> combined::wiring::StartError {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

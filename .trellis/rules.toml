@@ -101,7 +101,7 @@ paths = [
 [layers.cli]
 app = "combine"
 order = 1
-paths = ["crates/combine/**"]
+paths = ["crates/combine/src/**"]
 
 # --- app "combine-app" (app/src-tauri/Cargo.toml): the Tauri backend.
 [layers.app-entry]
@@ -201,6 +201,14 @@ app = "combine-app"
 display = "hidden"
 order = 0
 paths = ["app/src-tauri/tests/**"]
+
+# Integration tests of the shim: the real `combine mcp` against in-process daemons from
+# `combined` (a dev-dependency with test-support); those references are cross-app `unknown`, reviewed.
+[layers.cli-tests]
+app = "combine"
+display = "hidden"
+order = 0
+paths = ["crates/combine/tests/**"]
 
 [layers.web-tests]
 app = "combine-web"

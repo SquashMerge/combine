@@ -5,8 +5,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::net::Shutdown;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -24,65 +22,15 @@ use combined::adapters::fs::data_dir::DataDir;
 use combined::core::LayoutTiming;
 use combined::model::SpawnSpec;
 use combined::ports::{FileStore, TerminalBackend};
-use combined::rpc::socket::MAX_SOCKET_PATH;
 use combined::rpc::{self, ServeOptions, ServerHandle};
+#[allow(unused_imports)]
+pub use combined::testing::{
+    check_in_scratch, wait_until, work_dir, ShortTempDir, WireClient, RECV_TIMEOUT,
+};
 use combined::testing::{FakeBackend, FakeConfig, FakeControl};
 use combined::wiring::config::{self, DaemonEnv};
 use combined::wiring::ids::IdReservation;
 use combined::wiring::{server_parts, server_parts_with};
-
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// `/tmp/cs4-<pid>-<n>`, mode 0700, removed on drop.
-pub struct ShortTempDir {
-    path: PathBuf,
-}
-
-impl ShortTempDir {
-    pub fn new() -> ShortTempDir {
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = PathBuf::from(format!("/tmp/cs4-{}-{n}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        ShortTempDir { path }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// A socket path in the scratch dir, checked against the length limit.
-    pub fn sock(&self, name: &str) -> PathBuf {
-        let path = self.path.join(name);
-        assert!(
-            path.as_os_str().len() <= MAX_SOCKET_PATH,
-            "socket path {} is over {MAX_SOCKET_PATH} bytes",
-            path.display()
-        );
-        path
-    }
-}
-
-impl Drop for ShortTempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-/// Panics unless `path` is inside the scratch dir and has no `..` component.
-pub fn check_in_scratch(path: &Path, scratch: &ShortTempDir) {
-    assert!(
-        !path.components().any(|part| part == Component::ParentDir),
-        "{} has a `..` component",
-        path.display()
-    );
-    assert!(
-        path.starts_with(scratch.path()),
-        "{} is outside the scratch dir {}",
-        path.display(),
-        scratch.path().display()
-    );
-}
 
 /// Panics on a path outside the scratch dir and on herdr-core's default socket for the
 /// process's own environment.
@@ -269,20 +217,6 @@ pub fn write_daemon_config(scratch: &ShortTempDir, paths: &DaemonPaths, backend:
     config
 }
 
-/// Polls `cond` until it holds or `timeout` passes; returns whether it held.
-pub fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Makes a FIFO at `path`, creating its folder. Pair it with [`release_fifo`].
 pub fn make_fifo(path: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -305,113 +239,12 @@ pub fn release_fifo(path: &Path, bytes: &[u8]) {
     let _ = writer.write_all(bytes);
 }
 
-/// How long a test waits for the daemon to send something before it fails.
-pub const RECV_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// A client of the daemon's socket. A thread decodes the daemon's frames as they arrive.
-pub struct WireClient {
-    stream: UnixStream,
-    frames: mpsc::Receiver<DaemonMessage>,
-}
-
-impl WireClient {
-    /// Connects without a handshake.
-    pub fn connect(socket: &Path) -> WireClient {
-        let stream = UnixStream::connect(socket).unwrap();
-        let mut reader = stream.try_clone().unwrap();
-        let (sender, frames) = mpsc::channel();
-        thread::spawn(move || {
-            while let Ok(Some(message)) = read_message::<DaemonMessage, _>(&mut reader) {
-                if sender.send(message).is_err() {
-                    break;
-                }
-            }
-        });
-        WireClient { stream, frames }
-    }
-
-    /// Connects and says `hello` at the current protocol version.
-    pub fn open(socket: &Path) -> (WireClient, Welcome) {
-        let mut client = WireClient::connect(socket);
-        client.send(&ClientMessage::Hello(combine_protocol::Hello {
-            protocol_version: combine_protocol::PROTOCOL_VERSION,
-        }));
-        match client.recv() {
-            DaemonMessage::Welcome(welcome) => (client, welcome),
-            other => panic!("expected welcome, got {other:?}"),
-        }
-    }
-
-    pub fn send(&mut self, message: &ClientMessage) {
-        write_message(&mut self.stream, message).unwrap();
-        self.stream.flush().unwrap();
-    }
-
-    pub fn send_bytes(&mut self, bytes: &[u8]) {
-        self.stream.write_all(bytes).unwrap();
-        self.stream.flush().unwrap();
-    }
-
-    /// Like [`WireClient::send_bytes`], but reports a write failure, such as the daemon having
-    /// closed the connection.
-    pub fn try_send_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.stream.write_all(bytes)?;
-        self.stream.flush()
-    }
-
-    /// Closes the write side, so the daemon reads end of stream after what was sent.
-    pub fn shutdown_write(&self) {
-        self.stream.shutdown(Shutdown::Write).unwrap();
-    }
-
-    /// The next message; panics if none arrives within [`RECV_TIMEOUT`] or the daemon closed.
-    pub fn recv(&self) -> DaemonMessage {
-        match self.frames.recv_timeout(RECV_TIMEOUT) {
-            Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) => panic!("no message within {RECV_TIMEOUT:?}"),
-            Err(RecvTimeoutError::Disconnected) => panic!("the daemon closed the connection"),
-        }
-    }
-
-    /// The next message, or `None` if none arrives within `wait` or the daemon closed.
-    pub fn recv_within(&self, wait: Duration) -> Option<DaemonMessage> {
-        self.frames.recv_timeout(wait).ok()
-    }
-
-    /// Panics unless the daemon closes the connection, with nothing more to read, within
-    /// [`RECV_TIMEOUT`].
-    pub fn expect_closed(&self) {
-        match self.frames.recv_timeout(RECV_TIMEOUT) {
-            Err(RecvTimeoutError::Disconnected) => {}
-            Err(RecvTimeoutError::Timeout) => panic!("the daemon did not close the connection"),
-            Ok(message) => panic!("expected the close, got {message:?}"),
-        }
-    }
-
-    /// Acknowledges everything up to `cursor`.
-    pub fn ack(&mut self, cursor: Cursor) {
-        self.send(&ClientMessage::Ack(Ack { cursor }));
-    }
-}
-
-impl Drop for WireClient {
-    /// Closes the socket even though the decoder thread still holds a handle to it.
-    fn drop(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
-    }
-}
-
 /// Connects, completes the handshake and then never reads again: the daemon's writes pile up.
 pub fn connect_and_never_read(socket: &Path) -> UnixStream {
     let mut stream = UnixStream::connect(socket).unwrap();
     let mut reader = stream.try_clone().unwrap();
     client_handshake(&mut reader, &mut stream).unwrap();
     stream
-}
-
-/// `<scratch>/work`: where in-process servers' terminals run.
-pub fn work_dir(scratch: &ShortTempDir) -> PathBuf {
-    scratch.path().join("work")
 }
 
 /// Starts a server in this process on the fake backend, with every path explicit and inside

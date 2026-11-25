@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::core::panels::{PanelSkip, PANEL_FILE, PANEL_MAX_BYTES, SLOT_RULE};
-use crate::model::{PanelId, SpaceId, ViewPanelFile};
+use crate::model::{PanelId, SpaceId, TileId, ViewPanelFile};
 
 pub const MERMAID_FILE: &str = "diagram.mmd";
 pub const MARKDOWN_FILE: &str = "content.md";
@@ -105,6 +105,14 @@ fn optional_text(
     }
 }
 
+pub(crate) const PLACEMENT_RULE: &str =
+    "must be a tile ID of 1 to 256 bytes with no control characters";
+
+/// Whether `tile` can name a layout tile.
+pub fn valid_placement(tile: &str) -> bool {
+    TileId::new(tile).is_ok()
+}
+
 /// Reads one `panel.json` as a view panel.
 pub fn parse_view_panel(folder: &str, bytes: &[u8]) -> Result<ViewPanelFile, PanelSkip> {
     let value: Value =
@@ -141,11 +149,13 @@ pub fn parse_view_panel(folder: &str, bytes: &[u8]) -> Result<ViewPanelFile, Pan
             Some(decoded)
         }
     };
+    let placement = optional_text(root, "placement", PLACEMENT_RULE, valid_placement)?;
     Ok(ViewPanelFile {
         renderer,
         title,
         idempotency_key,
         created_by,
+        placement,
     })
 }
 
@@ -159,6 +169,8 @@ struct ViewPanelJson<'a> {
     idempotency_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_by: Option<&'a CreatedBy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<&'a str>,
 }
 
 fn pretty(value: &impl Serialize) -> Vec<u8> {
@@ -168,7 +180,7 @@ fn pretty(value: &impl Serialize) -> Vec<u8> {
 }
 
 /// The bytes of `panel.json`: pretty JSON with a trailing newline. It writes only the fields of
-/// a [`ViewPanelFile`]. The worst case is 3,216 bytes, within [`PANEL_MAX_BYTES`].
+/// a [`ViewPanelFile`]. The worst case is 3,747 bytes, within [`PANEL_MAX_BYTES`].
 pub fn encode_view_panel(file: &ViewPanelFile) -> Vec<u8> {
     pretty(&ViewPanelJson {
         version: 1,
@@ -176,6 +188,7 @@ pub fn encode_view_panel(file: &ViewPanelFile) -> Vec<u8> {
         title: file.title.as_deref(),
         idempotency_key: file.idempotency_key.as_deref(),
         created_by: file.created_by.as_ref(),
+        placement: file.placement.as_deref(),
     })
 }
 
