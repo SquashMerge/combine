@@ -25,6 +25,7 @@ use cli::Command;
 use clock::{MonotonicClock, SystemWallClock};
 use combine_protocol::HostId;
 use config::{DaemonConfigError, DaemonEnv};
+use fd_limit::FdLimits;
 use ids::IdReservation;
 use panels::PanelParts;
 use tokio::signal::unix::{signal, SignalKind};
@@ -34,6 +35,7 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod diagram;
+pub mod fd_limit;
 pub mod ids;
 pub mod panels;
 
@@ -100,11 +102,14 @@ impl From<ServeError> for StartError {
     }
 }
 
-/// The daemon's entry point: runs the command named on the command line.
-pub fn main() -> ExitCode {
+/// The daemon's entry point: runs the command named on the command line. `limits` is the
+/// process's open-file limit, which `serve` raises before it watches anything.
+pub fn main(limits: &dyn FdLimits) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let result = cli::parse(args).and_then(|command| match command {
-        Command::Serve { config } => run_serve(config.as_deref()).map(|()| ExitCode::SUCCESS),
+        Command::Serve { config } => {
+            run_serve(config.as_deref(), limits).map(|()| ExitCode::SUCCESS)
+        }
         Command::Connect { socket, config } => run_connect(socket, config.as_deref()),
         Command::Version => {
             println!(
@@ -273,10 +278,11 @@ pub async fn serve_after_build<S: Future<Output = ()>>(
 
 /// Runs the daemon until it fails or gets SIGTERM or SIGINT, which write every pending layout
 /// before it returns.
-fn run_serve(config_flag: Option<&Path>) -> Result<(), StartError> {
+fn run_serve(config_flag: Option<&Path>, limits: &dyn FdLimits) -> Result<(), StartError> {
     let env = DaemonEnv::from_process();
     let file = load_config(config_flag, &env)?;
     let resolved = config::resolve(file, &env)?;
+    eprintln!("combined: {}", fd_limit::raise(limits));
     eprintln!(
         "combined: data dir {}, socket {}, backend {}",
         resolved.data_dir.display(),
