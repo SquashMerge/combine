@@ -4,7 +4,7 @@ mod shim_support;
 
 use std::time::{Duration, Instant};
 
-use combine_protocol::CreatedBy;
+use combine_protocol::{ClientMessage, CreatedBy, DaemonMessage, McpCaller, McpOpen, RequestId};
 use combined::core::parse_view_panel;
 use combined::ports::{DiagramFailure, DiagramVerdict, FailureCode, ScratchDir};
 use combined::rpc::ServeOptions;
@@ -366,11 +366,27 @@ fn created_by_is_agent_with_null_slot_and_no_terminal_id_is_written() {
     let id = term.0.strip_prefix("fake:").unwrap().to_string();
     let socket = server.socket.to_str().unwrap().to_string();
     server.callers.set_socket(Some(&socket));
+    // The working directory is outside every space, so only the terminal's space can resolve.
+    let outside = server.dir.path().join("outside");
+    assert!(!outside.starts_with(&server.space.0));
+    assert!(wait_until(Duration::from_secs(10), || {
+        let (mut client, _) = WireClient::open(&server.socket);
+        client.send(&ClientMessage::McpOpen(McpOpen {
+            request: RequestId(1),
+            caller: McpCaller {
+                terminal_id: Some(id.clone()),
+                terminal_socket: Some(socket.clone()),
+                cwd: Some(outside.to_str().unwrap().to_string()),
+            },
+        }));
+        matches!(client.recv(), DaemonMessage::McpOpened(_))
+    }));
     let mut shim = Shim::spawn(
         &server,
         ShimEnv {
             terminal_id: Some(id.clone()),
             terminal_socket: Some(socket),
+            cwd: outside,
             ..ShimEnv::new(&server)
         },
     );

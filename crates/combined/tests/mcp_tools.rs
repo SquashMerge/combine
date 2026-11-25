@@ -400,3 +400,47 @@ fn a_create_that_gives_way_answers_the_folders_panel_superseded() {
     assert_eq!(status.body["title"], "theirs");
     assert_eq!(rig.write_count(&content_path("x")), 0);
 }
+
+#[test]
+fn panel_errors_reach_the_tools_as_their_own_codes() {
+    let (rig, mut wire) = rig_and_wire();
+    let created = wire.tool("create_panel", markdown_args("taken", "one"));
+    assert!(!created.is_error, "{created:?}");
+
+    // IdTaken: a second create of the same ID, with no idempotency key.
+    let again = wire.tool("create_panel", markdown_args("taken", "two"));
+    assert_eq!(again.code(), "id_taken");
+
+    // UnknownPanel: an update and a remove of a panel the space doesn't have.
+    let missing = wire.tool("update_panel", json!({"panel": "nope", "content": "x"}));
+    assert_eq!(missing.code(), "unknown_panel");
+    let missing = wire.tool("remove_panel", json!({"panel": "nope"}));
+    assert_eq!(missing.code(), "unknown_panel");
+
+    // Removed: an update of a panel that was removed.
+    wait_validated(&rig, "taken");
+    let removed = wire.tool("remove_panel", json!({"panel": "taken"}));
+    assert!(!removed.is_error, "{removed:?}");
+    let gone = wire.tool("update_panel", json!({"panel": "taken", "content": "x"}));
+    assert_eq!(gone.code(), "removed");
+
+    // InvalidField: an update that changes nothing.
+    let other = wire.tool("create_panel", markdown_args("other", "one"));
+    assert!(!other.is_error, "{other:?}");
+    let nothing = wire.tool("update_panel", json!({"panel": "other"}));
+    assert_eq!(nothing.code(), "invalid_field");
+
+    // Each refusal wrote nothing for the panel it named.
+    assert_eq!(rig.write_count(&file_path("nope")), 0);
+}
+
+#[test]
+fn the_101st_panel_is_panel_limit() {
+    let (_rig, mut wire) = rig_and_wire();
+    for n in 0..combined::core::MAX_PANELS {
+        let made = wire.tool("create_panel", markdown_args(&format!("p{n}"), "x"));
+        assert!(!made.is_error, "{n}: {made:?}");
+    }
+    let over = wire.tool("create_panel", markdown_args("one-too-many", "x"));
+    assert_eq!(over.code(), "panel_limit");
+}
