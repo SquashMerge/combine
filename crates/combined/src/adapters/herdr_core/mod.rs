@@ -6,6 +6,7 @@
 //! adapter keeps the pair alive across a dropped half or a restarted core.
 
 mod attachment;
+mod caller;
 mod connection;
 #[cfg(feature = "test-support")]
 mod control;
@@ -35,6 +36,7 @@ use crate::ports::{
     AttachOptions, Attachment, BackendError, BackendResult, Capabilities, TerminalBackend,
 };
 
+pub use self::caller::HerdrCoreCallerIdentity;
 #[cfg(feature = "test-support")]
 pub use self::control::{DeliveryWait, HerdrCoreControl, PairHalf, PairStatus};
 
