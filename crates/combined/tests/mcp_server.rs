@@ -333,6 +333,26 @@ fn create_refuses_later_milestones_and_terminals() {
 }
 
 #[test]
+fn a_refused_call_clips_a_long_id_in_its_audit_line() {
+    let (server, audit) = server();
+    let api = Fake::new();
+    let id = format!("{}\u{e9}", "a".repeat(254));
+    let arguments = format!(r#"{{"renderer":"terminal","content":"x","id":"{id}"}}"#);
+    let (result, is_error) = tool(&server, &api, "create_panel", &arguments);
+    assert!(is_error);
+    assert_eq!(result["error"]["code"], "not_supported");
+    let long = "b".repeat(100_000);
+    let arguments = format!(r#"{{"renderer":"terminal","content":"x","id":"{long}"}}"#);
+    tool(&server, &api, "create_panel", &arguments);
+    let lines = audit.lines();
+    assert_eq!(lines.len(), 2);
+    let expected = format!(r#"panel="{}" error=not_supported"#, "a".repeat(254));
+    assert!(lines[0].contains(&expected), "{}", lines[0]);
+    let clipped = format!(r#"panel="{}" error=not_supported"#, "b".repeat(255));
+    assert!(lines[1].ends_with(&clipped), "{}", lines[1].len());
+}
+
+#[test]
 fn argument_problems_are_invalid_arguments() {
     let (server, _) = server();
     let api = Fake::new();

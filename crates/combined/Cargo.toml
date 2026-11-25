@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Compiles the in-memory fakes (src/testing/) for tests: the TerminalBackend, the file store, the diagram check, the caller identity, the audit log and the in-process rigs.
+# Compiles the in-memory fakes (src/testing/) for tests: the TerminalBackend, the file store, the diagram check, and the caller identity.
 test-support = []
 
 [dependencies]

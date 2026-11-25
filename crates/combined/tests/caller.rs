@@ -105,6 +105,23 @@ fn relative_and_dotdot_cwds_give_none() {
 }
 
 #[test]
+fn spaces_without_an_absolute_root_never_match_a_cwd() {
+    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()));
+    list.apply_list(&[
+        info("t1", "/work/a"),
+        info("t2", ""),
+        info("t3", "relative/dir"),
+    ]);
+    let outside = caller(None, None, Some("/elsewhere"));
+    assert_eq!(resolve_caller(&outside, None, &list), None);
+    let inside = caller(None, None, Some("/work/a/src"));
+    assert_eq!(
+        resolve_caller(&inside, None, &list),
+        resolved("/work/a", CallerMatch::Cwd)
+    );
+}
+
+#[test]
 fn no_identity_resolves_by_the_cwd_only() {
     let caller = caller(Some("t3"), Some(SOCKET), Some("/work/a"));
     assert_eq!(

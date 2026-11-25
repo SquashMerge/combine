@@ -293,6 +293,17 @@ struct Entry {
 /// A tool call's answer (`None` when its connection closed first) and its audit entry.
 type Outcome = (Option<Reply>, Entry);
 
+/// The longest panel argument an audit line holds; a longer one is cut on a character boundary.
+const AUDIT_PANEL_MAX: usize = 255;
+
+fn clipped(text: &str) -> &str {
+    let mut end = text.len().min(AUDIT_PANEL_MAX);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn refused(error: ToolError, panel: Option<String>) -> Outcome {
     let entry = Entry {
         panel,
@@ -385,10 +396,10 @@ impl McpServer {
             .slot
             .as_deref()
             .map_or_else(|| "null".to_owned(), |slot| format!("{slot:?}"));
-        let panel = entry
-            .panel
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), |panel| format!("{panel:?}"));
+        let panel = entry.panel.as_deref().map_or_else(
+            || "null".to_owned(),
+            |panel| format!("{:?}", clipped(panel)),
+        );
         let end = match &entry.end {
             End::View { revision, state } => {
                 format!("revision={revision} state={}", state_name(*state))

@@ -1,5 +1,5 @@
-//! [`CallerIdentity`] for herdr-core: an agent's `HERDR_TERMINAL_ID` is a terminal of this
-//! daemon's backend when its `HERDR_SOCKET_PATH` names the socket the daemon connects to. No
+//! [`CallerIdentity`] for herdr-core: an agent's `HC_TERMINAL_ID` is a terminal of this
+//! daemon's backend when its `HC_TERMINAL_SOCKET` names the socket the daemon connects to. No
 //! herdr-core call is made.
 
 use std::path::{Path, PathBuf};
