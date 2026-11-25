@@ -171,8 +171,8 @@ describe('App with a held layout', () => {
     await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
     await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
     act(() => layoutPort.push(HOST_A, layout(true)));
-    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
     act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
     return mounted;
   }
 
@@ -207,8 +207,21 @@ describe('App with a held layout', () => {
   });
 
   it("the rail keeps a held space's read-only mark", async () => {
-    await held();
-    expect(screen.getByRole('button', { name: /^alpha/ }).getAttribute('data-read-only')).toBe('true');
+    const { layoutPort, hostsPort } = await mount(saved(null, {}));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout(true)));
+    const rail = () => screen.getByRole('button', { name: /^alpha/ });
+    expect(rail().getAttribute('data-read-only')).toBe('true');
+    // The hook handles the event while the host still reads as connected.
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    await waitFor(() => expect(document.querySelector('main')?.getAttribute('data-held')).toBe('reconnecting'));
+    expect(rail().getAttribute('data-read-only')).toBe('true');
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+    expect(rail().getAttribute('data-read-only')).toBe('true');
+    act(() => hostsPort.setConnection('mac', { kind: 'connected' }));
+    await waitFor(() => expect(layoutPort.calls.filter((c) => c.kind === 'watch')).toHaveLength(2));
+    act(() => layoutPort.push(HOST_A, { ...layout(false), layoutRevision: '5' as DecimalU64 }));
+    await waitFor(() => expect(rail().getAttribute('data-read-only')).toBeNull());
   });
 });
 
@@ -242,6 +255,38 @@ describe('App with a placed panel', () => {
     act(() => layoutPort.push(HOST_A, layout()));
     act(() => layoutPort.push(HOST_A, { ...layout(), layoutRevision: '4' as DecimalU64 }));
     await waitFor(() => expect(selectedTab('t1')).toBe('p2'));
+  });
+});
+
+describe('App dropping a stored active tab', () => {
+  it('only when the previous layout is the same space', async () => {
+    const BETA = '/src/beta';
+    const state: ClientState = {
+      ...defaultClientState(),
+      lastSpace: { spaceId: PATH, selectedAtMs: '5' as DecimalU64 },
+      spaces: {
+        [PATH]: { spaceId: PATH, focusedTile: null, activeTerminal: null, activeTabs: {}, groupState: {} },
+        [BETA]: { spaceId: BETA, focusedTile: null, activeTerminal: null, activeTabs: { t1: 'p2' }, groupState: {} },
+      },
+    };
+    const { layoutPort } = await mount(state);
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout()));
+    await waitFor(() => expect(selectedTab('t1')).toBe('p1'));
+    fireEvent.click(screen.getByRole('button', { name: /^beta/ }));
+    await waitFor(() => expect(layoutPort.calls.filter((c) => c.kind === 'watch')).toHaveLength(2));
+    act(() =>
+      layoutPort.push(HOST_A, {
+        space: BETA,
+        layoutRevision: '1' as DecimalU64,
+        root: { type: 'tile', id: 't1', panels: ['p7', 'p2'], active: 'p7' },
+        readOnly: false,
+        error: null,
+        dropped: null,
+      }),
+    );
+    await waitFor(() => expect(document.querySelector('[data-tile-id="t1"]')).not.toBeNull());
+    expect(selectedTab('t1')).toBe('p2');
   });
 });
 
