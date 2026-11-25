@@ -246,6 +246,24 @@ describe('ViewPanel', () => {
     expect(port.sends).toHaveLength(1);
   });
 
+  it('a_fetch_straddling_a_disconnect_and_reconnect_is_sent_again_and_reported_once', async () => {
+    const port = new MemoryPanelPort();
+    const panel = mountPanel({ port, entry: listed('5') });
+    await flush();
+    expect(port.sends).toHaveLength(1);
+    panel.update({ connected: false, session: 2 });
+    // The rejection lands after the bumped session was synced.
+    await act(async () => port.sends[0]?.reject(new PanelFetchError(null, 'The host disconnected.')));
+    panel.update({ connected: true, entry: listed('5') });
+    await flush();
+    expect(port.sends).toHaveLength(2);
+    await act(async () => port.sends[1]?.resolve(content('5', 'five')));
+    await waitFor(() => expect(panel.viewState()).toBe('rendered'));
+    await flush();
+    expect(panel.content().textContent).toBe('five');
+    expect(port.reports.map((r) => r.report.revision)).toEqual(['5']);
+  });
+
   it('an_out_of_order_list_never_replaces_a_newer_revision', async () => {
     const port = answered({ p: content('9', 'nine') });
     const panel = mountPanel({ port, entry: listed('9') });

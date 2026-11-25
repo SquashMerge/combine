@@ -10,7 +10,8 @@ export interface Shown {
 
 export interface MachineState {
   latestAccepted: DecimalU64 | null;
-  fetching: { token: number; revision: DecimalU64 } | null;
+  /** `session` is the host session the request was issued in. */
+  fetching: { token: number; revision: DecimalU64; session: number } | null;
   fetchFailed: { revision: DecimalU64; session: number; message: string } | null;
   rendering: { token: number; revision: DecimalU64 } | null;
   shown: Shown | null;
@@ -123,12 +124,14 @@ export function decide(state: MachineState, input: Input): Decision {
         if (
           fetchable(entry.summary.state) &&
           isNewer(revision, next.latestAccepted) &&
-          (next.fetching === null || compareDecimalU64(next.fetching.revision, revision) < 0) &&
+          (next.fetching === null ||
+            compareDecimalU64(next.fetching.revision, revision) < 0 ||
+            next.fetching.session < next.session) &&
           !(failed !== null && compareDecimalU64(failed.revision, revision) >= 0 && failed.session === next.session)
         ) {
           // F1
           const token = next.nextToken;
-          next = { ...next, nextToken: token + 1, fetching: { token, revision } };
+          next = { ...next, nextToken: token + 1, fetching: { token, revision, session: next.session } };
           effects.push({ kind: 'fetch', token, revision, urgent: input.focused });
         }
       }
@@ -158,7 +161,7 @@ export function decide(state: MachineState, input: Input): Decision {
       const next: MachineState = {
         ...state,
         fetching: null,
-        fetchFailed: { revision: fetching.revision, session: state.session, message: input.message },
+        fetchFailed: { revision: fetching.revision, session: fetching.session, message: input.message },
       };
       return { state: report(next, effects), effects };
     }

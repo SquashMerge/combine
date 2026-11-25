@@ -66,7 +66,7 @@ describe('viewPanelMachine fetching', () => {
     const run = new Run();
     run.focused = true;
     expect(run.entry(listed('5'))).toEqual([{ kind: 'fetch', token: 1, revision: '5', urgent: true }]);
-    expect(run.state.fetching).toEqual({ token: 1, revision: '5' });
+    expect(run.state.fetching).toEqual({ token: 1, revision: '5', session: 1 });
   });
 
   it('F1 fetches validated_parser_only and nothing else', () => {
@@ -141,6 +141,43 @@ describe('viewPanelMachine fetching', () => {
     run.send({ kind: 'fetchFailed', token: 1, message: 'The host disconnected.' });
     run.session = 2;
     expect(run.entry(listed('5'))).toHaveLength(1);
+  });
+
+  it('a_failure_arriving_after_the_session_bump_is_retried_after_the_reconnect', () => {
+    const run = new Run();
+    run.entry(listed('5'));
+    run.session = 2;
+    run.connected = false;
+    run.entry(listed('5'));
+    run.send({ kind: 'fetchFailed', token: 1, message: 'The host disconnected.' });
+    expect(run.state.fetchFailed).toEqual({ revision: '5', session: 1, message: 'The host disconnected.' });
+    run.connected = true;
+    expect(run.entry(listed('5'))).toEqual([{ kind: 'fetch', token: 2, revision: '5', urgent: false }]);
+  });
+
+  it('a_fetch_still_pending_at_the_reconnect_is_abandoned_and_fetched_again', () => {
+    const run = new Run();
+    run.entry(listed('5'));
+    run.session = 2;
+    run.connected = false;
+    run.entry(listed('5'));
+    run.connected = true;
+    expect(run.entry(listed('5'))).toEqual([{ kind: 'fetch', token: 2, revision: '5', urgent: false }]);
+    expect(run.entry(listed('5'))).toEqual([]);
+    expect(run.send({ kind: 'fetched', token: 1, content: content('5', 'validated') })).toEqual([]);
+    expect(run.send({ kind: 'fetchFailed', token: 1, message: 'late' })).toEqual([]);
+    expect(run.state.fetchFailed).toBeNull();
+    expect(run.send({ kind: 'fetched', token: 2, content: content('5') }).map((e) => e.kind)).toEqual(['render']);
+  });
+
+  it('a_stale_reply_is_ignored_by_the_token_check_itself', () => {
+    const run = new Run();
+    run.entry(listed('5'));
+    run.entry(listed('6'));
+    // Token 1 is stale although its revision is still acceptable: only the token check refuses it.
+    expect(run.send({ kind: 'fetched', token: 1, content: content('7') })).toEqual([]);
+    expect(run.state.latestAccepted).toBeNull();
+    expect(run.state.fetching).toEqual({ token: 2, revision: '6', session: 1 });
   });
 
   it('F5 shows the render and F6 discards a stale one', () => {
