@@ -1,6 +1,6 @@
 # M2 plan: agent-built diagrams
 
-This is the working plan for SPEC.md milestone 2 (rev 27). SPEC.md is the source of truth for behavior; this file only orders the work.
+This is the working plan for SPEC.md milestone 2 (rev 28). SPEC.md is the source of truth for behavior; this file only orders the work.
 
 M2 covers "MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation" (SPEC roadmap). M0 handed it this done criterion: **M2 is done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.**
 
@@ -97,8 +97,8 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 - **D16. What `create_panel` makes.** Mermaid or Markdown with static content only. `kind`, `loader` and live sources are refused with an error naming the milestone that adds them. Terminals can't be created through MCP.
 - **D17. Links.** A minimal `open_url` host command. Rust checks the scheme (`https:` or `http:` only), and it opens on a click only, through `/usr/bin/open` with no shell.
 - **D18. Markdown libraries.** `markdown-it` with `html: false`, then DOMPurify, plus `highlight.js` core with a few languages. All are pinned exactly, declared in `package.json`, and added to the `web-renderers` external list in `rules.toml`.
-- **D19. Render status.** It is kept per connection, in memory, and dropped on disconnect.
-- **D20. How the panel list reaches a client.** It rides on `watch_layout`: no new subscription.
+- **D19. Render status.** It is kept per connection, in memory, and dropped on disconnect. S5 outcome: kept per connection in `core/render_status.rs`, at most 1,024 panels per connection, the least recently reported dropped first; reports for a newer-than-current revision, or an unknown or removed panel, are ignored (SPEC rev 28).
+- **D20. How the panel list reaches a client.** It rides on `watch_layout`: no new subscription. S5 outcome: `panels` follows the `layout` answer and is pushed after any change of the watched space's panels, trimmed to one frame (SPEC rev 28).
 - **D21. Trust for static panels.** M2 never produces `untrusted`, because static Mermaid and Markdown run no code. Repo-origin static panels render sanitized, without approval. State this in SPEC.
 
 **SPEC fixes that come with these slices:**
@@ -113,12 +113,12 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 - **The JS-engine boundary.** Validator code outside `adapters/loader/` fails arch-guard.
 - **Drift between the two copies of Pele.** The daemon's vendored copy and the web's npm copy must be the same artifact. The hash test guards this.
 - **Bundle size.** Pele is about 265 KB gzipped. Mitigate with lazy literal imports and a short list of highlighted languages.
-- **The CSP.** DOMPurify's SVG profile may strip Pele's styles. jsdom doesn't apply the CSP; that is how M1 shipped a CSP bug. S5 and S9 check in the packaged app.
+- **The CSP.** DOMPurify's SVG profile may strip Pele's styles. jsdom doesn't apply the CSP; that is how M1 shipped a CSP bug. S5 and S9 check in the packaged app. Outcome: S5's probe build and the x86_64 bundle check (`docs/m2-s5-csp.md`).
 - **Undeclared npm imports.** trellis rates them `unknown`, which passes. Declare every renderer package.
 - **Agent file edits racing MCP writes.** Check the hash before every panel and layout write (the #34 finding).
 - **The shim's lifetime and the connection cap.** A shim must survive a daemon restart, or fail clearly.
 - **Daemon-made layout writes with no watcher.** These are new. The debounce and shutdown flushes must cover them.
-- **A panel reply too big for one frame.** `write_one` (`crates/combined/src/rpc/connection.rs:169-185`) replaces a message it can't frame with an internal error carrying `request: null`. So a panel reply whose 204,800-byte source escapes past the 1 MiB frame (control characters at 6 bytes each) would leave its `get_panel` unanswered. S3 refuses a source whose escaped form can't fit one panel frame, or S5 gives that error the reply's `request`. S4 handles an `mcp` reply too big for one frame the same way.
+- **A panel reply too big for one frame.** `write_one` (`crates/combined/src/rpc/connection.rs:169-185`) replaces a message it can't frame with an internal error carrying `request: null`. So a panel reply whose 204,800-byte source escapes past the 1 MiB frame (control characters at 6 bytes each) would leave its `get_panel` unanswered. S3 refuses a source whose escaped form can't fit one panel frame, or S5 gives that error the reply's `request`. S4 handles an `mcp` reply too big for one frame the same way. Outcome: S3 refuses such a source; S5's `write_one` also names the request of a `panel` or `panels` that can't fit, and the client keeps at most 4 `get_panel` in flight per host.
 - **Memory and depth when parsing `mcp.message`.** The codec keeps `mcp.message` as text and accepts any nesting depth. So S4 bounds memory and depth when it parses the message into JSON-RPC types, because a tree of a full frame can hold over 100 MiB.
 
 ## Open issues
