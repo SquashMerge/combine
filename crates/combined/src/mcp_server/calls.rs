@@ -4,14 +4,16 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use combine_protocol::{CreatedBy, PanelError, PanelState, Renderer};
+use combine_protocol::{CreatedBy, PanelError, PanelState, RenderStatus, Renderer};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::api::PanelApi;
 use super::jsonrpc::{clip, fits, present, quoted, SERDE_TEXT_MAX};
 use super::{tool_error_code, McpServer};
-use crate::core::{PanelApiError, PanelCreate, PanelUpdate, PanelView, PANEL_ID_MAX_BYTES};
+use crate::core::{
+    ClientRender, PanelApiError, PanelCreate, PanelUpdate, PanelView, PANEL_ID_MAX_BYTES,
+};
 use crate::model::Lifetime;
 
 const LATER_MILESTONES_SUFFIX: &str = "create_panel makes static Mermaid and Markdown panels";
@@ -127,6 +129,17 @@ struct PanelResult<'a> {
     file_error: Option<&'a str>,
     read_only: bool,
     superseded: bool,
+    /// Set only by `panel_status`; every other tool's result omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_status: Option<Vec<RenderEntry<'a>>>,
+}
+
+/// What one client reported drawing of a panel.
+#[derive(Serialize)]
+struct RenderEntry<'a> {
+    revision: u64,
+    status: RenderStatus,
+    error: Option<&'a PanelError>,
 }
 
 #[derive(Serialize)]
@@ -174,7 +187,7 @@ fn state_name(state: PanelState) -> &'static str {
     }
 }
 
-fn panel_json(view: &PanelView, superseded: bool) -> String {
+fn panel_json(view: &PanelView, superseded: bool, renders: Option<&[ClientRender]>) -> String {
     to_json(&PanelResult {
         panel: &view.id,
         revision: view.revision,
@@ -188,6 +201,16 @@ fn panel_json(view: &PanelView, superseded: bool) -> String {
         file_error: view.file_error.as_deref(),
         read_only: view.read_only,
         superseded,
+        render_status: renders.map(|renders| {
+            renders
+                .iter()
+                .map(|render| RenderEntry {
+                    revision: render.revision,
+                    status: render.status,
+                    error: render.error.as_ref(),
+                })
+                .collect()
+        }),
     })
 }
 
@@ -199,8 +222,12 @@ struct Reply {
 
 impl Reply {
     fn panel(view: &PanelView, superseded: bool) -> Reply {
+        Reply::panel_with(view, superseded, None)
+    }
+
+    fn panel_with(view: &PanelView, superseded: bool, renders: Option<&[ClientRender]>) -> Reply {
         Reply {
-            text: panel_json(view, superseded),
+            text: panel_json(view, superseded, renders),
             is_error: false,
         }
     }
@@ -620,7 +647,14 @@ impl McpServer {
                 ),
             )
             .reply(),
-            asked => Reply::panel(&view, asked.is_some_and(|asked| asked < view.revision)),
+            asked => match api.render_status(&panel) {
+                Ok(renders) => Reply::panel_with(
+                    &view,
+                    asked.is_some_and(|asked| asked < view.revision),
+                    Some(&renders),
+                ),
+                Err(error) => ToolError::api(&error).reply(),
+            },
         }
     }
 
@@ -636,7 +670,10 @@ impl McpServer {
         };
         let mut views: Vec<&PanelView> = list.panels.iter().collect();
         views.sort_by(|a, b| a.id.cmp(&b.id));
-        let panels: Vec<String> = views.iter().map(|view| panel_json(view, false)).collect();
+        let panels: Vec<String> = views
+            .iter()
+            .map(|view| panel_json(view, false, None))
+            .collect();
         let skipped = to_json(&list.skipped);
         let error = list
             .error
