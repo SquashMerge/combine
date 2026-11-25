@@ -12,7 +12,7 @@ import {
 import { dictGet, dictWith } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
-import type { ClientStatePort, HostsPort, LayoutPort, SpawnPort } from '../ipc/port';
+import type { ClientStatePort, HostsPort, LayoutPort, OpenUrlPort, PanelPort, SpawnPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import type { HostsSnapshot } from '../model/hosts';
@@ -32,6 +32,8 @@ interface AppProps {
   clientStatePort: ClientStatePort;
   layoutPort: LayoutPort;
   spawnPort?: SpawnPort;
+  panelPort?: PanelPort;
+  openUrlPort?: OpenUrlPort;
   terminalPort: TerminalPort;
   createAdapter?: XtermAdapterFactory;
   newTileId?: () => string;
@@ -61,6 +63,8 @@ export function App({
   clientStatePort,
   layoutPort,
   spawnPort,
+  panelPort,
+  openUrlPort,
   terminalPort,
   createAdapter,
   newTileId,
@@ -231,7 +235,7 @@ export function App({
     (space: SpaceKey, id: TermId) => recordSelection(space, id),
     [recordSelection],
   );
-  const layout = useSpaceLayout(layoutPort, snapshot, selected, newTileId);
+  const layout = useSpaceLayout(layoutPort, snapshot, selected, newTileId, panelPort);
 
   // useSpaceLayout drops its layout on any disconnect. Rendering the tree from the last layout of the
   // selected space keeps the terminal panel mounted through a host drop, so its controller reconnects
@@ -371,6 +375,10 @@ export function App({
           onClose={layout.close}
           terminalPort={terminalPort}
           terminal={mountedTerminal}
+          space={selected}
+          panels={layout.panels}
+          {...(panelPort === undefined ? {} : { panelPort })}
+          {...(openUrlPort === undefined ? {} : { openUrlPort })}
           {...(createAdapter === undefined ? {} : { createAdapter })}
         />
       )}

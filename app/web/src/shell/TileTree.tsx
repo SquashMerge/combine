@@ -1,8 +1,12 @@
 import { type Dict, dictGet } from '../model/dict';
 import type { HostId, TermId } from '../model/ids';
 import type { LayoutNode, LayoutSnapshot, SplitDirection } from '../model/layout';
+import type { OpenUrlPort, PanelPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
+import { type SpaceKey } from '../model/space';
+import { type SpacePanelsView, panelEntry, tabLabel } from '../model/panels';
 import { TerminalPanel } from '../panels/TerminalPanel';
+import { ViewPanel } from '../panels/ViewPanel';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 
 export interface TerminalMount {
@@ -24,6 +28,10 @@ interface TileTreeProps {
   terminalPort: TerminalPort;
   terminal: TerminalMount | null;
   createAdapter?: XtermAdapterFactory;
+  space?: SpaceKey | null;
+  panels?: SpacePanelsView | null;
+  panelPort?: PanelPort;
+  openUrlPort?: OpenUrlPort;
 }
 
 type NodeProps = Omit<TileTreeProps, 'layout' | 'notice' | 'error'> & {
@@ -44,12 +52,29 @@ function Node({ node, closable, ...rest }: NodeProps) {
       </div>
     );
   }
-  const { focusedTile, activeTabs, onFocus, onSelectTab, onSplit, onClose, terminalPort, terminal, createAdapter } =
-    rest;
+  const {
+    focusedTile,
+    activeTabs,
+    onFocus,
+    onSelectTab,
+    onSplit,
+    onClose,
+    terminalPort,
+    terminal,
+    createAdapter,
+    space = null,
+    panels = null,
+    panelPort,
+    openUrlPort,
+  } = rest;
   const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
   const focused = focusedTile === node.id;
+  const list = panels?.list ?? null;
+  const entry = active === null || panels === null ? null : panelEntry(list, active);
+  // A listed or skipped panel takes the focused tile; a dangling or loading one leaves the terminal.
+  const viewWins = entry?.kind === 'listed' || entry?.kind === 'skipped';
   // The panel fills the whole body: a placeholder beside it would overflow the container the PTY is sized from.
-  const hasTerminal = focused && terminal !== null;
+  const hasTerminal = focused && terminal !== null && !viewWins;
   return (
     <div
       className="tile"
@@ -65,10 +90,11 @@ function Node({ node, closable, ...rest }: NodeProps) {
               type="button"
               role="tab"
               data-panel-id={panel}
+              data-panel-entry={panelPort === undefined ? undefined : panelEntry(list, panel).kind}
               aria-selected={panel === active}
               onClick={() => onSelectTab(node.id, panel)}
             >
-              {panel}
+              {panelPort === undefined ? panel : tabLabel(list, panel)}
             </button>
           ))}
         </div>
@@ -83,7 +109,25 @@ function Node({ node, closable, ...rest }: NodeProps) {
         </button>
       </div>
       <div className="tile-body" role="tabpanel">
-        {!hasTerminal && (active ?? 'No panels')}
+        {!hasTerminal &&
+          (active === null ? (
+            'No panels'
+          ) : panelPort === undefined || space === null ? (
+            active
+          ) : (
+            <ViewPanel
+              key={`${space.hostId}/${space.path}/${active}`}
+              hostId={space.hostId}
+              space={space.path}
+              panelId={active}
+              focused={focused}
+              entry={panelEntry(list, active)}
+              session={panels?.session ?? 0}
+              connected={panels?.connected ?? false}
+              port={panelPort}
+              {...(openUrlPort === undefined ? {} : { openUrlPort })}
+            />
+          ))}
         {hasTerminal && (
           // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
           <TerminalPanel
@@ -111,6 +155,11 @@ export function TileTree({ layout, notice, error, ...rest }: TileTreeProps) {
         </p>
       )}
       {error !== null && <p role="alert">{error}</p>}
+      {rest.panels?.list?.error != null && (
+        <p className="panels-error" role="alert">
+          {rest.panels.list.error}
+        </p>
+      )}
       {dropped !== null && (
         <p className="layout-notice" role="status">
           {dropped}

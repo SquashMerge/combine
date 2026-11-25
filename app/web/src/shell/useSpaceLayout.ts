@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { LayoutPort } from '../ipc/port';
+import type { LayoutPort, PanelPort } from '../ipc/port';
 import type { HostsSnapshot } from '../model/hosts';
 import { type DecimalU64, type HostId, compareDecimalU64 } from '../model/ids';
 import type { LayoutEvent, LayoutSnapshot, SplitDirection } from '../model/layout';
 import { LayoutQueue } from '../model/layoutQueue';
+import { type PanelList, type PanelsEvent, type SpacePanelsView, isLoadingList } from '../model/panels';
 import { type SpaceKey, spaceKeyId } from '../model/space';
 
 const NOT_CONNECTED = 'not connected';
@@ -12,6 +13,8 @@ export interface SpaceLayout {
   snapshot: LayoutSnapshot | null;
   notice: string | null;
   error: string | null;
+  /** The selected space's panels; null without a panel port. */
+  panels: SpacePanelsView | null;
   readOnlySpaces: ReadonlySet<string>;
   split: (tile: string, dir: SplitDirection) => void;
   close: (tile: string) => void;
@@ -20,6 +23,13 @@ export interface SpaceLayout {
 interface Held {
   hostId: HostId;
   snapshot: LayoutSnapshot;
+}
+
+interface PanelsHeld {
+  hostId: HostId;
+  space: string;
+  list: PanelList | null;
+  connected: boolean;
 }
 
 function errorText(cause: unknown): string {
@@ -42,6 +52,7 @@ export function useSpaceLayout(
   hosts: HostsSnapshot | null,
   selected: SpaceKey | null,
   newTileId?: () => string,
+  panelPort?: PanelPort,
 ): SpaceLayout {
   const [held, setHeld] = useState<Held | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -50,6 +61,11 @@ export function useSpaceLayout(
   // The port whose layout-event listener is registered. No watch is sent before then: a quick
   // reply to it would arrive with no listener and be lost.
   const [listening, setListening] = useState<LayoutPort | null>(null);
+  const [panelsListening, setPanelsListening] = useState<PanelPort | null>(null);
+  const [panelsHeld, setPanelsHeld] = useState<PanelsHeld | null>(null);
+  // Goes up each time the watched host's connection ends; the view panel hosts report again on it.
+  const [panelsSession, setPanelsSession] = useState(0);
+  const panelsSessionRef = useRef(0);
   const watched = useRef<SpaceKey | null>(null);
   const watchRequest = useRef<DecimalU64 | null>(null);
   // Bumped whenever the watch is replaced, dropped or unmounted, so a late watch reply from an
@@ -57,7 +73,7 @@ export function useSpaceLayout(
   const watchGeneration = useRef(0);
   const queue = useRef<LayoutQueue | null>(null);
 
-  const ready = listening === port;
+  const ready = listening === port && (panelPort === undefined || panelsListening === panelPort);
   const watchHost =
     ready && selected !== null && isConnected(hosts, selected.hostId) ? selected.hostId : null;
   const watchPath = watchHost === null ? null : (selected?.path ?? null);
@@ -74,6 +90,13 @@ export function useSpaceLayout(
     watched.current = next;
     if (next !== null && (prev === null || prev.hostId !== next.hostId || prev.path !== next.path)) {
       queue.current?.onDisconnected();
+      setPanelsHeld((current) =>
+        current !== null && current.hostId === next.hostId && current.space === next.path
+          ? current.connected
+            ? { ...current, connected: false }
+            : current
+          : { hostId: next.hostId, space: next.path, list: null, connected: false },
+      );
       queue.current = new LayoutQueue({
         send: (base, ops) => port.mutateLayout(next.hostId, next.path, base, ops),
         onNotice: setNotice,
@@ -99,6 +122,9 @@ export function useSpaceLayout(
       queue.current?.onDisconnected();
       queue.current = null;
       setHeld(null);
+      setPanelsHeld((current) =>
+        current === null || !current.connected ? current : { ...current, connected: false },
+      );
     }
   }, [port, watchHost, watchPath, newTileId]);
 
@@ -178,6 +204,48 @@ export function useSpaceLayout(
     };
   }, [port]);
 
+  useEffect(() => {
+    if (panelPort === undefined) return undefined;
+    let active = true;
+    let unsubscribe: (() => void) | null = null;
+
+    const handle = (event: PanelsEvent): void => {
+      const target = watched.current;
+      if (!active || target === null || event.hostId !== target.hostId) return;
+      if (event.kind === 'disconnected') {
+        panelsSessionRef.current += 1;
+        setPanelsSession(panelsSessionRef.current);
+        setPanelsHeld((current) =>
+          current !== null && current.hostId === target.hostId && current.connected
+            ? { ...current, connected: false }
+            : current,
+        );
+        return;
+      }
+      if (event.list.space !== target.path) return;
+      const list = isLoadingList(event.list) ? null : event.list;
+      setPanelsHeld({ hostId: target.hostId, space: target.path, list, connected: true });
+    };
+
+    panelPort.onPanelsEvent(handle).then(
+      (stop) => {
+        if (!active) {
+          stop();
+          return;
+        }
+        unsubscribe = stop;
+        setPanelsListening(panelPort);
+      },
+      (cause: unknown) => {
+        if (active) setError(errorText(cause));
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [panelPort]);
+
   const split = useCallback(
     (tile: string, dir: SplitDirection) => queue.current?.split(tile, dir),
     [],
@@ -189,8 +257,17 @@ export function useSpaceLayout(
       ? held.snapshot
       : null;
 
+  const panels = useMemo<SpacePanelsView | null>(() => {
+    if (panelPort === undefined || selected === null) return null;
+    const held =
+      panelsHeld !== null && panelsHeld.hostId === selected.hostId && panelsHeld.space === selected.path
+        ? panelsHeld
+        : null;
+    return { session: panelsSession, connected: held?.connected ?? false, list: held?.list ?? null };
+  }, [panelPort, selected, panelsHeld, panelsSession]);
+
   return useMemo(
-    () => ({ snapshot, notice, error, readOnlySpaces: readOnly, split, close }),
-    [snapshot, notice, error, readOnly, split, close],
+    () => ({ snapshot, notice, error, panels, readOnlySpaces: readOnly, split, close }),
+    [snapshot, notice, error, panels, readOnly, split, close],
   );
 }

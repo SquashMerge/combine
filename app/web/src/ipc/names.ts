@@ -24,3 +24,7 @@ export const TERMINAL_REQUEST_OWNERSHIP_COMMAND = 'terminal_request_ownership';
 export const TERMINAL_INPUT_COMMAND = 'terminal_input';
 export const TERMINAL_AUTOMATIC_REPLY_COMMAND = 'terminal_automatic_reply';
 export const OPEN_URL_COMMAND = 'open_url';
+export const PANELS_EVENT = 'panels-changed';
+export const GET_PANEL_COMMAND = 'get_panel';
+export const REPORT_RENDER_COMMAND = 'report_render';
+export const CSP_PROBE_REPORT_COMMAND = 'csp_probe_report';
