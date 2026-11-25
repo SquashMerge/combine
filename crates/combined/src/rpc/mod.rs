@@ -23,6 +23,7 @@ mod connection;
 pub mod flush;
 mod mcp_channel;
 mod panel_calls;
+mod panel_lane;
 mod server;
 pub mod socket;
 

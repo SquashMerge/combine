@@ -8,7 +8,7 @@ mod daemon_support;
 mod panel_support;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use combine_protocol::{
     ClientMessage, DaemonMessage, LayoutNode, LayoutOp, LayoutSnapshot, MutateLayout, Ratio,
@@ -25,6 +25,30 @@ use panel_support::{settled_read_count, Race, RacingStore};
 
 const WAIT: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_millis(400);
+
+/// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
+/// only on a client that has sent `watch_layout`.
+fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
+    loop {
+        match client.recv() {
+            DaemonMessage::Panels(_) => {}
+            other => return other,
+        }
+    }
+}
+
+/// [`WireClient::recv_within`], skipping `panels` frames. `None` when nothing else arrives
+/// within `wait`.
+fn recv_within_skipping_panels(client: &WireClient, wait: Duration) -> Option<DaemonMessage> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match client.recv_within(left)? {
+            DaemonMessage::Panels(_) => {}
+            other => return Some(other),
+        }
+    }
+}
 const PROMPT: LayoutTiming = LayoutTiming {
     debounce_ms: 20,
     max_wait_ms: 100,
@@ -118,7 +142,7 @@ impl Env {
 }
 
 fn expect_layout(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
-    match client.recv() {
+    match recv_skipping_panels(client) {
         DaemonMessage::Layout(layout) => {
             assert_eq!(layout.request, request.map(RequestId));
             layout.layout
@@ -195,7 +219,7 @@ fn the_window_after_the_comparing_read_overwrites() {
         OUTSIDE.as_bytes()
     );
     assert!(
-        client.recv_within(QUIET).is_none(),
+        recv_within_skipping_panels(&client, QUIET).is_none(),
         "the lost outside edit caused a push"
     );
 }

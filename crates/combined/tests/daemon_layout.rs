@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use combine_protocol::{
     ClientMessage, DaemonMessage, ErrorCode, LayoutNode, LayoutOp, LayoutSnapshot, MutateLayout,
@@ -27,6 +27,30 @@ use serde_json::{json, Map};
 const WAIT: Duration = Duration::from_secs(10);
 /// How long a test waits to be sure nothing more arrives.
 const QUIET: Duration = Duration::from_millis(300);
+
+/// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
+/// only on a client that has sent `watch_layout`.
+fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
+    loop {
+        match client.recv() {
+            DaemonMessage::Panels(_) => {}
+            other => return other,
+        }
+    }
+}
+
+/// [`WireClient::recv_within`], skipping `panels` frames. `None` when nothing else arrives
+/// within `wait`.
+fn recv_within_skipping_panels(client: &WireClient, wait: Duration) -> Option<DaemonMessage> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match client.recv_within(left)? {
+            DaemonMessage::Panels(_) => {}
+            other => return Some(other),
+        }
+    }
+}
 
 /// Writes only when told to, so a test controls when the write happens.
 const HOUR: LayoutTiming = LayoutTiming {
@@ -129,7 +153,7 @@ fn send_mutate(client: &mut WireClient, space: &str, request: u64, base: u64, op
 
 /// The next message, which must be a `layout` answering `request` (`None` for a push).
 fn expect_layout(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
-    match client.recv() {
+    match recv_skipping_panels(client) {
         DaemonMessage::Layout(layout) => {
             assert_eq!(layout.request, request.map(RequestId));
             layout.layout
@@ -139,7 +163,17 @@ fn expect_layout(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
 }
 
 fn expect_error(client: &WireClient, code: ErrorCode, request: u64) -> String {
-    match client.recv() {
+    error_of(recv_skipping_panels(client), code, request)
+}
+
+/// [`expect_error`] for a client that never watched a space, so it reads its frames raw and a
+/// `panels` frame sent to it is a failure.
+fn expect_error_unwatched(client: &WireClient, code: ErrorCode, request: u64) -> String {
+    error_of(client.recv(), code, request)
+}
+
+fn error_of(message: DaemonMessage, code: ErrorCode, request: u64) -> String {
+    match message {
         DaemonMessage::Error(error) => {
             assert_eq!(error.code, code, "{}", error.message);
             assert_eq!(error.request, Some(RequestId(request)));
@@ -239,7 +273,7 @@ fn own_write_causes_no_reload_end_to_end() {
         "the echo of the write was never re-read"
     );
     assert!(
-        client.recv_within(QUIET).is_none(),
+        recv_within_skipping_panels(&client, QUIET).is_none(),
         "the write caused a push"
     );
     assert_eq!(env.reads(), reads + 2);
@@ -418,8 +452,8 @@ fn not_watched_mutate_is_invalid_request() {
     let mut other = env.client();
 
     send_mutate(&mut other, &env.name(), 2, 0, split_main());
-    expect_error(&other, ErrorCode::InvalidRequest, 2);
-    assert!(watcher.recv_within(QUIET).is_none());
+    expect_error_unwatched(&other, ErrorCode::InvalidRequest, 2);
+    assert!(recv_within_skipping_panels(&watcher, QUIET).is_none());
 }
 
 #[test]
@@ -437,7 +471,7 @@ fn push_goes_only_to_watching_connection() {
     assert_eq!(push.layout_revision, 1);
     assert!(idle.recv_within(QUIET).is_none());
     assert!(
-        writer.recv_within(QUIET).is_none(),
+        recv_within_skipping_panels(&writer, QUIET).is_none(),
         "a reply is not followed by a push"
     );
 }
@@ -453,7 +487,7 @@ fn unwatch_layout_gets_no_reply_and_flushes() {
     client.send(&ClientMessage::UnwatchLayout(UnwatchLayout {}));
 
     env.wait_writes(1);
-    assert!(client.recv_within(QUIET).is_none());
+    assert!(recv_within_skipping_panels(&client, QUIET).is_none());
 }
 
 #[test]
@@ -468,7 +502,7 @@ fn closing_connection_gets_no_layout_push_and_is_unwatched() {
     garbage.push(1);
     garbage.extend_from_slice(b"not json!");
     closing.send_bytes(&garbage);
-    match closing.recv() {
+    match recv_skipping_panels(&closing) {
         DaemonMessage::Error(error) => assert_eq!(error.code, ErrorCode::Malformed),
         other => panic!("expected the malformed error, got {other:?}"),
     }

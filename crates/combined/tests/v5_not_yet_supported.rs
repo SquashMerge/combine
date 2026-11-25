@@ -1,5 +1,6 @@
-//! The daemon's interim answers to the version 5 messages M2-S5 and M2-S7 still build; `mcp_open`
-//! and `mcp` are answered by the server since M2-S4 (tests/mcp_channel.rs).
+//! The daemon's interim answers to the version 5 messages M2-S7 still builds. `mcp_open` and `mcp`
+//! (M2-S4), and `get_panel` and `report_render` (M2-S5), are handled by the server, so core's arms
+//! for them are fallbacks that a real connection never reaches.
 
 use combine_protocol as wire;
 use combined::core::{ops_from_wire, Core, CoreConfig};
