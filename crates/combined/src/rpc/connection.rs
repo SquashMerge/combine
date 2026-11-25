@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use combine_protocol::{
     daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, DecodeError,
-    EncodeError, ErrorCode, ErrorMessage, HandshakeError, HostId, ReadError, WriteError,
+    EncodeError, ErrorCode, ErrorMessage, HandshakeError, HostId, JsonRpcMessage, ReadError,
+    WriteError,
 };
 use tokio::sync::mpsc;
 
@@ -25,6 +26,10 @@ pub(super) enum ConnEvent {
     Malformed(ConnectionId, String),
     /// The connection ended or failed.
     Closed(ConnectionId),
+    /// A reply of the connection's MCP channel, sent by its tool thread.
+    McpReply(ConnectionId, JsonRpcMessage),
+    /// The connection's tool thread ended.
+    McpEnded(ConnectionId),
 }
 
 /// What the server tells a connection's writer.

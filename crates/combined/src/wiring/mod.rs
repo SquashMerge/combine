@@ -18,6 +18,7 @@ use crate::adapters::fs::project_dirs::FsProjectDirs;
 use crate::adapters::fs::scratch_store::FsScratchStore;
 use crate::adapters::loader::DiagramLimits;
 use crate::core::{Core, CoreConfig, Driver, LayoutTiming, PanelTiming, TerminalList};
+use crate::mcp_server::StderrAudit;
 use crate::ports::{FileStore, TerminalBackend};
 use crate::rpc::socket::{self, BindError};
 use crate::rpc::{self, ServeError, ServeOptions, ServerParts, ServerStats};
@@ -233,6 +234,8 @@ pub fn server_parts_with_panels(
         scratch: panels.scratch,
         panel_timing: panels.timing,
         panel_calls: None,
+        caller_identity: None,
+        mcp_audit: Arc::new(StderrAudit),
     })
 }
 
@@ -329,7 +332,7 @@ fn run_serve(config_flag: Option<&Path>, limits: &dyn FdLimits) -> Result<(), St
         else {
             return Ok(Served::Cancelled);
         };
-        let parts = server_parts_with_panels(
+        let mut parts = server_parts_with_panels(
             backend?,
             id_base,
             host_id,
@@ -343,6 +346,7 @@ fn run_serve(config_flag: Option<&Path>, limits: &dyn FdLimits) -> Result<(), St
                 timing: PanelTiming::default(),
             },
         )?;
+        parts.caller_identity = backend::caller_identity(&resolved.backend);
         serve_after_build(
             parts,
             &resolved.socket,

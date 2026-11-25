@@ -1,33 +1,45 @@
 #![cfg(feature = "test-support")]
 //! The in-memory fakes, for tests: the TerminalBackend, the file store, the scratch store, the
-//! wall clock and the diagram check.
+//! wall clock, the diagram check and the caller identity, and the audit log. Also the pieces
+//! the test crates share: scratch directories, a wire client, and `PanelServer`, a daemon
+//! server in this process on the fakes.
 //!
 //! [`FakeBackend::new`] gives the backend and a [`FakeControl`] handle. The control handle
 //! drives the program in each terminal, injects faults and observes what the backend was asked
 //! to do. The fake runs no threads and reads no clock: nothing happens until a test calls into
 //! it, or polls an event stream.
 
+mod audit_log;
 mod caller_identity;
 mod control;
 mod diagram_check;
 mod fake_attachment;
 mod fake_backend;
 mod file_store;
+mod panel_server;
+mod scratch_dir;
 mod scratch_store;
 mod wall_clock;
+mod wire_client;
 pub(crate) mod world;
 
 use combine_protocol::{Display, TermId};
 
 use crate::ports::{AttachOptions, Capabilities};
 
+pub use audit_log::AuditLog;
 pub use caller_identity::FakeCallerIdentity;
 pub use control::FakeControl;
 pub use diagram_check::{FakeAnswer, FakeDiagramCheck, FakeHold};
 pub use fake_backend::FakeBackend;
 pub use file_store::MemoryFileStore;
+pub use panel_server::{
+    PanelServer, PanelServerConfig, TestDiagramCheck, START_WALL_MS, TEST_TIMING,
+};
+pub use scratch_dir::{check_in_scratch, wait_until, work_dir, ShortTempDir};
 pub use scratch_store::MemoryScratchStore;
 pub use wall_clock::FakeWallClock;
+pub use wire_client::{attach, read_until_tail, WireClient, RECV_TIMEOUT};
 
 /// Opens every paint.
 pub const FAKE_PAINT_START: &[u8] = b"\x18\x1b[!p";
