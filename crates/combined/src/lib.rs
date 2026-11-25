@@ -6,6 +6,7 @@ pub mod adapters {
     pub mod loader;
 }
 pub mod core;
+pub mod mcp_server;
 pub mod model;
 pub mod ports;
 pub mod rpc;
