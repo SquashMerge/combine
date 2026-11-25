@@ -30,11 +30,37 @@ const HOUR: LayoutTiming = LayoutTiming {
 /// FSEvents can be slow, so a push caused by an outside edit gets the bound `fs_watcher.rs` uses.
 const PUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
+/// only on a client that has sent `watch_layout`.
+fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
+    loop {
+        match client.recv() {
+            DaemonMessage::Panels(_) => {}
+            other => return other,
+        }
+    }
+}
+
+/// [`WireClient::recv_within`], skipping `panels` frames. `None` when nothing else arrives
+/// within `wait`.
+fn recv_within_skipping_panels(
+    client: &WireClient,
+    wait: std::time::Duration,
+) -> Option<DaemonMessage> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match client.recv_within(left)? {
+            DaemonMessage::Panels(_) => {}
+            other => return Some(other),
+        }
+    }
+}
+
 fn layout_reply(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
     let message = match request {
-        Some(_) => client.recv(),
-        None => client
-            .recv_within(PUSH_WAIT)
+        Some(_) => recv_skipping_panels(client),
+        None => recv_within_skipping_panels(client, PUSH_WAIT)
             .unwrap_or_else(|| panic!("no push within {PUSH_WAIT:?}")),
     };
     match message {
@@ -288,6 +314,7 @@ fn spawn_in(backend: &Arc<combined::testing::FakeBackend>, cwd: &Path) {
 fn answer(client: &WireClient, request: u64) -> LayoutSnapshot {
     loop {
         match client.recv() {
+            DaemonMessage::Panels(_) => continue,
             DaemonMessage::Layout(layout) if layout.request.is_none() => continue,
             DaemonMessage::Layout(layout) => {
                 assert_eq!(layout.request, Some(RequestId(request)));

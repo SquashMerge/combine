@@ -459,7 +459,7 @@ impl Core {
                 Some(pin.request),
                 None,
             ),
-            // The server answers mcp_open and mcp itself (rpc/server.rs); they never reach core. report_render waits for M2-S5.
+            // The server answers mcp_open and mcp, and records report_render itself (rpc/server.rs); they never reach core.
             ClientMessage::McpOpen(_) | ClientMessage::ReportRender(_) | ClientMessage::Mcp(_) => {}
             ClientMessage::UnwatchLayout(_) => self.send_error(
                 connection,

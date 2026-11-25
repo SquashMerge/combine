@@ -181,6 +181,8 @@ fn write_one<W: Write>(out: &mut W, message: &DaemonMessage) -> Result<(), Write
                 DaemonMessage::Templates(templates) => {
                     ("the template list".to_string(), Some(templates.request))
                 }
+                DaemonMessage::Panels(panels) => ("the panel list".to_string(), panels.request),
+                DaemonMessage::Panel(panel) => ("the panel".to_string(), Some(panel.request)),
                 other => (format!("a {} message", other.type_name()), None),
             };
             write_message(
@@ -234,5 +236,71 @@ fn write_side(
             let _ = inbox.blocking_send(ConnEvent::Closed(conn));
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use combine_protocol::{
+        read_message, Panel, PanelState, Panels, Renderer, RequestId, SkippedPanel,
+    };
+
+    /// Writes `message`, which is too large for a frame, and reads back what was written.
+    fn written(message: DaemonMessage) -> DaemonMessage {
+        let mut out = Vec::new();
+        write_one(&mut out, &message).unwrap();
+        read_message::<DaemonMessage, _>(&mut out.as_slice())
+            .unwrap()
+            .unwrap()
+    }
+
+    fn expect_internal(message: DaemonMessage, what: &str, request: RequestId) {
+        match message {
+            DaemonMessage::Error(error) => {
+                assert_eq!(error.code, ErrorCode::Internal);
+                assert_eq!(error.request, Some(request));
+                assert!(error.message.contains(what), "{}", error.message);
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_one_names_the_request_of_an_oversize_panel_list() {
+        let big = Panels {
+            request: Some(RequestId(8)),
+            space: "/s".to_string(),
+            panels: Vec::new(),
+            skipped: vec![SkippedPanel {
+                panel: "p".to_string(),
+                reason: "\u{1}".repeat(300_000),
+            }],
+            error: None,
+        };
+        expect_internal(
+            written(DaemonMessage::Panels(big)),
+            "the panel list",
+            RequestId(8),
+        );
+    }
+
+    #[test]
+    fn write_one_names_the_request_of_an_oversize_panel() {
+        let big = Panel {
+            request: RequestId(9),
+            space: "/s".to_string(),
+            id: "p".to_string(),
+            revision: 1,
+            renderer: Renderer::Markdown,
+            source: "\u{1}".repeat(300_000),
+            state: PanelState::Validated,
+            error: None,
+        };
+        expect_internal(
+            written(DaemonMessage::Panel(big)),
+            "the panel",
+            RequestId(9),
+        );
     }
 }
