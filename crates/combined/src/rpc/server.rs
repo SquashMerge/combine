@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, GetPanel, HostId, JsonRpcMessage,
-    Layout, Mcp, McpOpen, McpOpened, PanelState, Panels, ReportRender, RequestId, TermId,
+    ClientMessage, DaemonMessage, DroppedNotice, ErrorCode, ErrorMessage, GetPanel, HostId,
+    JsonRpcMessage, Layout, Mcp, McpOpen, McpOpened, PanelState, Panels, ReportRender, RequestId,
+    TermId,
 };
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
@@ -32,15 +33,17 @@ use super::panel_lane::{LaneOutcome, PanelIo};
 use super::socket::BoundSocket;
 use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
-    layout_snapshot, ops_from_wire, panel_folder_refusal, panel_reply, panels_loading,
-    panels_message, resolve_caller, ClientRender, ConnectionId, Driver, LayoutEffect, LayoutRead,
-    LayoutWritten, Layouts, MutateError, PanelApiError, PanelCreate, PanelEffect, PanelEvent,
-    PanelList, PanelRead, PanelStore, PanelView, RenderStatuses, SpawnEffect, SpawnTicket, Spawns,
-    TerminalList, WatchError, LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE,
-    PANEL_LIST_MAX, PANEL_MAX_BYTES,
+    dropped_notice, layout_snapshot, ops_from_wire, panel_folder_refusal, panel_reply,
+    panels_loading, panels_message, resolve_caller, ClientRender, ConnectionId, Driver,
+    LayoutEffect, LayoutOp, LayoutRead, LayoutWritten, Layouts, MutateError, PanelApiError,
+    PanelCreate, PanelEffect, PanelEvent, PanelList, PanelRead, PanelStore, PanelView,
+    RenderStatuses, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError, LAYOUT_FILE,
+    LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
 use crate::mcp_server::{McpAudit, McpOptions};
-use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
+use crate::model::{
+    LayoutRevision, Lifetime, Millis, PanelId, SpaceId, TermEvent, TermInfo, TileId,
+};
 use crate::ports::{
     BackendResult, CallerIdentity, DiagramCheck, DiagramCheckError, DiagramVerdict, FileChange,
     FileMark, FileStore, StoreError, TerminalBackend, WallClock,
@@ -189,6 +192,10 @@ enum PanelAnswer {
         oneshot::Sender<Result<Vec<ClientRender>, PanelApiError>>,
         Result<Vec<ClientRender>, PanelApiError>,
     ),
+    Dropped(
+        oneshot::Sender<Result<Option<DroppedNotice>, PanelApiError>>,
+        Result<Option<DroppedNotice>, PanelApiError>,
+    ),
 }
 
 impl PanelAnswer {
@@ -199,6 +206,7 @@ impl PanelAnswer {
             PanelAnswer::List(reply, result) => drop(reply.send(result)),
             PanelAnswer::Get(reply, result) => drop(reply.send(result)),
             PanelAnswer::Render(reply, result) => drop(reply.send(result)),
+            PanelAnswer::Dropped(reply, result) => drop(reply.send(result)),
         }
     }
 }
@@ -241,6 +249,9 @@ struct Server {
     panel_deferred: VecDeque<Deferred>,
     /// A `create` waiting for its new space to load.
     parked_create: Option<PanelCall>,
+    /// Panels a close or remove may have deleted: each is taken out of its space's layout at the
+    /// next idle point, if the store then holds it removed.
+    removals: Vec<(SpaceId, String)>,
     render: RenderStatuses,
     diagram_check: Arc<dyn DiagramCheck>,
     wall: Arc<dyn WallClock>,
@@ -384,6 +395,7 @@ pub async fn serve_watched(
         panel_queue: VecDeque::new(),
         panel_deferred: VecDeque::new(),
         parked_create: None,
+        removals: Vec::new(),
         render: RenderStatuses::new(),
         diagram_check,
         wall: wall_clock,
@@ -875,12 +887,27 @@ impl Server {
         now: Millis,
     ) {
         let request = mutate.request;
-        let ops = match ops_from_wire(mutate.ops) {
+        let mut ops = match ops_from_wire(mutate.ops) {
             Ok(ops) => ops,
             Err(text) => return self.layout_error(conn, ErrorCode::InvalidRequest, text, request),
         };
         let base = LayoutRevision(mutate.base_layout_revision);
         let space = SpaceId(mutate.space);
+        for op in &mut ops {
+            if let LayoutOp::AddPanel {
+                panel,
+                tile: tile @ None,
+                ..
+            } = op
+            {
+                *tile = self
+                    .panels
+                    .get(&space, panel.as_str())
+                    .ok()
+                    .and_then(|(view, _)| view.file.placement)
+                    .and_then(|hint| TileId::new(hint).ok());
+            }
+        }
         if let Err(error) = self.layouts.mutate(conn, &space, request.0, base, ops, now) {
             let (code, text) = match error {
                 MutateError::UnknownSpace => (
@@ -1284,10 +1311,18 @@ impl Server {
                 PanelAnswer::View(reply, result)
             }
             PanelCall::Remove { space, id, reply } => {
-                PanelAnswer::View(reply, self.panels.remove(&space, &id, now))
+                let result = self.panels.remove(&space, &id, now);
+                if result.is_ok() {
+                    self.removals.push((space, id));
+                }
+                PanelAnswer::View(reply, result)
             }
             PanelCall::Close { space, id, reply } => {
-                PanelAnswer::View(reply, self.panels.close(&space, &id, now))
+                let result = self.panels.close(&space, &id, now);
+                if result.is_ok() {
+                    self.removals.push((space, id));
+                }
+                PanelAnswer::View(reply, result)
             }
             PanelCall::Pin { space, id, reply } => {
                 PanelAnswer::View(reply, self.panels.pin(&space, &id, now))
@@ -1306,6 +1341,14 @@ impl Server {
             PanelCall::RenderStatus { space, id, reply } => {
                 PanelAnswer::Render(reply, Ok(self.render.render_status(&space, &id)))
             }
+            PanelCall::LayoutDropped { space, reply } => {
+                let notice = self
+                    .layouts
+                    .status(&space)
+                    .and_then(|status| status.dropped)
+                    .map(|dropped| dropped_notice(&dropped));
+                PanelAnswer::Dropped(reply, Ok(notice))
+            }
         };
         self.panel_answers.push(answer);
     }
@@ -1318,10 +1361,50 @@ impl Server {
     ) -> PanelAnswer {
         let now = self.clock.now();
         let wall_ms = self.wall.now_unix_ms();
-        let result = self
-            .panels
-            .create(&space, create, now, wall_ms, self.driver.core_mut());
-        PanelAnswer::View(reply, result)
+        let result =
+            self.panels
+                .create_with_outcome(&space, create, now, wall_ms, self.driver.core_mut());
+        if let Ok(outcome) = &result {
+            if outcome.created {
+                self.place(&space, &outcome.view, now);
+                self.removals.push((space, outcome.view.id.clone()));
+            }
+        }
+        PanelAnswer::View(reply, result.map(|outcome| outcome.view))
+    }
+
+    /// Adds a panel the store just made to its space's layout, in the tile its placement names.
+    fn place(&mut self, space: &SpaceId, view: &PanelView, now: Millis) {
+        let Ok(panel) = PanelId::new(view.id.as_str()) else {
+            return;
+        };
+        let hint = view
+            .file
+            .placement
+            .clone()
+            .and_then(|tile| TileId::new(tile).ok());
+        self.layouts.place(space, panel, hint, now);
+    }
+
+    /// Takes a panel out of its space's layout.
+    fn unplace(&mut self, space: &SpaceId, panel: &str) {
+        if let Ok(panel) = PanelId::new(panel) {
+            self.layouts.unplace(space, &panel, self.clock.now());
+        }
+    }
+
+    /// Takes the panels a close or remove deleted out of the layout. It runs at an idle point,
+    /// when each call's file work has finished, so a remove that conflicted keeps its tab.
+    fn answer_panel_requests(&mut self) {
+        for (space, panel) in std::mem::take(&mut self.removals) {
+            let removed = matches!(
+                self.panels.get(&space, &panel),
+                Ok((view, _)) if view.state == PanelState::Removed
+            );
+            if removed {
+                self.unplace(&space, &panel);
+            }
+        }
     }
 
     /// Runs the create that was waiting for its space to load. The lane is idle.
@@ -1460,7 +1543,25 @@ impl Server {
     /// Marks the watchers of every space whose panels changed, so each is sent the new list.
     fn consume_panel_events(&mut self) {
         for event in self.panels.take_events() {
-            let (PanelEvent::Changed { space, .. } | PanelEvent::Listing { space }) = event;
+            let space = match event {
+                PanelEvent::Changed {
+                    space,
+                    panel,
+                    state: PanelState::Removed,
+                    ..
+                } => {
+                    let expired = matches!(
+                        self.panels.get(&space, &panel),
+                        Ok((view, _)) if view.state == PanelState::Removed
+                            && view.lifetime == Lifetime::Scratch
+                    );
+                    if expired {
+                        self.unplace(&space, &panel);
+                    }
+                    space
+                }
+                PanelEvent::Changed { space, .. } | PanelEvent::Listing { space } => space,
+            };
             for conn in self.layouts.subscribers(&space) {
                 if let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) {
                     state.panels_stale = true;
@@ -1498,6 +1599,7 @@ impl Server {
                 break;
             }
             self.send_panel_answers();
+            self.answer_panel_requests();
             if let Some(call) = self.parked_create.take() {
                 self.run_parked_create(call);
                 continue;
@@ -1529,6 +1631,11 @@ impl Server {
             self.run_spawn_effects().await;
             self.queue_spawn_replies();
             self.settle_panels();
+            // Panel calls and answers place and unplace panels. Run that layout work in this
+            // pass, so a placement is read and written without waiting for another wake.
+            if self.layouts.has_work() {
+                continue;
+            }
             self.arm_layouts();
             for conn in self.driver.take_disconnects() {
                 self.remove(conn);

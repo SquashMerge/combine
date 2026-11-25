@@ -65,6 +65,8 @@ pub enum TestDiagramCheck {
 /// How a [`PanelServer`] is built.
 pub struct PanelServerConfig {
     pub timing: PanelTiming,
+    /// How the server debounces its layout writes.
+    pub layout_timing: LayoutTiming,
     pub options: ServeOptions,
     /// The file store the server uses, when it isn't the memory store itself.
     pub served: Option<Arc<dyn FileStore>>,
@@ -75,6 +77,7 @@ impl Default for PanelServerConfig {
     fn default() -> Self {
         PanelServerConfig {
             timing: TEST_TIMING,
+            layout_timing: LayoutTiming::default(),
             options: ServeOptions::default(),
             served: None,
             diagram: TestDiagramCheck::Fake,
@@ -223,6 +226,7 @@ fn launch_server(
     let wall = fixtures.wall.clone();
     let scratch = fixtures.scratch.clone();
     let timing = config.timing;
+    let layout_timing = config.layout_timing;
     let callers = fixtures.callers.clone();
     let audit = fixtures.audit.clone();
     let server = rpc::spawn(
@@ -243,7 +247,7 @@ fn launch_server(
                 HostId("host-a".to_string()),
                 ids,
                 served,
-                LayoutTiming::default(),
+                layout_timing,
                 PanelParts {
                     diagram_check,
                     wall_clock: wall,
@@ -659,6 +663,13 @@ impl PanelRig {
         });
         inner.store = store;
         (PanelRig { inner }, stalling)
+    }
+
+    /// A rig built from `config`.
+    pub fn with_config(config: PanelServerConfig) -> PanelRig {
+        PanelRig {
+            inner: PanelServer::start(config),
+        }
     }
 
     /// A rig serving with `options`.

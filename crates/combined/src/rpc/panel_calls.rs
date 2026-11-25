@@ -1,5 +1,6 @@
 //! The panel API's seam: calls queued to the server loop, answered from it.
 
+use combine_protocol::DroppedNotice;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core::{ClientRender, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView};
@@ -56,6 +57,12 @@ pub enum PanelCall {
         space: SpaceId,
         id: String,
         reply: oneshot::Sender<Result<Vec<ClientRender>, PanelApiError>>,
+    },
+    /// Answers with the space's dropped-changes notice, `None` when nothing was dropped or no
+    /// layout is held.
+    LayoutDropped {
+        space: SpaceId,
+        reply: oneshot::Sender<Result<Option<DroppedNotice>, PanelApiError>>,
     },
 }
 
@@ -174,6 +181,14 @@ impl PanelHandle {
         })
     }
 
+    /// The space's dropped-changes notice, `None` when nothing was dropped or no layout is held.
+    pub fn layout_dropped(&self, space: &SpaceId) -> Result<Option<DroppedNotice>, PanelApiError> {
+        self.call(|reply| PanelCall::LayoutDropped {
+            space: space.clone(),
+            reply,
+        })
+    }
+
     pub async fn create_async(
         &self,
         space: &SpaceId,
@@ -275,6 +290,17 @@ impl PanelHandle {
         self.call_async(|reply| PanelCall::RenderStatus {
             space: space.clone(),
             id: id.to_owned(),
+            reply,
+        })
+        .await
+    }
+
+    pub async fn layout_dropped_async(
+        &self,
+        space: &SpaceId,
+    ) -> Result<Option<DroppedNotice>, PanelApiError> {
+        self.call_async(|reply| PanelCall::LayoutDropped {
+            space: space.clone(),
             reply,
         })
         .await

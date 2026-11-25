@@ -21,7 +21,7 @@ use daemon_support::{
     layout_server, refuse_default_herdr_core, seed_project_terminal, wait_until, LayoutServer,
     ShortTempDir, WireClient,
 };
-use panel_support::{settled_read_count, Race, RacingStore};
+use panel_support::{markdown, named, settled_read_count, Race, RacingStore};
 
 const WAIT: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_millis(400);
@@ -222,4 +222,72 @@ fn the_window_after_the_comparing_read_overwrites() {
         recv_within_skipping_panels(&client, QUIET).is_none(),
         "the lost outside edit caused a push"
     );
+}
+
+/// The tiles of a stored layout: each tile's id and panels.
+fn tiles_of(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
+    fn walk(node: &serde_json::Value, into: &mut Vec<(String, Vec<String>)>) {
+        if node["type"] == "tile" {
+            let panels = node["panels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|panel| panel.as_str().unwrap().to_string())
+                .collect();
+            into.push((node["id"].as_str().unwrap().to_string(), panels));
+        } else {
+            walk(&node["a"], into);
+            walk(&node["b"], into);
+        }
+    }
+    let layout: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    let mut tiles = Vec::new();
+    walk(&layout["root"], &mut tiles);
+    tiles
+}
+
+#[test]
+fn a_placement_write_finds_an_outside_edit_and_does_not_overwrite_it() {
+    let scratch = ShortTempDir::new();
+    let memory = Arc::new(MemoryFileStore::new());
+    let racing = Arc::new(RacingStore::new(Arc::clone(&memory)));
+    let server = layout_server(&scratch, "d", racing.clone(), PROMPT, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = SpaceId(server.work.to_str().unwrap().to_string());
+    racing.arm(
+        &space,
+        LAYOUT_FILE,
+        Race::BeforeCompare,
+        OUTSIDE.as_bytes().to_vec(),
+    );
+
+    server
+        .server
+        .panels()
+        .create(&space, named("p", markdown("x")))
+        .unwrap();
+
+    assert!(
+        wait_until(WAIT, || !racing.armed()),
+        "the placement write never compared the file"
+    );
+    // The outside edit is kept, and the placement is applied to it and written once.
+    assert!(
+        wait_until(WAIT, || memory.write_count(&space, LAYOUT_FILE) == 1),
+        "the placement was never written over the outside edit's layout"
+    );
+    std::thread::sleep(QUIET);
+    assert_eq!(memory.write_count(&space, LAYOUT_FILE), 1);
+    let stored = memory.bytes(&space, LAYOUT_FILE).unwrap();
+    assert_eq!(
+        tiles_of(&stored),
+        vec![
+            ("main".to_string(), vec!["p".to_string()]),
+            ("side".to_string(), Vec::new())
+        ]
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(stored["root"]["ratio"], 0.3);
 }

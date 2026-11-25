@@ -1330,6 +1330,39 @@ fn same_key_returns_the_same_panel_without_new_work() {
 }
 
 #[test]
+fn create_with_outcome_reports_new_and_repeat() {
+    let mut rig = Rig::new();
+    let mut create = create_of("a", Renderer::Markdown, "one");
+    create.idempotency_key = Some("k".to_owned());
+    let first = rig
+        .store
+        .create_with_outcome(&space(), create, rig.t(), 0, &mut rig.ids)
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.view.id, "a");
+    rig.finish_save();
+    let mut again = create_of("b", Renderer::Markdown, "other");
+    again.idempotency_key = Some("k".to_owned());
+    let second = rig
+        .store
+        .create_with_outcome(&space(), again, rig.t(), 0, &mut rig.ids)
+        .unwrap();
+    assert!(!second.created);
+    assert_eq!(second.view.id, "a");
+    let plain = rig
+        .store
+        .create_with_outcome(
+            &space(),
+            create_of("c", Renderer::Markdown, "three"),
+            rig.t(),
+            0,
+            &mut rig.ids,
+        )
+        .unwrap();
+    assert!(plain.created);
+}
+
+#[test]
 fn same_key_in_another_space_creates_a_new_panel() {
     let mut rig = Rig::new();
     let other = SpaceId("/work/other".to_owned());

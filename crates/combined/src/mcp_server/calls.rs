@@ -668,6 +668,11 @@ impl McpServer {
             Ok(list) => list,
             Err(error) => return ToolError::api(&error).reply().result(),
         };
+        let dropped = match api.layout_dropped() {
+            Ok(Some(notice)) => to_json(&notice),
+            Ok(None) => "null".to_owned(),
+            Err(error) => return ToolError::api(&error).reply().result(),
+        };
         let mut views: Vec<&PanelView> = list.panels.iter().collect();
         views.sort_by(|a, b| a.id.cmp(&b.id));
         let panels: Vec<String> = views
@@ -682,7 +687,7 @@ impl McpServer {
         let count = panels.len();
         let result_of = |kept: usize| {
             let text = format!(
-                r#"{{"space":{},"panels":[{}],"skipped":{skipped},"error":{error},"count":{count},"truncated":{}}}"#,
+                r#"{{"space":{},"panels":[{}],"skipped":{skipped},"error":{error},"dropped":{dropped},"count":{count},"truncated":{}}}"#,
                 quoted(&self.caller.space.0),
                 panels[..kept].join(","),
                 kept < count
