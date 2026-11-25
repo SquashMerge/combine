@@ -10,10 +10,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use combine_protocol::{
-    CreatedBy, DaemonMessage, Mcp, PanelError, PanelState, Renderer, SkippedPanel, WireMessage,
+    CreatedBy, DaemonMessage, Mcp, PanelError, PanelState, RenderStatus, Renderer, SkippedPanel,
+    WireMessage,
 };
 use combined::core::{
-    CallerMatch, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView, ResolvedCaller,
+    CallerMatch, ClientRender, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView,
+    ResolvedCaller,
 };
 use combined::mcp_server::{
     tool_error_code, McpAudit, McpOptions, McpServer, PanelApi, MCP_MAX_DEPTH, PROTOCOL_VERSIONS,
@@ -30,6 +32,7 @@ struct Fake {
     remove: Result<PanelView, PanelApiError>,
     status: Status,
     list: Result<PanelList, PanelApiError>,
+    renders: Vec<ClientRender>,
     calls: Mutex<Vec<&'static str>>,
     created: Mutex<Vec<PanelCreate>>,
 }
@@ -46,6 +49,7 @@ impl Fake {
                 skipped: Vec::new(),
                 error: None,
             }),
+            renders: Vec::new(),
             calls: Mutex::new(Vec::new()),
             created: Mutex::new(Vec::new()),
         }
@@ -81,6 +85,10 @@ impl PanelApi for Fake {
     fn list(&self) -> Result<PanelList, PanelApiError> {
         self.note("list");
         self.list.clone()
+    }
+    fn render_status(&self, _: &str) -> Result<Vec<ClientRender>, PanelApiError> {
+        self.note("render_status");
+        Ok(self.renders.clone())
     }
 }
 
@@ -398,6 +406,66 @@ fn an_update_can_clear_the_title_with_null() {
     );
     assert!(!is_error);
     assert_eq!(result["panel"], "p");
+}
+
+#[test]
+fn panel_status_ends_with_render_status() {
+    let (server, _) = server();
+    let mut api = Fake::new();
+    api.renders = vec![
+        ClientRender {
+            revision: 1,
+            status: RenderStatus::Rendered,
+            error: None,
+        },
+        ClientRender {
+            revision: 1,
+            status: RenderStatus::RenderFailed,
+            error: Some(PanelError {
+                code: "render_error".to_owned(),
+                message: "bad".to_owned(),
+                line: Some(2),
+                column: None,
+                snippet: None,
+            }),
+        },
+    ];
+    let reply = send(
+        &server,
+        &api,
+        &call_message("panel_status", r#"{"panel":"p"}"#),
+    )
+    .unwrap();
+    let text = json(&reply)["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let superseded = text.find("\"superseded\":").unwrap();
+    let render = text.find("\"render_status\":").unwrap();
+    assert!(superseded < render, "{text}");
+    assert!(text.ends_with("}]}"), "{text}");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(result["render_status"][0]["status"], "rendered");
+    assert_eq!(result["render_status"][0]["error"], Value::Null);
+    assert_eq!(result["render_status"][1]["revision"], 1);
+    assert_eq!(result["render_status"][1]["status"], "render_failed");
+    assert_eq!(result["render_status"][1]["error"]["code"], "render_error");
+
+    let mut none = Fake::new();
+    none.renders = Vec::new();
+    let (result, _) = tool(&server, &none, "panel_status", r#"{"panel":"p"}"#);
+    assert_eq!(result["render_status"], serde_json::json!([]));
+
+    let (result, _) = tool(&server, &api, "list_panels", "{}");
+    assert!(result.get("render_status").is_none());
+    let (result, _) = tool(&server, &api, "remove_panel", r#"{"panel":"p"}"#);
+    assert!(result.get("render_status").is_none());
+    let asked = api
+        .calls()
+        .iter()
+        .filter(|c| **c == "render_status")
+        .count();
+    assert_eq!(asked, 1, "only panel_status reads the render status");
 }
 
 #[test]
@@ -785,6 +853,9 @@ fn a_remove_cut_short_by_the_closed_flag_audits_removed() {
         }
         fn list(&self) -> Result<PanelList, PanelApiError> {
             self.0.list()
+        }
+        fn render_status(&self, id: &str) -> Result<Vec<ClientRender>, PanelApiError> {
+            self.0.render_status(id)
         }
     }
     let closed = AtomicBool::new(false);

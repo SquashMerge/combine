@@ -14,7 +14,8 @@ use tokio::sync::mpsc::Sender;
 use super::connection::ConnEvent;
 use super::panel_calls::PanelHandle;
 use crate::core::{
-    ConnectionId, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView, ResolvedCaller,
+    ClientRender, ConnectionId, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView,
+    ResolvedCaller,
 };
 use crate::mcp_server::{McpAudit, McpOptions, McpServer, PanelApi};
 use crate::model::SpaceId;
@@ -172,6 +173,10 @@ impl PanelApi for SpacePanels {
     fn list(&self) -> Result<PanelList, PanelApiError> {
         self.handle.list(&self.space)
     }
+
+    fn render_status(&self, id: &str) -> Result<Vec<ClientRender>, PanelApiError> {
+        self.handle.render_status(&self.space, id)
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +220,10 @@ mod tests {
         }
 
         fn list(&self) -> Result<PanelList, PanelApiError> {
+            self.call()
+        }
+
+        fn render_status(&self, _: &str) -> Result<Vec<ClientRender>, PanelApiError> {
             self.call()
         }
     }
@@ -292,6 +301,9 @@ mod tests {
                 Err(PanelApiError::Stopped)
             }
             fn list(&self) -> Result<PanelList, PanelApiError> {
+                Err(PanelApiError::Stopped)
+            }
+            fn render_status(&self, _: &str) -> Result<Vec<ClientRender>, PanelApiError> {
                 Err(PanelApiError::Stopped)
             }
         }
