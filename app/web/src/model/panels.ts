@@ -298,6 +298,12 @@ export class PanelReplies {
       this.early.delete(key);
       return settled(buffered);
     }
+    const displaced = this.pending.get(key);
+    if (displaced !== undefined) {
+      clearTimeout(displaced.timer);
+      this.pending.delete(key);
+      displaced.reject(new PanelFetchError(null, 'Another request took this reply.'));
+    }
     return new Promise<PanelContent>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(key);

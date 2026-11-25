@@ -142,4 +142,76 @@ describe('createTauriPanelPort', () => {
       port.reportRender(host, { space: '/w', panel: 'p', revision: '1' as DecimalU64, status: 'rendered', error: null }),
     ).resolves.toBe(false);
   });
+
+  describe('an invoke that returns after its host disconnected', () => {
+    function deferredInvokes() {
+      const held = new Map<string, (id: string) => void>();
+      invoke.mockImplementation(
+        (_cmd: string, args: { panel: string }) =>
+          new Promise<string>((resolve) => {
+            held.set(args.panel, resolve);
+          }),
+      );
+      return held;
+    }
+
+    it('neither replaces the new session wait nor takes its reply', async () => {
+      const held = deferredInvokes();
+      const port = createTauriPanelPort();
+      const old = port.fetchPanel(host, '/work', 'old-panel', false);
+      const oldSettled = old.then(
+        (c) => c,
+        (e: unknown) => e,
+      );
+      await vi.waitFor(() => expect(held.has('old-panel')).toBe(true));
+
+      emit(fixture.disconnected);
+      const current = port.fetchPanel(host, '/work', 'new-panel', false);
+      await vi.waitFor(() => expect(held.has('new-panel')).toBe(true));
+      held.get('new-panel')?.('9');
+      await new Promise((r) => setTimeout(r, 0));
+
+      held.get('old-panel')?.('9');
+      expect(await oldSettled).toMatchObject({ message: 'The host disconnected.' });
+
+      emit(panelReply('9', 'new-panel'));
+      await expect(current).resolves.toMatchObject({ id: 'new-panel' });
+    });
+
+    it('frees its slot, so the queue keeps moving', async () => {
+      const held = deferredInvokes();
+      const port = createTauriPanelPort();
+      const stale = Array.from({ length: 4 }, (_, n) => port.fetchPanel(host, '/work', `old${n}`, false));
+      const settled = stale.map((f) => f.catch((e: unknown) => e));
+      await vi.waitFor(() => expect(held.size).toBe(4));
+      emit(fixture.disconnected);
+      const fresh = Array.from({ length: 5 }, (_, n) => port.fetchPanel(host, '/work', `new${n}`, false));
+      for (let n = 0; n < 4; n += 1) held.get(`old${n}`)?.(String(n + 1));
+      await Promise.all(settled);
+      await vi.waitFor(() => expect(held.size).toBeGreaterThan(4));
+      for (let n = 0; n < 5; n += 1) {
+        await vi.waitFor(() => expect(held.has(`new${n}`)).toBe(true));
+        held.get(`new${n}`)?.(String(100 + n));
+        await new Promise((r) => setTimeout(r, 0));
+        emit(panelReply(String(100 + n), `new${n}`));
+      }
+      await expect(Promise.all(fresh)).resolves.toHaveLength(5);
+    });
+
+    it('leaves a normal disconnect and reconnect working', async () => {
+      invoke.mockResolvedValue('3');
+      const port = createTauriPanelPort();
+      const cut = port.fetchPanel(host, '/work', 'a', false);
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
+      await new Promise((r) => setTimeout(r, 0));
+      emit(fixture.disconnected);
+      await expect(cut).rejects.toMatchObject({ message: 'The host disconnected.' });
+
+      const again = port.fetchPanel(host, '/work', 'a', false);
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+      await new Promise((r) => setTimeout(r, 0));
+      emit(panelReply('3', 'a'));
+      await expect(again).resolves.toMatchObject({ id: 'a' });
+    });
+  });
 });

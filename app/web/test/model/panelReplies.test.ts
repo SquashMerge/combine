@@ -105,4 +105,14 @@ describe('PanelReplies', () => {
     vi.advanceTimersByTime(PANEL_FETCH_TIMEOUT_MS);
     await expect(late).rejects.toMatchObject({ code: null, message: 'No reply from the host within 30 s.' });
   });
+
+  it('settles a wait that a second wait for the same request displaces', async () => {
+    const replies = new PanelReplies();
+    const first = replies.wait('h1', req(1));
+    const second = replies.wait('h1', req(1));
+    await expect(first).rejects.toBeInstanceOf(PanelFetchError);
+    replies.onEvent(panel(1));
+    await expect(second).resolves.toBe(content);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
