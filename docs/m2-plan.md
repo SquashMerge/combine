@@ -79,7 +79,7 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 - **D5. How the MCP channel connects.** Over `combined.sock` (wire v5, `mcp_open` then `mcp` frames), on the same host, never over ssh. The shim duplicates the daemon's socket lookup, and a test pins that the two agree. SPEC should say "the daemon's Unix socket".
 - **D6. Connection cap.** MCP connections get their own cap, separate from the 64 client connections. SPEC changes in S4. S4 outcome: 16 MCP connections besides the 64 client connections (SPEC rev 27).
 - **D7. MCP library.** `rmcp`, pinned exactly, if its transport fits our frames. Otherwise implement only `initialize`, `tools/list`, `tools/call` and `ping`. S4 outcome: a hand-written subset in `mcp_server/`; `rmcp`'s transports carry byte streams, not whole-message frames, and its parsing has no bound.
-- **D8. Caller identity.** A `CallerIdentity` port, implemented by the herdr-core adapter. `HC_TERMINAL_ID` is accepted only when `HC_TERMINAL_SOCKET` equals the daemon's herdr-core socket. Otherwise the shim falls back to matching the cwd.
+- **D8. Caller identity.** A `CallerIdentity` port, implemented by the herdr-core adapter. `HC_TERMINAL_ID` is accepted only when `HC_TERMINAL_SOCKET` equals the daemon's herdr-core socket. Otherwise the daemon falls back to matching the caller's cwd.
 - **D9. Where panel content lives.** In a file next to `panel.json` (`diagram.mmd` or `content.md`). `panel.json` stays small, under its 8 KiB bound. Agents edit diagrams with ordinary file tools. SPEC's Persistence section lists the file.
 - **D10. Markdown limits.** 200 KB, as for Mermaid. For Markdown, "validated" means within that size and valid UTF-8.
 - **D11. Revisions and idempotency.**
