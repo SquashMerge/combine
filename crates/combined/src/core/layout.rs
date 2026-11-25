@@ -38,6 +38,7 @@ pub enum LayoutError {
     PanelNotInTile(TileId, PanelId),
     TileIdInUse(TileId),
     CannotCloseRoot,
+    PanelInLayout(PanelId),
 }
 
 impl fmt::Display for LayoutError {
@@ -102,6 +103,9 @@ impl fmt::Display for LayoutError {
             }
             LayoutError::TileIdInUse(id) => write!(f, "tile {} already exists", id.as_str()),
             LayoutError::CannotCloseRoot => write!(f, "the only tile can't be closed"),
+            LayoutError::PanelInLayout(id) => {
+                write!(f, "panel {} is already in the layout", id.as_str())
+            }
         }
     }
 }
@@ -395,6 +399,19 @@ pub enum LayoutOp {
     CloseTile {
         tile: TileId,
     },
+    /// Puts a panel ID that isn't in the tree at the end of a tile's `panels`: the tile `tile`
+    /// names, else the first tile in tree order (also when `tile` is None). With `activate`, or in
+    /// an empty tile, the panel becomes the tile's `active`. Never creates, splits or closes a tile.
+    AddPanel {
+        panel: PanelId,
+        tile: Option<TileId>,
+        activate: bool,
+    },
+    /// Takes a panel ID out of the tile holding it; that tile's `active` moves as `remove_panel`
+    /// does.
+    RemovePanel {
+        panel: PanelId,
+    },
 }
 
 /// The result of [`apply_ops`].
@@ -478,6 +495,17 @@ pub fn touched_with_origins(
             touched.insert(FieldPath::TilePanels(tile.clone()));
             touched.insert(FieldPath::TileActive(tile.clone()));
         }
+        LayoutOp::AddPanel { tile, .. } => {
+            let target = target_tile(&layout.root, tile.as_ref()).id.clone();
+            touched.insert(FieldPath::TilePanels(target.clone()));
+            touched.insert(FieldPath::TileActive(target));
+        }
+        LayoutOp::RemovePanel { panel } => {
+            if let Some(source) = tile_holding(&layout.root, panel) {
+                touched.insert(FieldPath::TilePanels(source.id.clone()));
+                touched.insert(FieldPath::TileActive(source.id.clone()));
+            }
+        }
     }
     touched
 }
@@ -558,6 +586,30 @@ fn apply_op(layout: &mut SpaceLayout, op: &LayoutOp) -> Result<(), LayoutError> 
             panel,
         } => split_tile(layout, id, *dir, new_tile, *ratio, panel.as_ref())?,
         LayoutOp::CloseTile { tile } => close_tile(&mut layout.root, tile)?,
+        LayoutOp::AddPanel {
+            panel,
+            tile,
+            activate,
+        } => {
+            if tile_holding(&layout.root, panel).is_some() {
+                return Err(LayoutError::PanelInLayout(panel.clone()));
+            }
+            let target = target_tile(&layout.root, tile.as_ref()).id.clone();
+            if let Some(tile) = find_tile_mut(&mut layout.root, &target) {
+                tile.panels.push(panel.clone());
+                if *activate || tile.active.is_none() {
+                    tile.active = Some(panel.clone());
+                }
+            }
+        }
+        LayoutOp::RemovePanel { panel } => {
+            let source = tile_holding(&layout.root, panel)
+                .map(|tile| tile.id.clone())
+                .ok_or_else(|| LayoutError::UnknownPanel(panel.clone()))?;
+            if let Some(tile) = find_tile_mut(&mut layout.root, &source) {
+                remove_panel(tile, panel);
+            }
+        }
     }
     Ok(())
 }
@@ -683,7 +735,29 @@ fn find_tile_mut<'a>(node: &'a mut SplitNode, id: &TileId) -> Option<&'a mut Til
     }
 }
 
-fn tile_holding<'a>(node: &'a SplitNode, panel: &PanelId) -> Option<&'a Tile> {
+/// The first tile in tree order: depth first, a split's `a` before its `b`.
+pub fn first_tile(node: &SplitNode) -> &Tile {
+    match node {
+        SplitNode::Tile(tile) => tile,
+        SplitNode::Split(split) => first_tile(&split.a),
+    }
+}
+
+/// The tile `hint` names, else the first tile in tree order.
+pub fn target_tile<'a>(root: &'a SplitNode, hint: Option<&TileId>) -> &'a Tile {
+    hint.and_then(|id| find_tile(root, id))
+        .unwrap_or_else(|| first_tile(root))
+}
+
+fn find_tile<'a>(node: &'a SplitNode, id: &TileId) -> Option<&'a Tile> {
+    match node {
+        SplitNode::Tile(tile) => (&tile.id == id).then_some(tile),
+        SplitNode::Split(split) => find_tile(&split.a, id).or_else(|| find_tile(&split.b, id)),
+    }
+}
+
+/// The tile whose `panels` hold `panel`.
+pub fn tile_holding<'a>(node: &'a SplitNode, panel: &PanelId) -> Option<&'a Tile> {
     match node {
         SplitNode::Tile(tile) => tile.panels.contains(panel).then_some(tile),
         SplitNode::Split(split) => {

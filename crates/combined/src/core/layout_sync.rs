@@ -8,6 +8,7 @@
 //! ops applied (`current`), and the hash of the last bytes read or written (`known_hash`), which
 //! is how the daemon tells its own writes from outside edits.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use combine_protocol as wire;
@@ -15,7 +16,7 @@ use combine_protocol as wire;
 use crate::core::effects::ConnectionId;
 use crate::core::layout::{
     apply_ops, default_layout, diff_fields, encode_layout, identity_origins, parse_layout,
-    validate_layout, FieldPath, LayoutError, LayoutOp, Origins, LAYOUT_MAX_BYTES,
+    tile_holding, validate_layout, FieldPath, LayoutError, LayoutOp, Origins, LAYOUT_MAX_BYTES,
 };
 use crate::model::{
     ContentHash, LayoutRevision, Millis, PanelId, SpaceId, SpaceLayout, SplitDir, SplitNode, TileId,
@@ -229,7 +230,7 @@ fn wire_node(node: &SplitNode) -> Result<wire::LayoutNode, LayoutError> {
     })
 }
 
-fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
+pub fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
     wire::DroppedNotice {
         op_count: u32::try_from(dropped.op_count).unwrap_or(u32::MAX),
         message: format!(
@@ -238,9 +239,6 @@ fn dropped_notice(dropped: &DroppedBatch) -> wire::DroppedNotice {
         ),
     }
 }
-
-const UNEXPECTED_ADD_PANEL: &str = "the add_panel op is not supported by this daemon yet";
-const UNEXPECTED_REMOVE_PANEL: &str = "the remove_panel op is not supported by this daemon yet";
 
 /// Converts the ops of a `mutate_layout` for [`Layouts::mutate`]. The batch holds 1 to
 /// [`MAX_WIRE_OPS`] ops, and every ID must be valid. The error text is for the client.
@@ -292,8 +290,12 @@ fn op_from_wire(op: wire::LayoutOp) -> Result<LayoutOp, String> {
             panel: p.map(panel).transpose()?,
         },
         wire::LayoutOp::CloseTile { tile: t } => LayoutOp::CloseTile { tile: tile(t)? },
-        wire::LayoutOp::AddPanel { .. } => return Err(UNEXPECTED_ADD_PANEL.to_owned()),
-        wire::LayoutOp::RemovePanel { .. } => return Err(UNEXPECTED_REMOVE_PANEL.to_owned()),
+        wire::LayoutOp::AddPanel { panel: p, tile: t } => LayoutOp::AddPanel {
+            panel: panel(p)?,
+            tile: t.map(tile).transpose()?,
+            activate: true,
+        },
+        wire::LayoutOp::RemovePanel { panel: p } => LayoutOp::RemovePanel { panel: panel(p)? },
     })
 }
 
@@ -390,6 +392,20 @@ struct SpaceState {
     unread: bool,
     /// Watchers that asked before the first read finished.
     waiting: Vec<(ConnectionId, u64)>,
+    /// MCP-created panels of this run whose placement isn't settled yet (both `disk` and
+    /// `current` hold it), in creation order.
+    placements: Vec<Placement>,
+    /// IDs to take out of the tree at the next read that finds a usable layout.
+    unplacing: Vec<PanelId>,
+}
+
+/// A panel waiting to be put in a tile.
+#[derive(Debug, Clone)]
+struct Placement {
+    panel: PanelId,
+    hint: Option<TileId>,
+    /// It was applied once, so a later application never activates it.
+    placed: bool,
 }
 
 impl SpaceState {
@@ -411,7 +427,83 @@ impl SpaceState {
             invalid: false,
             unread: false,
             waiting: Vec::new(),
+            placements: Vec::new(),
+            unplacing: Vec::new(),
         }
+    }
+
+    /// The layout has been read, can be used and its content is known.
+    fn usable(&self) -> bool {
+        self.loaded && !self.invalid && !self.unread
+    }
+
+    /// Both the file as last read or written and the held tree hold `panel`.
+    fn settled(&self, panel: &PanelId) -> bool {
+        tile_holding(&self.disk.root, panel).is_some()
+            && tile_holding(&self.current.root, panel).is_some()
+    }
+
+    fn holds(&self, panel: &PanelId) -> bool {
+        tile_holding(&self.current.root, panel).is_some()
+    }
+
+    /// Applies one daemon op to the held tree and queues it like a client change, but never
+    /// clears `dropped`. A failed op changes nothing and returns false.
+    fn apply_daemon_op(&mut self, op: LayoutOp, now: Millis) -> bool {
+        let Ok(applied) = apply_ops(&self.current, &self.origins, std::slice::from_ref(&op)) else {
+            return false;
+        };
+        self.current = applied.layout;
+        self.origins = applied.origins;
+        let timed = TimedOp { op, at: now };
+        match &mut self.pending {
+            Some(pending) => {
+                pending.ops.push(timed);
+                pending.touched.extend(applied.touched);
+            }
+            None => {
+                self.pending = Some(Pending {
+                    ops: vec![timed],
+                    touched: applied.touched,
+                });
+            }
+        }
+        true
+    }
+
+    /// Removals first, then placements in creation order. Applies nothing unless the layout is
+    /// usable. Returns whether the held tree changed.
+    fn reconcile(&mut self, now: Millis, timing: LayoutTiming) -> bool {
+        if !self.usable() {
+            return false;
+        }
+        let mut applied = false;
+        for panel in std::mem::take(&mut self.unplacing) {
+            if self.holds(&panel) {
+                applied |= self.apply_daemon_op(LayoutOp::RemovePanel { panel }, now);
+            }
+        }
+        for mut placement in std::mem::take(&mut self.placements) {
+            if self.settled(&placement.panel) {
+                continue;
+            }
+            if !self.holds(&placement.panel) {
+                let op = LayoutOp::AddPanel {
+                    panel: placement.panel.clone(),
+                    tile: placement.hint.clone(),
+                    activate: !placement.placed,
+                };
+                if self.apply_daemon_op(op, now) {
+                    placement.placed = true;
+                    applied = true;
+                }
+            }
+            self.placements.push(placement);
+        }
+        if applied {
+            self.arm_deadline(now, timing);
+        }
+        applied
     }
 
     fn status(&self) -> SpaceLayoutStatus {
@@ -455,13 +547,15 @@ impl SpaceState {
         matches
     }
 
-    /// After a failed read, held ops wait for a read that succeeds: one is due `retry_ms` after
-    /// the failure, and later mutations don't push it back.
+    /// After a failed read, held ops and waiting placements or removals wait for a read that
+    /// succeeds: one is due `retry_ms` after the failure, and later changes don't push it back.
     fn arm_reread(&mut self, now: Millis, timing: LayoutTiming) {
-        self.deadline = match (&self.pending, self.deadline) {
-            (None, _) => None,
-            (Some(_), Some(due)) => Some(due),
-            (Some(_), None) => Some(now.saturating_add(Millis(timing.retry_ms))),
+        let waiting =
+            self.pending.is_some() || !self.placements.is_empty() || !self.unplacing.is_empty();
+        self.deadline = match (waiting, self.deadline) {
+            (false, _) => None,
+            (true, Some(due)) => Some(due),
+            (true, None) => Some(now.saturating_add(Millis(timing.retry_ms))),
         };
     }
 
@@ -613,6 +707,14 @@ impl SpaceState {
                 if let Some(writing) = writing {
                     changed |= self.finish_write(writing, now, timing);
                 }
+                let retired: Vec<PanelId> = self
+                    .placements
+                    .iter()
+                    .filter(|placement| self.settled(&placement.panel))
+                    .map(|placement| placement.panel.clone())
+                    .collect();
+                self.placements
+                    .retain(|placement| !retired.contains(&placement.panel));
                 changed
             }
             LayoutWritten::ReadOnly(detail) => {
@@ -748,11 +850,16 @@ impl Layouts {
         }
         self.watching.insert(conn, space.clone());
         match self.spaces.get_mut(&space) {
-            Some(state) if state.loaded => self.replies.push(LayoutReply {
-                conn,
-                request,
-                space,
-            }),
+            Some(state) if state.loaded => {
+                self.replies.push(LayoutReply {
+                    conn,
+                    request,
+                    space: space.clone(),
+                });
+                if state.reconcile(now, self.timing) {
+                    self.publish(&space);
+                }
+            }
             Some(state) => state.waiting.push((conn, request)),
             None => {
                 let mut state = SpaceState::new();
@@ -765,6 +872,100 @@ impl Layouts {
             }
         }
         Ok(())
+    }
+
+    /// Places an MCP-created panel of this run. `space` is one the panel store holds, so there
+    /// is no `known` check. Holds the space's layout if it isn't held. A panel already waiting
+    /// isn't added twice. On a usable layout the panel is in the held tree when this returns;
+    /// before the first read, and while the layout is invalid or unreadable, the placement waits
+    /// and nothing is written over the file. An entry for the same ID in `unplacing` stays: the
+    /// next reconcile removes the old tab first and then places this panel, appended and active.
+    pub fn place(&mut self, space: &SpaceId, panel: PanelId, hint: Option<TileId>, now: Millis) {
+        let timing = self.timing;
+        let state = self.hold(space);
+        if !state
+            .placements
+            .iter()
+            .any(|waiting| waiting.panel == panel)
+        {
+            state.placements.push(Placement {
+                panel,
+                hint,
+                placed: false,
+            });
+        }
+        let applied = state.reconcile(now, timing);
+        if state.loaded && state.unread {
+            state.arm_reread(now, timing);
+        }
+        if applied {
+            self.publish(space);
+        }
+    }
+
+    /// Takes `panel` out of the tree and forgets its waiting placement. On a usable layout the
+    /// removal applies at once when a tile holds the panel, and otherwise only the placement is
+    /// forgotten. Before the first read, and while the layout is blocked, the ID waits in
+    /// `unplacing`; a blocked layout's held tree also loses the panel now, though nothing is
+    /// written until the layout can be used.
+    pub fn unplace(&mut self, space: &SpaceId, panel: &PanelId, now: Millis) {
+        let timing = self.timing;
+        let state = self.hold(space);
+        state
+            .placements
+            .retain(|placement| placement.panel != *panel);
+        let mut applied = false;
+        if state.usable() {
+            if state.holds(panel) {
+                applied = state.apply_daemon_op(
+                    LayoutOp::RemovePanel {
+                        panel: panel.clone(),
+                    },
+                    now,
+                );
+                state.arm_deadline(now, timing);
+            }
+        } else {
+            if !state.unplacing.contains(panel) {
+                state.unplacing.push(panel.clone());
+            }
+            if state.loaded && state.holds(panel) {
+                applied = state.apply_daemon_op(
+                    LayoutOp::RemovePanel {
+                        panel: panel.clone(),
+                    },
+                    now,
+                );
+            }
+            if state.loaded && state.unread {
+                state.arm_reread(now, timing);
+            }
+        }
+        if applied {
+            self.publish(space);
+        }
+    }
+
+    /// Effects, replies or pushes are waiting to be taken.
+    pub fn has_work(&self) -> bool {
+        !self.effects.is_empty() || !self.replies.is_empty() || !self.changed.is_empty()
+    }
+
+    /// Holds `space`'s layout if it isn't held: queues the watch and the first read, with no
+    /// watcher and no waiting reply.
+    fn hold(&mut self, space: &SpaceId) -> &mut SpaceState {
+        match self.spaces.entry(space.clone()) {
+            Entry::Occupied(held) => held.into_mut(),
+            Entry::Vacant(vacant) => {
+                self.effects.push(LayoutEffect::Watch {
+                    space: space.clone(),
+                });
+                self.effects.push(LayoutEffect::Read {
+                    space: space.clone(),
+                });
+                vacant.insert(SpaceState::new())
+            }
+        }
     }
 
     /// Ends `conn`'s watch, also on disconnect, and writes the space's pending ops now.
@@ -793,6 +994,7 @@ impl Layouts {
         };
         let first = !state.loaded;
         let publish = state.apply_read(read, now, self.timing);
+        let reconciled = state.reconcile(now, self.timing);
         if first {
             for (conn, request) in std::mem::take(&mut state.waiting) {
                 self.replies.push(LayoutReply {
@@ -802,7 +1004,7 @@ impl Layouts {
                 });
             }
         }
-        if publish {
+        if publish || reconciled {
             self.publish(space);
         }
     }
@@ -860,6 +1062,12 @@ impl Layouts {
         }
         let applied = apply_ops(&state.current, &state.origins, &ops)
             .map_err(|why| MutateError::Invalid(why.to_string()))?;
+        let held_before: Vec<PanelId> = state
+            .placements
+            .iter()
+            .filter(|placement| state.holds(&placement.panel))
+            .map(|placement| placement.panel.clone())
+            .collect();
         state.current = applied.layout;
         state.origins = applied.origins;
         let timed = ops.into_iter().map(|op| TimedOp { op, at: now });
@@ -876,6 +1084,13 @@ impl Layouts {
             }
         }
         state.dropped = None;
+        let ended: Vec<PanelId> = held_before
+            .into_iter()
+            .filter(|panel| !state.holds(panel))
+            .collect();
+        state
+            .placements
+            .retain(|placement| !ended.contains(&placement.panel));
         state.arm_deadline(now, self.timing);
         self.replies.push(LayoutReply {
             conn,
@@ -958,7 +1173,9 @@ impl Layouts {
         let Some(state) = self.spaces.get_mut(space) else {
             return;
         };
-        if state.apply_written(written, now, self.timing) {
+        let changed = state.apply_written(written, now, self.timing);
+        let reconciled = state.reconcile(now, self.timing);
+        if changed || reconciled {
             self.publish(space);
         }
     }
