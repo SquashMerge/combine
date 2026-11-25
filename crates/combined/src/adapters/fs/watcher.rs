@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -275,7 +275,10 @@ fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> notify::Result<b
         return Ok(false);
     };
     if let Err(error) = registered {
-        if std::fs::symlink_metadata(&workspace).is_err() {
+        if matches!(
+            std::fs::symlink_metadata(&workspace),
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound
+        ) {
             return Ok(false);
         }
         watched.arm_error = Some(error.to_string());
@@ -296,6 +299,15 @@ pub struct SpaceWatcher {
 
 impl SpaceWatcher {
     pub fn new(changes: UnboundedSender<FileChange>) -> notify::Result<SpaceWatcher> {
+        Self::with_arm_retry(changes, ARM_RETRY)
+    }
+
+    /// [`SpaceWatcher::new`] with the interval at which a `.workspace/` that failed to arm is
+    /// tried again named, for tests.
+    pub fn with_arm_retry(
+        changes: UnboundedSender<FileChange>,
+        arm_retry: Duration,
+    ) -> notify::Result<SpaceWatcher> {
         let shared = Arc::new(Shared {
             roots: Mutex::new(WatchRoots::new()),
             changes,
@@ -311,7 +323,7 @@ impl SpaceWatcher {
         let thread_cell = Arc::downgrade(&cell);
         thread::Builder::new()
             .name("layout-rearm".to_string())
-            .spawn(move || rearm_loop(&thread_shared, &thread_cell, &requests))
+            .spawn(move || rearm_loop(&thread_shared, &thread_cell, &requests, arm_retry))
             .map_err(notify::Error::io)?;
         Ok(SpaceWatcher {
             shared,
@@ -381,16 +393,31 @@ impl SpaceWatcher {
 
 /// Watches the `.workspace/` folders the handler saw appear, and reports `layout.json` and
 /// `panels` for each, since the files may have been written before the watch began. A folder
-/// the platform refused to watch is tried again every [`ARM_RETRY`]; the refusal is logged when
-/// it starts and when its text changes. Ends when the watcher that owns the handler's sender
-/// is dropped.
-fn rearm_loop(shared: &Shared, cell: &Weak<WatcherCell>, requests: &mpsc::Receiver<SpaceId>) {
+/// the platform refused to watch is tried again every `arm_retry`, on a deadline that requests
+/// for other spaces don't move; the refusal is logged when it starts and when its text changes.
+/// Ends when the watcher that owns the handler's sender is dropped.
+fn rearm_loop(
+    shared: &Shared,
+    cell: &Weak<WatcherCell>,
+    requests: &mpsc::Receiver<SpaceId>,
+    arm_retry: Duration,
+) {
+    let mut next_retry = Instant::now() + arm_retry;
     loop {
-        let spaces = match requests.recv_timeout(ARM_RETRY) {
-            Ok(space) => vec![space],
-            Err(mpsc::RecvTimeoutError::Timeout) => shared.failed_arms(),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-        };
+        let mut spaces =
+            match requests.recv_timeout(next_retry.saturating_duration_since(Instant::now())) {
+                Ok(space) => vec![space],
+                Err(mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            };
+        if Instant::now() >= next_retry {
+            next_retry = Instant::now() + arm_retry;
+            for space in shared.failed_arms() {
+                if !spaces.contains(&space) {
+                    spaces.push(space);
+                }
+            }
+        }
         for space in spaces {
             let Some(cell) = cell.upgrade() else {
                 return;
