@@ -52,6 +52,8 @@ pub struct ServeOptions {
     pub max_pull_bytes: usize,
     /// How often core's timers are checked.
     pub housekeeping: Duration,
+    /// How often a space the file store could not watch is tried again.
+    pub watch_retry: Duration,
     /// How long a new connection may take to send `hello`.
     pub handshake_timeout: Duration,
     /// How long a write may make no progress before its connection is closed.
@@ -67,6 +69,7 @@ impl Default for ServeOptions {
             flush_interval: Duration::from_millis(16),
             max_pull_bytes: 1 << 20,
             housekeeping: Duration::from_millis(250),
+            watch_retry: Duration::from_secs(30),
             handshake_timeout: Duration::from_secs(10),
             write_timeout: Duration::from_secs(10),
             max_connections: 64,

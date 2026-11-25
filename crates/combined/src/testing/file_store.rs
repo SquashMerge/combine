@@ -28,6 +28,9 @@ struct SpaceFiles {
     read_counts: BTreeMap<String, u64>,
     list_counts: BTreeMap<String, u64>,
     fail_next_write: Option<StoreError>,
+    /// Every watch of the space fails with this until it is cleared.
+    watch_error: Option<StoreError>,
+    watch_count: u64,
 }
 
 struct State {
@@ -107,6 +110,23 @@ impl MemoryFileStore {
             .entry(space.clone())
             .or_default()
             .fail_next_write = Some(error);
+    }
+
+    /// While `error` is set, every watch of `space` fails with it and the space is not watched.
+    pub fn fail_watch(&self, space: &SpaceId, error: Option<StoreError>) {
+        self.state()
+            .spaces
+            .entry(space.clone())
+            .or_default()
+            .watch_error = error;
+    }
+
+    /// How many watches of the space reached the store.
+    pub fn watch_count(&self, space: &SpaceId) -> u64 {
+        self.state()
+            .spaces
+            .get(space)
+            .map_or(0, |entry| entry.watch_count)
     }
 
     /// Replaces a file as someone else would, without the store's own bookkeeping, and queues a
@@ -388,11 +408,13 @@ impl FileStore for MemoryFileStore {
     }
 
     async fn watch(&self, space: &SpaceId) -> Result<(), StoreError> {
-        self.state()
-            .spaces
-            .entry(space.clone())
-            .or_default()
-            .watched = true;
+        let mut state = self.state();
+        let entry = state.spaces.entry(space.clone()).or_default();
+        entry.watch_count += 1;
+        if let Some(error) = &entry.watch_error {
+            return Err(error.clone());
+        }
+        entry.watched = true;
         Ok(())
     }
 
