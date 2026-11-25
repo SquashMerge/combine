@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { type ClientState, defaultClientState, parseClientState } from '../../src/model/clientState';
 import type { DecimalU64, HostId } from '../../src/model/ids';
 import type { LayoutSnapshot } from '../../src/model/layout';
+import { HELD_NOTICE, HELD_TITLE } from '../../src/shell/heldLayout';
 import { App } from '../../src/shell/App';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
@@ -46,19 +47,20 @@ function saved(focusedTile: string | null, activeTabs: Record<string, string>): 
 
 async function mount(state: ClientState | null) {
   const layoutPort = new MemoryLayoutPort();
+  const hostsPort = new MemoryHostsPort(hosts());
   const clientStatePort = new MemoryClientStatePort(
     state === null ? new Map() : new Map<HostId, ClientState>([[HOST_A, state]]),
   );
   render(
     <App
       terminalPort={new MemoryTerminalPort()}
-      port={new MemoryHostsPort(hosts())}
+      port={hostsPort}
       clientStatePort={clientStatePort}
       layoutPort={layoutPort}
       newTileId={() => 't-new'}
     />,
   );
-  return { layoutPort, clientStatePort };
+  return { layoutPort, clientStatePort, hostsPort };
 }
 
 const focused = () =>
@@ -159,6 +161,87 @@ describe('App with a layout', () => {
     );
     expect((await screen.findByRole('alert')).textContent).toBe('no such space');
     expect(document.querySelector('[data-tile-id]')).toBeNull();
+  });
+});
+
+describe('App with a held layout', () => {
+  async function held() {
+    const mounted = await mount(saved(null, { t1: 'p2' }));
+    const { layoutPort, hostsPort } = mounted;
+    await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout(true)));
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    return mounted;
+  }
+
+  const editControls = () =>
+    screen.getAllByRole('button', { name: /^(Split right|Split down|Close tile)$/ }) as HTMLButtonElement[];
+
+  it('disconnect holds the tree with disabled controls and the reason', async () => {
+    await held();
+    expect(document.querySelector('[data-tile-id="t1"]')).not.toBeNull();
+    expect(document.querySelector('main')?.getAttribute('data-held')).toBe('disconnected');
+    expect(screen.getByText(HELD_NOTICE.disconnected).getAttribute('role')).toBe('status');
+    expect(editControls()).toHaveLength(6);
+    for (const control of editControls()) {
+      expect(control.disabled).toBe(true);
+      expect(control.title).toBe(HELD_TITLE.disconnected);
+    }
+    fireEvent.click(editControls()[0] as HTMLElement);
+    expect(screen.getByRole('tab', { name: 'p2' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('a failed rewatch marks the held tree stale', async () => {
+    const { layoutPort, hostsPort } = await held();
+    act(() => hostsPort.setConnection('mac', { kind: 'connected' }));
+    await waitFor(() => expect(layoutPort.calls.filter((c) => c.kind === 'watch')).toHaveLength(2));
+    await waitFor(() => expect(document.querySelector('main')?.getAttribute('data-held')).toBe('reconnecting'));
+    act(() =>
+      layoutPort.emit({ kind: 'error', hostId: HOST_A, request: '2' as DecimalU64, code: 'unknown_space', message: 'gone' }),
+    );
+    await waitFor(() => expect(document.querySelector('main')?.getAttribute('data-held')).toBe('failed'));
+    expect(screen.getByText(HELD_NOTICE.failed)).not.toBeNull();
+    for (const control of editControls()) expect(control.title).toBe(HELD_TITLE.failed);
+  });
+
+  it("the rail keeps a held space's read-only mark", async () => {
+    await held();
+    expect(screen.getByRole('button', { name: /^alpha/ }).getAttribute('data-read-only')).toBe('true');
+  });
+});
+
+describe('App with a placed panel', () => {
+  it('a placed panel replaces the stored active tab for its tile', async () => {
+    const { layoutPort } = await mount(saved(null, { t1: 'p2' }));
+    await waitFor(() => expect(layoutPort.listenerCount()).toBe(1));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout()));
+    await waitFor(() => expect(selectedTab('t1')).toBe('p2'));
+    const placed = layout();
+    act(() =>
+      layoutPort.push(HOST_A, {
+        ...placed,
+        layoutRevision: '4' as DecimalU64,
+        root: {
+          type: 'split',
+          dir: 'h',
+          ratio: 0.5,
+          a: { type: 'tile', id: 't1', panels: ['p1', 'p2', 'p9'], active: 'p9' },
+          b: { type: 'tile', id: 't2', panels: ['p3'], active: null },
+        },
+      }),
+    );
+    await waitFor(() => expect(selectedTab('t1')).toBe('p9'));
+  });
+
+  it('a snapshot that changes nothing keeps the stored active tab', async () => {
+    const { layoutPort } = await mount(saved(null, { t1: 'p2' }));
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, layout()));
+    act(() => layoutPort.push(HOST_A, { ...layout(), layoutRevision: '4' as DecimalU64 }));
+    await waitFor(() => expect(selectedTab('t1')).toBe('p2'));
   });
 });
 

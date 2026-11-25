@@ -22,3 +22,12 @@ export function dictWith<V>(dict: Readonly<Dict<V>>, key: string, value: V): Dic
   next[key] = value;
   return next;
 }
+
+/** A copy of `dict` without the listed keys. */
+export function dictWithout<V>(dict: Readonly<Dict<V>>, keys: readonly string[]): Dict<V> {
+  const next = emptyDict<V>();
+  for (const [k, v] of Object.entries(dict)) {
+    if (!keys.includes(k)) next[k] = v;
+  }
+  return next;
+}

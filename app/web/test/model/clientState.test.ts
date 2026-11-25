@@ -9,6 +9,7 @@ import {
   parseClientState,
   restoreSpaceState,
   storedSpaceState,
+  withoutActiveTabs,
 } from '../../src/model/clientState';
 import { dictGet } from '../../src/model/dict';
 import type { DecimalU64, TermId } from '../../src/model/ids';
@@ -151,5 +152,26 @@ describe('client state keyed by IDs that name inherited properties', () => {
     for (const id of ids) expect(storedSpaceState(defaultClientState(), id)).toBeUndefined();
     const restored = restoreSpaceState(undefined, new Map([['t1', { panels: [], active: null }]]), terminals);
     for (const id of ids) expect(dictGet(restored.activeTabs, id)).toBeUndefined();
+  });
+});
+
+describe('withoutActiveTabs', () => {
+  it('drops the listed tiles overrides and keeps the others', () => {
+    const state = stored({ activeTabs: { t1: 'p2', t2: 'p3' } });
+    const next = withoutActiveTabs(state, ['t1', 'gone']);
+    expect(next).not.toBe(state);
+    expect(JSON.parse(JSON.stringify(next.activeTabs))).toEqual({ t2: 'p3' });
+    expect(state.activeTabs).toEqual({ t1: 'p2', t2: 'p3' });
+  });
+
+  it('returns the same object when no listed tile has an override', () => {
+    const state = stored();
+    expect(withoutActiveTabs(state, ['t2'])).toBe(state);
+    expect(withoutActiveTabs(state, [])).toBe(state);
+  });
+
+  it('does not read an inherited property as an override', () => {
+    const state = stored({ activeTabs: {} });
+    expect(withoutActiveTabs(state, ['constructor', '__proto__'])).toBe(state);
   });
 });
