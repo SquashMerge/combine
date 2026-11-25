@@ -8,7 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::rpc::socket::MAX_SOCKET_PATH;
+/// The longest socket path a unix socket takes on macOS, with the terminating NUL left out.
+const MAX_SOCKET_PATH: usize = 103;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 

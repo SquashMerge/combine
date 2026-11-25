@@ -9,8 +9,10 @@ use combine_protocol::{
     ClientMessage, DaemonMessage, ErrorMessage, JsonRpcMessage, Mcp, McpCaller, McpOpen, RequestId,
 };
 use combined::rpc::ServeOptions;
-use combined::testing::{PanelServer, WireClient};
 use serde_json::{json, Value};
+
+use crate::daemon_support::WireClient;
+use crate::panel_support::PanelServer;
 
 /// The options the MCP wire tests serve with: a short wait, so every tool reply is well inside
 /// the client's receive timeout.

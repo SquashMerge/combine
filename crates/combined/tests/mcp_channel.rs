@@ -2,7 +2,10 @@
 //! The MCP channel in the server loop: `mcp_open`, the cap, the frames before it, the closed
 //! channel's slot and the order of the replies.
 
+mod common;
+mod daemon_support;
 mod mcp_support;
+mod panel_support;
 
 use std::time::Duration;
 
@@ -11,8 +14,9 @@ use combine_protocol::{
 };
 use combined::core::PanelApiError;
 use combined::rpc::ServeOptions;
-use combined::testing::{wait_until, PanelServer, PanelServerConfig, WireClient};
+use daemon_support::{wait_until, WireClient};
 use mcp_support::{cwd_caller, wire_options, McpWire};
+use panel_support::{PanelServer, PanelServerConfig};
 use serde_json::json;
 
 fn server_with(options: ServeOptions) -> PanelServer {
