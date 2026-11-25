@@ -102,6 +102,21 @@ fn mcp_open_without_a_match_is_unknown_caller() {
 }
 
 #[test]
+fn a_terminal_with_an_empty_cwd_does_not_make_every_caller_match() {
+    let server = server();
+    server.spawn_terminal_in(std::path::Path::new(""));
+    let mut wire = McpWire::unopened(WireClient::open(&server.socket).0);
+    let nowhere = McpCaller {
+        terminal_id: None,
+        terminal_socket: None,
+        cwd: Some("/nowhere".to_string()),
+    };
+    let error = wire.try_open(nowhere).unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnknownCaller);
+    assert!(wire.try_open(cwd_caller(&server)).is_ok());
+}
+
+#[test]
 fn mcp_open_beyond_the_cap_is_refused() {
     let server = server_with(ServeOptions {
         max_mcp_connections: 2,
