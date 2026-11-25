@@ -83,8 +83,17 @@ fn clip(text: &str) -> &str {
     &text[..crate::codec::floor_char_boundary(text, text.len().min(64))]
 }
 
+/// Where a panel lives: `persistent` in the project's `.workspace/`, `scratch` in the daemon's data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelLifetime {
+    Persistent,
+    Scratch,
+}
+
 /// One panel of a space, as `panels` lists it: its current revision, and that
-/// revision's state. `error` is set while `state` is `failed`.
+/// revision's state. `error` is set while `state` is `failed`. `lifetime` is
+/// `None` from a daemon that doesn't say where the panel lives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanelSummary {
     pub id: String,
@@ -94,4 +103,6 @@ pub struct PanelSummary {
     pub state: PanelState,
     pub error: Option<PanelError>,
     pub created_by: Option<CreatedBy>,
+    #[serde(default)]
+    pub lifetime: Option<PanelLifetime>,
 }

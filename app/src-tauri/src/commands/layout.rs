@@ -117,6 +117,13 @@ pub enum IpcLayoutOp {
     CloseTile {
         tile: String,
     },
+    AddPanel {
+        panel: String,
+        tile: Option<String>,
+    },
+    RemovePanel {
+        panel: String,
+    },
 }
 
 fn ratio(value: f64) -> Result<Ratio, String> {
@@ -159,6 +166,8 @@ impl TryFrom<IpcLayoutOp> for LayoutOp {
                 panel,
             },
             IpcLayoutOp::CloseTile { tile } => LayoutOp::CloseTile { tile },
+            IpcLayoutOp::AddPanel { panel, tile } => LayoutOp::AddPanel { panel, tile },
+            IpcLayoutOp::RemovePanel { panel } => LayoutOp::RemovePanel { panel },
         })
     }
 }
@@ -425,7 +434,7 @@ mod tests {
     fn op_shapes_match_fixture() {
         let fixture = fixture("layout-event.json");
         let ops = fixture["ops"].as_array().expect("ops array");
-        assert_eq!(ops.len(), 5);
+        assert_eq!(ops.len(), 7);
         let wire: Vec<LayoutOp> = ops
             .iter()
             .map(|op| {
@@ -458,6 +467,13 @@ mod tests {
                 },
                 LayoutOp::CloseTile {
                     tile: "t3".to_string()
+                },
+                LayoutOp::AddPanel {
+                    panel: "p3".to_string(),
+                    tile: None
+                },
+                LayoutOp::RemovePanel {
+                    panel: "p3".to_string()
                 },
             ]
         );

@@ -49,6 +49,8 @@ pub fn run() {
                 terminals::terminal_automatic_reply,
                 open_url::open_url,
                 panels::get_panel,
+                panels::close_panel,
+                panels::pin_panel,
                 panels::report_render
                 $($extra)*
             ]

@@ -32,7 +32,7 @@ function layout(path: string): LayoutSnapshot {
 function list(path: string, error: string | null = null, ids: string[] = ['a']): PanelList {
   return {
     space: path,
-    panels: error === null ? ids.map((id) => ({ id, title: null, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null })) : [],
+    panels: error === null ? ids.map((id) => ({ id, title: null, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null, lifetime: null })) : [],
     skipped: [],
     error,
   };

@@ -95,6 +95,12 @@ impl SessionPhase for LivePhase {
                         DaemonMessage::Panel(panel) => {
                             events.panel_reply(host_id, PanelReply::Panel(panel));
                         }
+                        DaemonMessage::PanelClosed(closed) => {
+                            events.panel_reply(host_id, PanelReply::Closed(closed));
+                        }
+                        DaemonMessage::PanelPinned(pinned) => {
+                            events.panel_reply(host_id, PanelReply::Pinned(pinned));
+                        }
                         DaemonMessage::Templates(templates) => {
                             events.spawn_reply(host_id, SpawnReply::Templates(templates));
                         }
@@ -165,7 +171,10 @@ mod tests {
         LayoutNode, LayoutSnapshot, ListTemplates, MutateLayout, RequestId, Seq, SpaceInfo,
         SpaceKind, Spawned, Started, TemplateInfo, Templates, TermId, Terminals, WatchLayout,
     };
-    use combine_protocol::{CreatedBy, GetPanel, Panel, PanelState, PanelSummary, Renderer};
+    use combine_protocol::{
+        CreatedBy, GetPanel, Panel, PanelClosed, PanelLifetime, PanelPinned, PanelState,
+        PanelSummary, Renderer,
+    };
 
     use super::super::attachments::StreamId;
     use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
@@ -751,6 +760,7 @@ mod tests {
                 state: PanelState::Validated,
                 error: None,
                 created_by: Some(CreatedBy::User),
+                lifetime: Some(PanelLifetime::Scratch),
             }],
             skipped: Vec::new(),
             error: None,
@@ -798,6 +808,33 @@ mod tests {
                     message: "the space has no panel".to_string(),
                 }
             )
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
+    fn panel_closed_and_panel_pinned_reach_the_panel_sink() {
+        let (mut rig, received) = layout_rig();
+        let host = host_id(HOST_A);
+        let closed = PanelClosed {
+            request: RequestId(11),
+            space: "/work".to_string(),
+            panel: "notes".to_string(),
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::PanelClosed(closed.clone())).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::PanelReply(host.clone(), PanelReply::Closed(closed))
+        );
+        let pinned = PanelPinned {
+            request: RequestId(12),
+            space: "/work".to_string(),
+            panel: "notes".to_string(),
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::PanelPinned(pinned.clone())).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::PanelReply(host, PanelReply::Pinned(pinned))
         );
         assert_eq!(end_session(rig), SessionEnd::Closed);
     }

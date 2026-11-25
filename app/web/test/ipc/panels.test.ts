@@ -102,6 +102,71 @@ describe('createTauriPanelPort', () => {
     await expect(fetch).rejects.toMatchObject({ message: 'The host disconnected.' });
   });
 
+  it('closePanel invokes close_panel and resolves on closed', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(`invoke:${cmd}`);
+      queueMicrotask(() => emit(fixture.closed));
+      return '11';
+    });
+    const port = createTauriPanelPort();
+    await expect(port.closePanel(host, '/work', 'notes')).resolves.toBeUndefined();
+    expect(order).toEqual(['listen:panels-changed', 'listen-resolved', 'invoke:close_panel']);
+    expect(invoke).toHaveBeenCalledWith('close_panel', { hostId: host, space: '/work', panel: 'notes' });
+  });
+
+  it('pinPanel invokes pin_panel and resolves on pinned', async () => {
+    invoke.mockImplementation(async () => {
+      queueMicrotask(() => emit(fixture.pinned));
+      return '12';
+    });
+    const port = createTauriPanelPort();
+    await expect(port.pinPanel(host, '/work', 'notes')).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith('pin_panel', { hostId: host, space: '/work', panel: 'notes' });
+  });
+
+  it("pinPanel rejects with the daemon's error", async () => {
+    invoke.mockImplementationOnce(async () => {
+      queueMicrotask(() => emit(fixture.error));
+      return '10';
+    });
+    const port = createTauriPanelPort();
+    await expect(port.pinPanel(host, '/work', 'gone')).rejects.toMatchObject({
+      code: 'unknown_panel',
+      message: 'the space has no panel gone',
+    });
+    invoke.mockRejectedValueOnce('not connected');
+    await expect(port.closePanel(host, '/work', 'x')).rejects.toMatchObject({
+      code: null,
+      message: 'not connected',
+    });
+  });
+
+  it('a disconnect between invoke and reply rejects', async () => {
+    invoke.mockResolvedValue('11');
+    const port = createTauriPanelPort();
+    const closing = port.closePanel(host, '/work', 'notes');
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
+    await Promise.resolve();
+    emit(fixture.disconnected);
+    await expect(closing).rejects.toMatchObject({ message: 'The host disconnected.' });
+  });
+
+  it('a disconnect while the invoke is out rejects without waiting for a reply', async () => {
+    let answer: (id: string) => void = () => undefined;
+    invoke.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const port = createTauriPanelPort();
+    const closing = port.closePanel(host, '/work', 'notes');
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
+    emit(fixture.disconnected);
+    answer('11');
+    await expect(closing).rejects.toMatchObject({ message: 'The host disconnected.' });
+  });
+
   it('caps_in_flight_get_panel_at_four', async () => {
     let next = 100;
     invoke.mockImplementation(async () => String(next++));

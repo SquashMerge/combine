@@ -27,4 +27,6 @@ export const OPEN_URL_COMMAND = 'open_url';
 export const PANELS_EVENT = 'panels-changed';
 export const GET_PANEL_COMMAND = 'get_panel';
 export const REPORT_RENDER_COMMAND = 'report_render';
+export const CLOSE_PANEL_COMMAND = 'close_panel';
+export const PIN_PANEL_COMMAND = 'pin_panel';
 export const CSP_PROBE_REPORT_COMMAND = 'csp_probe_report';

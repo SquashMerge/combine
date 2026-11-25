@@ -22,7 +22,8 @@
           "createdBy": {
             "type": "agent",
             "slot": "claude"
-          }
+          },
+          "lifetime": "persistent"
         },
         {
           "id": "notes",
@@ -33,7 +34,8 @@
           "error": null,
           "createdBy": {
             "type": "user"
-          }
+          },
+          "lifetime": "scratch"
         }
       ],
       "skipped": [
@@ -68,7 +70,8 @@
           "createdBy": {
             "type": "agent",
             "slot": "claude"
-          }
+          },
+          "lifetime": "persistent"
         },
         {
           "id": "notes",
@@ -79,7 +82,8 @@
           "error": null,
           "createdBy": {
             "type": "user"
-          }
+          },
+          "lifetime": "scratch"
         }
       ],
       "skipped": [
@@ -122,6 +126,20 @@
     "request": "10",
     "code": "unknown_panel",
     "message": "the space has no panel gone"
+  },
+  "closed": {
+    "kind": "closed",
+    "hostId": "host-1",
+    "request": "11",
+    "space": "/work",
+    "panel": "notes"
+  },
+  "pinned": {
+    "kind": "pinned",
+    "hostId": "host-1",
+    "request": "12",
+    "space": "/work",
+    "panel": "notes"
   },
   "disconnected": {
     "kind": "disconnected",

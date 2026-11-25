@@ -2,8 +2,8 @@
 //! The `panels` and `panel` messages, and the trim that keeps a list within one frame.
 
 use combine_protocol::{
-    CreatedBy, DaemonMessage, PanelError, PanelState, Panels, Renderer, RequestId, SkippedPanel,
-    WireMessage,
+    CreatedBy, DaemonMessage, PanelError, PanelLifetime, PanelState, Panels, Renderer, RequestId,
+    SkippedPanel, WireMessage,
 };
 use combined::core::{
     panel_reply, panel_summary, panels_loading, panels_message, PanelList, PanelView,
@@ -246,6 +246,15 @@ fn removed_panels_are_not_listed_and_the_rest_are_sorted() {
     assert_eq!(message.request, Some(RequestId(7)));
     assert!(message.panels[0].error.is_some());
     assert!(message.panels[1].error.is_none());
+}
+
+#[test]
+fn a_summary_carries_the_views_lifetime() {
+    let space = SpaceId("/work/app".to_owned());
+    let mut v = view(&space, "p", PanelState::Validated);
+    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Persistent));
+    v.lifetime = Lifetime::Scratch;
+    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Scratch));
 }
 
 #[test]

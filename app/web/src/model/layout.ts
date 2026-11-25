@@ -33,7 +33,9 @@ export type LayoutOp =
       ratio: number;
       panel: string | null;
     }
-  | { op: 'close_tile'; tile: string };
+  | { op: 'close_tile'; tile: string }
+  | { op: 'add_panel'; panel: string; tile: string | null }
+  | { op: 'remove_panel'; panel: string };
 
 export type LayoutEvent =
   | { kind: 'snapshot'; hostId: string; request: DecimalU64 | null; snapshot: LayoutSnapshot }
@@ -183,5 +185,30 @@ export function opTiles(op: LayoutOp): string[] {
       return op.leaves;
     case 'move_panel':
       return [op.toTile];
+    case 'add_panel':
+    case 'remove_panel':
+      return [];
   }
+}
+
+/** The ID of the tile whose panels hold the panel, or null when no tile does. */
+export function tileHolding(root: LayoutNode, panel: string): string | null {
+  if (root.type === 'tile') return root.panels.includes(panel) ? root.id : null;
+  return tileHolding(root.a, panel) ?? tileHolding(root.b, panel);
+}
+
+/**
+ * The tiles present in both trees whose active panel is not one the tile held before: a panel
+ * the daemon put in front of the tile, as opposed to one the user chose from what was there.
+ */
+export function newlyActiveTiles(prev: LayoutNode, next: LayoutNode): string[] {
+  const before = layoutTiles(prev);
+  const named: string[] = [];
+  for (const [id, tile] of layoutTiles(next)) {
+    const old = before.get(id);
+    if (old !== undefined && tile.active !== null && !old.panels.includes(tile.active)) {
+      named.push(id);
+    }
+  }
+  return named;
 }

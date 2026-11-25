@@ -22,6 +22,7 @@ function summary(overrides: Partial<PanelSummary> = {}): PanelSummary {
     state: 'validated',
     error: null,
     createdBy: null,
+    lifetime: null,
     ...overrides,
   };
 }
@@ -32,7 +33,7 @@ function list(panels: PanelSummary[], skipped: PanelList['skipped'] = []): Panel
 
 describe('parsePanelsChanged', () => {
   it('parses_every_kind_of_the_shared_fixture', () => {
-    expect(Object.keys(fixture)).toEqual(['list', 'push', 'loading', 'panel', 'error', 'disconnected']);
+    expect(Object.keys(fixture)).toEqual(['list', 'push', 'loading', 'panel', 'error', 'closed', 'pinned', 'disconnected']);
     const listed = parsePanelsChanged(fixture.list);
     expect(listed).toMatchObject({ kind: 'list', hostId: 'host-1', request: '7' });
     if (listed.kind !== 'list') throw new Error('a list');
@@ -45,6 +46,7 @@ describe('parsePanelsChanged', () => {
       state: 'failed',
       error: { code: 'syntax', message: 'unexpected token', line: 2, column: 11, snippet: '  A -> B' },
       createdBy: { type: 'agent', slot: 'claude' },
+      lifetime: 'persistent',
     });
     expect(notes).toMatchObject({ title: null, state: 'validated', error: null, createdBy: { type: 'user' } });
     expect(listed.list.skipped).toEqual([{ panel: 'broken', reason: "panel.json can't be used" }]);
@@ -66,6 +68,37 @@ describe('parsePanelsChanged', () => {
       message: 'the space has no panel gone',
     });
     expect(parsePanelsChanged(fixture.disconnected)).toEqual({ kind: 'disconnected', hostId: 'host-1' });
+  });
+
+  it('parses lifetime, closed and pinned', () => {
+    const listed = parsePanelsChanged(fixture.list);
+    if (listed.kind !== 'list') throw new Error('a list');
+    expect(listed.list.panels.map((p) => p.lifetime)).toEqual(['persistent', 'scratch']);
+    expect(parsePanelsChanged(fixture.closed)).toEqual({
+      kind: 'closed',
+      hostId: 'host-1',
+      request: '11',
+      space: '/work',
+      panel: 'notes',
+    });
+    expect(parsePanelsChanged(fixture.pinned)).toEqual({
+      kind: 'pinned',
+      hostId: 'host-1',
+      request: '12',
+      space: '/work',
+      panel: 'notes',
+    });
+    const entry = (fixture.list['list'] as { panels: Record<string, unknown>[] }).panels[0] ?? {};
+    const withLifetime = (lifetime: unknown): unknown => ({
+      ...fixture.list,
+      list: { ...(fixture.list['list'] as object), panels: [{ ...entry, lifetime }] },
+    });
+    const parsed = parsePanelsChanged(withLifetime(null));
+    expect(parsed.kind === 'list' && parsed.list.panels[0]?.lifetime).toBeNull();
+    expect(() => parsePanelsChanged(withLifetime('forever'))).toThrow('lifetime');
+    expect(() => parsePanelsChanged(withLifetime(undefined))).toThrow('lifetime');
+    expect(() => parsePanelsChanged({ ...fixture.closed, space: 3 })).toThrow('space');
+    expect(() => parsePanelsChanged({ ...fixture.pinned, request: 12 })).toThrow();
   });
 
   it('keeps a revision above 2^53 exact', () => {
