@@ -143,7 +143,8 @@ impl ServerStats {
         self.connections.load(Ordering::SeqCst)
     }
 
-    /// MCP channels whose tool thread hasn't ended.
+    /// MCP slots taken: accepted `mcp_open`s whose connection is not yet removed or whose
+    /// tool thread hasn't ended.
     pub fn mcp_channels(&self) -> usize {
         self.mcp.load(Ordering::SeqCst)
     }

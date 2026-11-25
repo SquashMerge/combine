@@ -7,10 +7,12 @@ mod daemon_support;
 mod mcp_support;
 mod panel_support;
 
-use std::time::Duration;
+use std::io::{BufReader, Write};
+use std::time::{Duration, Instant};
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, ErrorCode, McpCaller, RequestId, WatchTerminals,
+    ClientMessage, DaemonMessage, ErrorCode, JsonRpcMessage, Mcp, McpCaller, McpOpen, RequestId,
+    WatchTerminals,
 };
 use combined::core::PanelApiError;
 use combined::rpc::ServeOptions;
@@ -18,6 +20,7 @@ use daemon_support::{wait_until, WireClient};
 use mcp_support::{cwd_caller, wire_options, McpWire};
 use panel_support::{PanelServer, PanelServerConfig};
 use serde_json::json;
+use std::os::unix::net::UnixStream;
 
 fn server_with(options: ServeOptions) -> PanelServer {
     PanelServer::start(PanelServerConfig {
@@ -290,4 +293,108 @@ fn a_closed_connections_queued_calls_never_run_and_its_slot_frees() {
     assert!(lines[0].contains(r#"panel="q1""#), "{}", lines[0]);
     assert!(lines[0].contains("state=validating"), "{}", lines[0]);
     drop(hold);
+}
+
+/// A connection closing after a malformed frame keeps its MCP slot until its socket is closed,
+/// even when the channel's tool thread has already ended and the writer is stuck on a batch.
+#[test]
+fn a_closing_mcp_connection_keeps_its_slot_until_its_socket_closes() {
+    let server = server_with(ServeOptions {
+        max_connections: 1,
+        max_mcp_connections: 1,
+        mcp_wait: Duration::from_secs(30),
+        mcp_poll: Duration::from_millis(10),
+        ..wire_options()
+    });
+    server.spawn_terminal();
+    let stats = server.server.stats();
+    let panels = server.server.panels();
+    assert!(
+        wait_until(Duration::from_secs(5), || panels
+            .list(&server.space)
+            .is_ok()),
+        "the space never loaded"
+    );
+    for n in 0..99 {
+        server
+            .panels
+            .create(
+                &server.space,
+                combined::core::PanelCreate {
+                    id: Some(format!("p{n:03}")),
+                    lifetime: combined::model::Lifetime::Persistent,
+                    renderer: combine_protocol::Renderer::Markdown,
+                    title: Some("t".repeat(512)),
+                    idempotency_key: None,
+                    created_by: None,
+                    placement: None,
+                    content: "x".to_string(),
+                },
+            )
+            .unwrap();
+    }
+
+    // A peer that never reads: the list reply fills the socket and the writer keeps its batch.
+    let mut stream = UnixStream::connect(&server.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    combine_protocol::client_handshake(&mut reader, &mut stream).unwrap();
+    combine_protocol::write_message(
+        &mut stream,
+        &ClientMessage::McpOpen(McpOpen {
+            request: RequestId(1),
+            caller: cwd_caller(&server),
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        combine_protocol::read_message::<DaemonMessage, _>(&mut reader).unwrap(),
+        Some(DaemonMessage::McpOpened(_))
+    ));
+    let send = |stream: &mut UnixStream, text: &str| {
+        let message = JsonRpcMessage::new(text.to_string()).unwrap();
+        combine_protocol::write_message(stream, &ClientMessage::Mcp(Mcp { message })).unwrap();
+    };
+    for id in 10..18 {
+        send(
+            &mut stream,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"list_panels"}}}}"#
+            ),
+        );
+    }
+    let _hold = server.check.hold("graph TD; A-->B");
+    send(
+        &mut stream,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_panel","arguments":{"renderer":"mermaid","content":"graph TD; A-->B"}}}"#,
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || server.check.in_flight() == 1),
+        "the create never reached the check"
+    );
+
+    stream.write_all(&[0, 0, 0, 1, b'!']).unwrap();
+
+    // The tool thread ends within a 50 ms check, while the socket stays open.
+    let mut replacement = McpWire::unopened(WireClient::open(&server.socket).0);
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        let error = replacement.try_open(cwd_caller(&server)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.message, "too many MCP connections; the limit is 1");
+        assert_eq!(stats.mcp_channels(), 1);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Draining the old socket lets the writer finish and close it, which frees the slot.
+    while let Ok(Some(_)) = combine_protocol::read_message::<DaemonMessage, _>(&mut reader) {}
+    assert!(
+        wait_until(Duration::from_secs(5), || stats.mcp_channels() == 0),
+        "the closed socket's slot was never freed"
+    );
+    replacement
+        .try_open(cwd_caller(&server))
+        .expect("the replacement opens once the old socket is closed");
 }

@@ -2,7 +2,7 @@
 //! listener, the connections' inbox, the backend, the terminal watch, the file store's changes,
 //! the panel API's calls, the diagram checks that run beside it, and four timers.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -101,6 +101,8 @@ struct ConnState {
     mcp: Option<McpLink>,
     /// Replies to `mcp_open` and `mcp`, in the order they arose.
     mcp_out: VecDeque<DaemonMessage>,
+    /// The connection's MCP channel thread has ended.
+    mcp_ended: bool,
     /// The connection's last message is queued and its input is ignored. It still counts
     /// toward `max_connections` until its writer reports the socket closed.
     closing: bool,
@@ -210,8 +212,12 @@ struct Server {
     audit: Arc<dyn McpAudit>,
     /// The server's own panel channel, for the MCP channels' tool threads.
     mcp_panels: PanelHandle,
-    /// MCP tool threads that have not ended, which is what `max_mcp_connections` counts.
-    mcp_threads: usize,
+    /// MCP slots taken, which is what `max_mcp_connections` counts. A slot is taken by an
+    /// accepted `mcp_open` and freed once the connection is removed and its channel thread has
+    /// ended, in either order.
+    mcp_slots: usize,
+    /// Removed connections whose MCP channel thread has not ended yet; each still holds a slot.
+    mcp_lingering: HashSet<ConnectionId>,
 }
 
 /// What the backend reported when the server started watching it.
@@ -340,7 +346,8 @@ pub async fn serve_watched(
         callers: caller_identity,
         audit: mcp_audit,
         mcp_panels: PanelHandle::new(mcp_calls),
-        mcp_threads: 0,
+        mcp_slots: 0,
+        mcp_lingering: HashSet::new(),
     };
     let mut shutdown = std::pin::pin!(shutdown);
     let now = server.clock.now();
@@ -509,6 +516,7 @@ impl Server {
                 spawn_out: VecDeque::new(),
                 mcp: None,
                 mcp_out: VecDeque::new(),
+                mcp_ended: false,
                 closing: false,
             },
         );
@@ -605,11 +613,18 @@ impl Server {
                 self.queue_mcp_out(conn, DaemonMessage::Mcp(Mcp { message }));
             }
             ConnEvent::McpEnded(conn) => {
-                self.mcp_threads = self.mcp_threads.saturating_sub(1);
-                self.stats.mcp_ended();
+                if self.mcp_lingering.remove(&conn) {
+                    self.release_mcp_slot();
+                    return;
+                }
+                let Some(state) = self.conns.get_mut(&conn) else {
+                    return;
+                };
+                state.mcp_ended = true;
                 // A thread that ended while its connection is still open died on its own: the
-                // shim would wait for replies that never come.
-                if self.conns.get(&conn).is_some_and(|state| !state.closing) {
+                // shim would wait for replies that never come. A closing connection keeps its
+                // slot until its socket is closed.
+                if !state.closing {
                     self.driver.core_mut().disconnect(conn, now);
                     self.remove(conn);
                 }
@@ -644,7 +659,7 @@ impl Server {
             );
         }
         let limit = self.options.max_mcp_connections;
-        if self.mcp_threads >= limit {
+        if self.mcp_slots >= limit {
             return refuse(
                 self,
                 ErrorCode::InvalidRequest,
@@ -683,7 +698,7 @@ impl Server {
             return;
         };
         state.mcp = Some(link);
-        self.mcp_threads += 1;
+        self.mcp_slots += 1;
         self.stats.mcp_started();
         self.queue_mcp_out(conn, DaemonMessage::McpOpened(McpOpened { request, space }));
     }
@@ -852,7 +867,19 @@ impl Server {
         if let Some(state) = self.conns.remove(&conn) {
             self.stats.removed();
             let _ = state.socket.shutdown(Shutdown::Both);
+            if state.mcp.is_some() {
+                if state.mcp_ended {
+                    self.release_mcp_slot();
+                } else {
+                    self.mcp_lingering.insert(conn);
+                }
+            }
         }
+    }
+
+    fn release_mcp_slot(&mut self) {
+        self.mcp_slots = self.mcp_slots.saturating_sub(1);
+        self.stats.mcp_ended();
     }
 
     fn close_all(&mut self) {
