@@ -139,7 +139,7 @@ export function decide(state: MachineState, input: Input): Decision {
     }
     case 'fetched': {
       if (state.fetching?.token !== input.token) return { state, effects }; // F3
-      let next: MachineState = { ...state, fetching: null };
+      let next: MachineState = { ...state, fetching: null, fetchFailed: null };
       const { content } = input;
       if (fetchable(content.state) && isNewer(content.revision, next.latestAccepted)) {
         // F2
@@ -228,8 +228,11 @@ export function viewState(state: MachineState, entry: PanelEntry): ViewState {
     if (listed === 'failed') return 'failed';
     if (listed === 'validating' || listed === 'fetching' || listed === 'untrusted') return 'validating';
   }
-  if (state.shown !== null) return state.shown.status;
-  if (state.fetchFailed !== null) return 'fetch_failed';
+  const { shown, fetchFailed } = state;
+  if (fetchFailed !== null && (shown === null || isNewer(fetchFailed.revision, shown.revision))) {
+    return 'fetch_failed';
+  }
+  if (shown !== null) return shown.status;
   return 'loading';
 }
 

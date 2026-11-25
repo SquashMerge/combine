@@ -333,4 +333,27 @@ describe('ViewPanel', () => {
     await act(async () => manual.calls[0]?.settle(textFragment('five')));
     expect(port.reports).toEqual([]);
   });
+
+  it('a_failed_refresh_is_shown_beside_the_older_fragment_until_a_newer_revision_renders', async () => {
+    const port = new MemoryPanelPort();
+    const panel = mountPanel({ port, entry: listed('1') });
+    await flush();
+    port.sends[0]?.resolve(content('1', 'one'));
+    await waitFor(() => expect(panel.viewState()).toBe('rendered'));
+
+    panel.update({ entry: listed('2') });
+    await flush();
+    port.sends[1]?.reject(new PanelFetchError(null, 'No reply'));
+    await waitFor(() => expect(panel.viewState()).toBe('fetch_failed'));
+    expect(panel.section().querySelector('[role="alert"]')?.textContent).toBe("Couldn't load panel p: No reply");
+    expect(panel.content().textContent).toBe('one');
+    expect(panel.section().getAttribute('data-shown-revision')).toBe('1');
+
+    panel.update({ entry: listed('3') });
+    await flush();
+    port.sends[2]?.resolve(content('3', 'three'));
+    await waitFor(() => expect(panel.viewState()).toBe('rendered'));
+    expect(panel.section().querySelector('[role="alert"]')).toBeNull();
+    expect(panel.content().textContent).toBe('three');
+  });
 });

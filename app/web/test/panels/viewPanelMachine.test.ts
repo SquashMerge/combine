@@ -420,4 +420,24 @@ describe('viewState and viewText', () => {
     expect(viewState(initialState(), listed('5', 'validating'))).toBe('validating');
     expect(viewState(initialState(), listed('5'))).toBe('loading');
   });
+
+  it('a_failed_refresh_is_shown_beside_the_older_revision_until_a_newer_one_renders', () => {
+    const run = new Run();
+    run.show('1');
+    run.entry(listed('2'));
+    run.send({ kind: 'fetchFailed', token: run.state.fetching?.token ?? -1, message: 'No reply' });
+    expect(run.state.shown?.revision).toBe('1');
+    expect(viewState(run.state, listed('2'))).toBe('fetch_failed');
+    expect(text(run, listed('2')).error).toBe("Couldn't load panel p: No reply");
+    expect(run.entry(listed('2'))).toEqual([]);
+
+    const [fetch] = run.entry(listed('3'));
+    expect(fetch).toMatchObject({ kind: 'fetch', revision: '3' });
+    const token = run.state.fetching?.token ?? -1;
+    run.send({ kind: 'fetched', token, content: content('3') });
+    expect(run.state.fetchFailed).toBeNull();
+    run.send({ kind: 'rendered', token: run.state.rendering?.token ?? -1, outcome: okOutcome() });
+    expect(viewState(run.state, listed('3'))).toBe('rendered');
+    expect(text(run, listed('3'))).toEqual({ status: null, error: null, snippet: null });
+  });
 });
