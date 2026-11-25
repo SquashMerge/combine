@@ -471,7 +471,7 @@ fn padded_ping(id: u64, len: usize) -> Vec<u8> {
     let tail = r#""}}"#;
     let pad = len - head.len() - tail.len();
     let mut line = head.into_bytes();
-    line.extend(std::iter::repeat(b'x').take(pad));
+    line.extend(std::iter::repeat_n(b'x', pad));
     line.extend_from_slice(tail.as_bytes());
     assert_eq!(line.len(), len);
     line
