@@ -19,7 +19,10 @@ pub const PANEL_LIST_MAX: usize = 256;
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const REASON_MAX_BYTES: usize = 256;
+/// The longest panel ID: a folder name the file systems we write to can hold.
+pub const PANEL_ID_MAX_BYTES: usize = 255;
 
+const ID_LENGTH_RULE: &str = "a panel ID can be at most 255 bytes";
 const FOLDER_RULE: &str = "it can't contain / or start with .";
 pub(crate) const SLOT_RULE: &str = "must be 1 to 256 bytes with no control characters";
 const ARGV_RULE: &str = "must be a non-empty list of strings with no NUL and a non-empty first";
@@ -29,6 +32,9 @@ const SIZE_RULE: &str = "must be an integer from 1 to 65535";
 
 /// Why a panel folder name or spawn-request panel ID is refused, or `None` when it is valid.
 pub fn panel_folder_refusal(name: &str) -> Option<String> {
+    if name.len() > PANEL_ID_MAX_BYTES {
+        return Some(ID_LENGTH_RULE.to_owned());
+    }
     if let Err(invalid) = PanelId::new(name) {
         return Some(invalid.to_string());
     }

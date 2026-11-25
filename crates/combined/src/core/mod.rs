@@ -1,5 +1,6 @@
 //! Daemon core: spaces, attachment logs, ownership and the driver; no I/O.
 
+mod caller;
 mod config;
 mod driver;
 mod effects;
@@ -15,6 +16,7 @@ mod spaces;
 mod spawn;
 mod terminal_list;
 
+pub use caller::{resolve_caller, CallerMatch, ResolvedCaller};
 pub use config::{ConfigError, CoreConfig, EVENT_OVERHEAD};
 pub use driver::{Driver, MAX_QUEUED_COMMANDS};
 pub use effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
@@ -34,7 +36,7 @@ pub use ownership::{OwnershipChange, TerminalOwnership};
 pub use panel_file::{
     clip_text, content_file, created_by_refusal, encode_scratch_meta, encode_view_panel,
     panel_file_bound, panel_reply_len, parse_scratch_meta, parse_view_panel, valid_idempotency_key,
-    valid_slot, valid_title, ScratchMeta, CONTENT_READ_MAX_BYTES, DS_STORE,
+    valid_placement, valid_slot, valid_title, ScratchMeta, CONTENT_READ_MAX_BYTES, DS_STORE,
     IDEMPOTENCY_KEY_MAX_BYTES, MARKDOWN_FILE, MERMAID_FILE, PANEL_ERROR_TEXT_MAX, SCRATCH_FILE,
     SCRATCH_FILE_MAX_BYTES, SOURCE_MAX_BYTES, TITLE_MAX_BYTES,
 };
@@ -46,8 +48,8 @@ pub use panel_store::{
 pub use panels::{
     normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,
     template_spec, valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS,
-    DEFAULT_ROWS, MAX_PANELS, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
-    REASON_MAX_BYTES,
+    DEFAULT_ROWS, MAX_PANELS, PANELS_DIR, PANEL_FILE, PANEL_ID_MAX_BYTES, PANEL_LIST_MAX,
+    PANEL_MAX_BYTES, REASON_MAX_BYTES,
 };
 pub use spaces::Spaces;
 pub use spawn::{PanelRead, SpawnEffect, SpawnTicket, Spawns, MAX_SPAWN_IN_FLIGHT};

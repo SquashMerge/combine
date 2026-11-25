@@ -1069,14 +1069,17 @@ fn testing_files_start_with_the_feature_gate() {
     assert_eq!(
         names,
         [
+            "caller_identity.rs",
             "control.rs",
             "diagram_check.rs",
             "fake_attachment.rs",
             "fake_backend.rs",
             "file_store.rs",
             "mod.rs",
+            "scratch_dir.rs",
             "scratch_store.rs",
             "wall_clock.rs",
+            "wire_client.rs",
             "world.rs"
         ]
     );

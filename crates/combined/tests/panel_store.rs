@@ -192,6 +192,7 @@ fn create_of(id: &str, renderer: Renderer, content: &str) -> PanelCreate {
         title: None,
         idempotency_key: None,
         created_by: None,
+        placement: None,
         content: content.to_owned(),
     }
 }
@@ -1172,9 +1173,11 @@ fn title_update_while_invalid_is_refused() {
     let mut rig = Rig::with_folders(&[("p", "one")]);
     make_invalid(&mut rig, "p");
     let error = rig.update("p", title_update(Some("t"))).unwrap_err();
-    let PanelApiError::Store(text) = error else {
+    let PanelApiError::PanelFileInvalid { reason } = &error else {
         panic!("{error:?}");
     };
+    assert!(!reason.is_empty());
+    let text = error.to_string();
     assert!(text.starts_with("panel.json can't be used ("), "{text}");
     assert!(
         text.ends_with("), so the daemon doesn't rewrite it"),
@@ -1202,14 +1205,17 @@ fn failed_read_blocks_writes_and_rereads_after_5s() {
         view.file_error.as_deref(),
         Some("Couldn't read .workspace/panels/p/panel.json (denied). Showing the last good revision. Changes can't be saved until it can be read.")
     );
-    let refusal = "couldn't read .workspace/panels/p/panel.json (denied), so the panel isn't changed until it can be read";
+    let refusal = PanelApiError::Unreadable {
+        path: ".workspace/panels/p/panel.json".to_owned(),
+        detail: "denied".to_owned(),
+    };
     assert_eq!(
         rig.update("p", content_update("x")).unwrap_err(),
-        PanelApiError::Store(refusal.to_owned())
+        refusal.clone()
     );
     assert_eq!(
         rig.store.remove(&space(), "p", rig.t()).unwrap_err(),
-        PanelApiError::Store(refusal.to_owned())
+        refusal.clone()
     );
     assert!(saves(&rig.fx()).is_empty() && deletes(&rig.fx()).is_empty());
 
@@ -1838,7 +1844,9 @@ fn a_failed_listing_refuses_create_until_a_listing_succeeds() {
         .unwrap_err();
     assert_eq!(
         error,
-        PanelApiError::Store("the space's panels couldn't be listed: boom".to_owned())
+        PanelApiError::ListingFailed {
+            detail: "boom".to_owned()
+        }
     );
     assert!(store.take_effects().is_empty());
     let list = store.list(&space()).unwrap();
@@ -2024,7 +2032,51 @@ fn api_errors_display_their_texts() {
             },
             "update must change the content or the title",
         ),
-        (PanelApiError::Store("as given".into()), "as given"),
+        (
+            PanelApiError::ReadOnly,
+            "the panel's folder is read-only; its files can't be changed",
+        ),
+        (
+            PanelApiError::PanelLimit {
+                count: 100,
+                limit: 100,
+            },
+            "the space already has 100 panels; the limit is 100",
+        ),
+        (
+            PanelApiError::TooLarge { encoded: 9 },
+            "the source can't be sent in one frame: its panel reply would be 9 bytes; the limit is 1048576",
+        ),
+        (
+            PanelApiError::NotScratch { id: "a".into() },
+            "the panel a is already in .workspace/",
+        ),
+        (
+            PanelApiError::ListingFailed {
+                detail: "boom".into(),
+            },
+            "the space's panels couldn't be listed: boom",
+        ),
+        (
+            PanelApiError::ScratchListingFailed {
+                detail: "gone".into(),
+            },
+            "the scratch panels couldn't be listed: gone",
+        ),
+        (
+            PanelApiError::PanelFileInvalid {
+                reason: "bad".into(),
+            },
+            "panel.json can't be used (bad), so the daemon doesn't rewrite it",
+        ),
+        (
+            PanelApiError::Unreadable {
+                path: ".workspace/panels/p/panel.json".into(),
+                detail: "denied".into(),
+            },
+            "couldn't read .workspace/panels/p/panel.json (denied), so the panel isn't changed until it can be read",
+        ),
+        (PanelApiError::Stopped, "the server has stopped"),
     ];
     for (error, text) in cases {
         assert_eq!(error.to_string(), text);
@@ -2069,6 +2121,55 @@ fn field_rules_refuse_before_any_work() {
         "update must change the content or the title"
     );
     assert!(rig.fx().is_empty());
+}
+
+#[test]
+fn create_refuses_a_256_byte_id() {
+    let mut rig = Rig::new();
+    let create = create_of(&"a".repeat(256), Renderer::Markdown, "x");
+    let error = rig
+        .store
+        .create(&space(), create, rig.t(), 0, &mut rig.ids)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        PanelApiError::InvalidId {
+            why: "a panel ID can be at most 255 bytes".to_owned()
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "the panel ID isn't valid: a panel ID can be at most 255 bytes"
+    );
+    assert!(rig.fx().is_empty());
+    let create = create_of(&"a".repeat(255), Renderer::Markdown, "x");
+    rig.store
+        .create(&space(), create, rig.t(), 0, &mut rig.ids)
+        .unwrap();
+}
+
+#[test]
+fn create_refuses_an_invalid_placement_and_stores_a_valid_one() {
+    let mut rig = Rig::new();
+    let mut create = create_of("p", Renderer::Markdown, "x");
+    create.placement = Some("a\nb".to_owned());
+    let error = rig
+        .store
+        .create(&space(), create, rig.t(), 0, &mut rig.ids)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "placement must be a tile ID of 1 to 256 bytes with no control characters"
+    );
+    assert!(rig.fx().is_empty());
+    let mut create = create_of("p", Renderer::Markdown, "x");
+    create.placement = Some("main".to_owned());
+    rig.store
+        .create(&space(), create, rig.t(), 0, &mut rig.ids)
+        .unwrap();
+    let (_, files) = saves(&rig.fx()).remove(0);
+    let panel = files.iter().find(|file| file.file == "panel.json").unwrap();
+    assert!(String::from_utf8_lossy(&panel.bytes).contains("\"placement\": \"main\""));
 }
 
 // ---- scratch panels (A2)
@@ -2849,7 +2950,9 @@ fn a_failed_scratch_listing_still_lists_and_creates_workspace_panels() {
     assert_eq!(store.get(&space(), "a").unwrap().1, "A");
     assert_eq!(
         store.get(&space(), "zz").unwrap_err(),
-        PanelApiError::Store(gone.clone())
+        PanelApiError::ScratchListingFailed {
+            detail: "gone".to_owned()
+        }
     );
     store
         .create(
@@ -2866,7 +2969,9 @@ fn a_failed_scratch_listing_still_lists_and_creates_workspace_panels() {
         store
             .create(&space(), scratch_of("c", "C"), t0, 0, &mut ids)
             .unwrap_err(),
-        PanelApiError::Store(gone)
+        PanelApiError::ScratchListingFailed {
+            detail: "gone".to_owned()
+        }
     );
     assert!(store.take_effects().is_empty());
     let t1 = t0.saturating_add(Millis(timing.retry_ms));
