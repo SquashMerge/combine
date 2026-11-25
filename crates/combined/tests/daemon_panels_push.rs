@@ -236,3 +236,66 @@ fn a_hundred_worst_case_panels_fit_one_frame() {
         .iter()
         .all(|panel| panel.title.as_deref().map(str::len) == Some(1_024)));
 }
+
+/// AC11 on the wire: a list the daemon really has to trim. The longest titles, failed with the
+/// longest control-character errors, make 100 panels far larger than one frame. The `panels`
+/// message the client is sent is the trimmed prefix, and the rest is in `skipped`.
+#[test]
+fn a_list_larger_than_one_frame_is_trimmed_on_the_wire() {
+    use combine_protocol::SkippedPanel;
+    use combined::core::TRIMMED_REASON;
+    use combined::ports::{DiagramFailure, DiagramVerdict, FailureCode};
+
+    let rig = PanelRig::new();
+    rig.check
+        .answer_all(Ok(DiagramVerdict::Failed(DiagramFailure {
+            code: FailureCode::Syntax,
+            message: "\u{1}".repeat(1_024),
+            line: Some(u32::MAX),
+            column: Some(u32::MAX),
+            snippet: Some("\u{1}".repeat(1_024)),
+        })));
+    let title = "\\\"".repeat(1_024);
+    let mut ids: Vec<String> = (0..100).map(|index| format!("{index:a>255}")).collect();
+    ids.sort();
+    for id in &ids {
+        let file = format!(r#"{{"version":1,"renderer":"mermaid","title":"{title}"}}"#);
+        rig.store.write_outside(
+            &rig.space,
+            &format!("panels/{id}/panel.json"),
+            file.into_bytes(),
+        );
+        rig.store
+            .write_outside(&rig.space, &content_path(id), b"x".to_vec());
+    }
+    rig.spawn_terminal();
+    assert!(
+        wait_until(WAIT, || {
+            rig.panels.list(&rig.space).is_ok_and(|list| {
+                list.panels.len() == 100
+                    && list.panels.iter().all(|p| p.state == PanelState::Failed)
+            })
+        }),
+        "the 100 panels never all failed"
+    );
+    let mut client = rig.client();
+
+    let (_, panels) = watch_panels(&mut client, &rig.space, 1);
+
+    let kept = panels.panels.len();
+    assert!(kept > 0 && kept < 100, "{kept} panels kept; a trim was due");
+    for (shown, id) in panels.panels.iter().zip(&ids) {
+        assert_eq!(&shown.id, id, "the kept panels are the ID-order prefix");
+    }
+    let trimmed: Vec<&SkippedPanel> = panels
+        .skipped
+        .iter()
+        .filter(|skipped| skipped.reason == TRIMMED_REASON)
+        .collect();
+    assert_eq!(trimmed.len(), 100 - kept);
+    for (skipped, id) in trimmed.iter().zip(&ids[kept..]) {
+        assert_eq!(&skipped.panel, id);
+    }
+    // It was encoded and sent: the client has the frame.
+    assert_eq!(panels.request, Some(RequestId(1)));
+}

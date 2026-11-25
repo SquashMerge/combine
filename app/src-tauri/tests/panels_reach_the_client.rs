@@ -173,7 +173,9 @@ fn a_panel_created_in_core_reaches_the_client() {
         .into_iter()
         .find(|p| p.id == "doc")
         .unwrap();
+    let validating = Instant::now() + DEADLINE;
     while summary.state != PanelState::Validated {
+        assert!(Instant::now() < validating, "doc never validated");
         let PanelEvent::Panels(_, pushed) = next_event(&events, "doc to validate") else {
             continue;
         };
@@ -193,7 +195,9 @@ fn a_panel_created_in_core_reaches_the_client() {
             })
         })
         .expect("send the fetch");
+    let replying = Instant::now() + DEADLINE;
     let panel = loop {
+        assert!(Instant::now() < replying, "no panel reply");
         if let PanelEvent::PanelReply(reply_host, PanelReply::Panel(panel)) =
             next_event(&events, "the panel reply")
         {

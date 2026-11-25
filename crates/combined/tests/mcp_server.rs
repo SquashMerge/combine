@@ -458,6 +458,10 @@ fn panel_status_ends_with_render_status() {
 
     let (result, _) = tool(&server, &api, "list_panels", "{}");
     assert!(result.get("render_status").is_none());
+    assert!(
+        result.to_string().find("render_status").is_none(),
+        "list_panels carries no render status anywhere: {result}"
+    );
     let (result, _) = tool(&server, &api, "remove_panel", r#"{"panel":"p"}"#);
     assert!(result.get("render_status").is_none());
     let asked = api
