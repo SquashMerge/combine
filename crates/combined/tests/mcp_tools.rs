@@ -14,7 +14,7 @@ use combined::core::{LAYOUT_FILE, SCRATCH_TTL_MS};
 use combined::ports::ScratchDir;
 use daemon_support::wait_until;
 use mcp_support::{cwd_caller, wire_options, McpWire};
-use panel_support::{PanelRig, Race};
+use panel_support::{settled_read_count, PanelRig, Race};
 use serde_json::{json, Value};
 
 const MERMAID: &str = "graph TD; A-->B";
@@ -304,6 +304,7 @@ fn a_remove_that_conflicts_with_an_outside_edit_is_remove_conflict_and_the_panel
     let created = wire.tool("create_panel", markdown_args("p", "one"));
     let r = created.body["revision"].as_u64().unwrap();
     wait_validated(&rig, "p");
+    settled_read_count(&rig.store, &rig.space, &file_path("p"), 1);
 
     racing.arm(
         &rig.space,

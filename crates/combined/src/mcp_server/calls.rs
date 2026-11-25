@@ -11,7 +11,7 @@ use serde_json::value::RawValue;
 use super::api::PanelApi;
 use super::jsonrpc::{clip, fits, present, quoted, SERDE_TEXT_MAX};
 use super::{tool_error_code, McpServer};
-use crate::core::{PanelApiError, PanelCreate, PanelUpdate, PanelView};
+use crate::core::{PanelApiError, PanelCreate, PanelUpdate, PanelView, PANEL_ID_MAX_BYTES};
 use crate::model::Lifetime;
 
 const LATER_MILESTONES_SUFFIX: &str = "create_panel makes static Mermaid and Markdown panels";
@@ -385,10 +385,10 @@ impl McpServer {
             .slot
             .as_deref()
             .map_or_else(|| "null".to_owned(), |slot| format!("{slot:?}"));
-        let panel = entry
-            .panel
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), |panel| format!("{panel:?}"));
+        let panel = entry.panel.as_deref().map_or_else(
+            || "null".to_owned(),
+            |panel| format!("{:?}", clip(panel, PANEL_ID_MAX_BYTES)),
+        );
         let end = match &entry.end {
             End::View { revision, state } => {
                 format!("revision={revision} state={}", state_name(*state))

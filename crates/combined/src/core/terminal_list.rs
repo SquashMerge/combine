@@ -98,7 +98,10 @@ impl TerminalList {
         }
         self.space_ids()
             .into_iter()
-            .filter(|space| path.starts_with(Path::new(&space.0)))
+            .filter(|space| {
+                let root = Path::new(&space.0);
+                root.is_absolute() && path.starts_with(root)
+            })
             .max_by_key(|space| Path::new(&space.0).components().count())
     }
 
