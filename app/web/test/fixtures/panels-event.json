@@ -1,0 +1,130 @@
+{
+  "list": {
+    "kind": "list",
+    "hostId": "host-1",
+    "request": "7",
+    "list": {
+      "space": "/work",
+      "panels": [
+        {
+          "id": "classes",
+          "title": "Class diagram",
+          "renderer": "mermaid",
+          "revision": "9007199254740993",
+          "state": "failed",
+          "error": {
+            "code": "syntax",
+            "message": "unexpected token",
+            "line": 2,
+            "column": 11,
+            "snippet": "  A -> B"
+          },
+          "createdBy": {
+            "type": "agent",
+            "slot": "claude"
+          }
+        },
+        {
+          "id": "notes",
+          "title": null,
+          "renderer": "markdown",
+          "revision": "12",
+          "state": "validated",
+          "error": null,
+          "createdBy": {
+            "type": "user"
+          }
+        }
+      ],
+      "skipped": [
+        {
+          "panel": "broken",
+          "reason": "panel.json can't be used"
+        }
+      ],
+      "error": null
+    }
+  },
+  "push": {
+    "kind": "list",
+    "hostId": "host-1",
+    "request": null,
+    "list": {
+      "space": "/work",
+      "panels": [
+        {
+          "id": "classes",
+          "title": "Class diagram",
+          "renderer": "mermaid",
+          "revision": "9007199254740993",
+          "state": "failed",
+          "error": {
+            "code": "syntax",
+            "message": "unexpected token",
+            "line": 2,
+            "column": 11,
+            "snippet": "  A -> B"
+          },
+          "createdBy": {
+            "type": "agent",
+            "slot": "claude"
+          }
+        },
+        {
+          "id": "notes",
+          "title": null,
+          "renderer": "markdown",
+          "revision": "12",
+          "state": "validated",
+          "error": null,
+          "createdBy": {
+            "type": "user"
+          }
+        }
+      ],
+      "skipped": [
+        {
+          "panel": "broken",
+          "reason": "panel.json can't be used"
+        }
+      ],
+      "error": null
+    }
+  },
+  "loading": {
+    "kind": "list",
+    "hostId": "host-1",
+    "request": "8",
+    "list": {
+      "space": "/work",
+      "panels": [],
+      "skipped": [],
+      "error": "the space's panels are loading"
+    }
+  },
+  "panel": {
+    "kind": "panel",
+    "hostId": "host-1",
+    "request": "9",
+    "panel": {
+      "space": "/work",
+      "id": "notes",
+      "revision": "12",
+      "renderer": "markdown",
+      "source": "# Notes\n",
+      "state": "validated",
+      "error": null
+    }
+  },
+  "error": {
+    "kind": "error",
+    "hostId": "host-1",
+    "request": "10",
+    "code": "unknown_panel",
+    "message": "the space has no panel gone"
+  },
+  "disconnected": {
+    "kind": "disconnected",
+    "hostId": "host-1"
+  }
+}
