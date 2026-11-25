@@ -210,3 +210,42 @@ fn core_refuses_every_layout_message_with_invalid_request() {
         }
     }
 }
+
+#[test]
+fn add_panel_and_remove_panel_convert() {
+    let ops = ops_from_wire(vec![
+        wire::LayoutOp::AddPanel {
+            panel: "p".to_string(),
+            tile: Some("a".to_string()),
+        },
+        wire::LayoutOp::AddPanel {
+            panel: "q".to_string(),
+            tile: None,
+        },
+        wire::LayoutOp::RemovePanel {
+            panel: "p".to_string(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        ops,
+        [
+            LayoutOp::AddPanel {
+                panel: p("p"),
+                tile: Some(t("a")),
+                activate: true,
+            },
+            LayoutOp::AddPanel {
+                panel: p("q"),
+                tile: None,
+                activate: true,
+            },
+            LayoutOp::RemovePanel { panel: p("p") },
+        ]
+    );
+    let bad = ops_from_wire(vec![wire::LayoutOp::AddPanel {
+        panel: "p".to_string(),
+        tile: Some(String::new()),
+    }]);
+    assert!(bad.unwrap_err().contains("invalid tile ID"));
+}

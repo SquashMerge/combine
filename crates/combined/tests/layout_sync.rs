@@ -4,8 +4,8 @@
 mod layout_support;
 
 use combined::core::{
-    ConnectionId, FieldPath, LayoutEffect, LayoutOp, LayoutRead, LayoutTiming, LayoutWritten,
-    MutateError, SplitKey, WatchError, LAYOUT_MAX_BYTES,
+    diff_fields, ConnectionId, FieldPath, LayoutEffect, LayoutOp, LayoutRead, LayoutTiming,
+    LayoutWritten, MutateError, SplitKey, WatchError, LAYOUT_MAX_BYTES,
 };
 use combined::model::{LayoutRevision, Millis, SpaceLayout, SplitNode};
 use layout_support::*;
@@ -1386,4 +1386,460 @@ fn apply_write_conflict_drops_ops_that_clash_with_the_edit() {
     assert_eq!(sim.layouts.next_deadline(), None);
     sim.layouts.tick(Millis(10_000));
     assert!(sim.layouts.take_effects().is_empty());
+}
+
+// Daemon-held placement
+
+fn holds(layout: &SpaceLayout, panel: &str) -> bool {
+    combined::core::tile_holding(&layout.root, &p(panel)).is_some()
+}
+
+fn tile_of_panel(layout: &SpaceLayout, panel: &str) -> Option<String> {
+    combined::core::tile_holding(&layout.root, &p(panel)).map(|tile| tile.id.as_str().to_string())
+}
+
+fn panels_in(layout: &SpaceLayout, id: &str) -> Vec<String> {
+    find_tile(&layout.root, id)
+        .unwrap()
+        .panels
+        .iter()
+        .map(|panel| panel.as_str().to_string())
+        .collect()
+}
+
+/// A sync over `layout` that nobody watches: the space is read because a panel is placed.
+fn unwatched(layout: &SpaceLayout) -> Sim {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), bytes_of(layout));
+    sim.layouts.place(&space("main"), p("p9"), None, Millis(0));
+    sim.settle(Millis(0));
+    sim.layouts.take_changed();
+    sim
+}
+
+fn place(sim: &mut Sim, panel: &str, hint: Option<&str>, now: Millis) {
+    sim.layouts
+        .place(&space("main"), p(panel), hint.map(t), now);
+    sim.settle(now);
+}
+
+fn unplace(sim: &mut Sim, panel: &str, now: Millis) {
+    sim.layouts.unplace(&space("main"), &p(panel), now);
+    sim.settle(now);
+}
+
+fn last_write_is_current(sim: &Sim) {
+    let (_, bytes, _) = sim.writes.last().unwrap();
+    assert_eq!(*bytes, bytes_of(&sim.current("main")));
+}
+
+#[test]
+fn a_placement_is_written_after_the_debounce_with_no_watcher() {
+    let mut sim = unwatched(&two_tiles());
+    assert!(sim.layouts.watched(MAIN).is_none());
+    assert_eq!(
+        panels_in(&sim.current("main"), "a"),
+        ["p1", "p2", "p3", "p9"]
+    );
+    assert_eq!(active_of(&sim.current("main"), "a").as_deref(), Some("p9"));
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(500)));
+    sim.layouts.tick(Millis(499));
+    assert!(sim.layouts.take_effects().is_empty());
+    sim.layouts.tick(Millis(500));
+    let effects = sim.layouts.take_effects();
+    assert_eq!(write_effects(&effects), [("main".to_string(), 1)]);
+}
+
+#[test]
+fn a_placement_before_the_first_read_waits_and_bumps_the_revision_once_applied() {
+    let mut layouts = combined::core::Layouts::new(LayoutTiming::default());
+    layouts.place(&space("main"), p("p9"), None, Millis(0));
+    assert!(layouts.status(&space("main")).is_none());
+    layouts.place(&space("main"), p("p9"), None, Millis(0));
+    assert_eq!(
+        layouts.take_effects(),
+        [
+            LayoutEffect::Watch {
+                space: space("main")
+            },
+            LayoutEffect::Read {
+                space: space("main")
+            },
+        ]
+    );
+    assert!(layouts.take_replies().is_empty());
+    let found = bytes_of(&two_tiles());
+    layouts.apply_read(
+        &space("main"),
+        LayoutRead::Found {
+            hash: hash(&found),
+            bytes: found,
+            read_only: false,
+        },
+        Millis(5),
+    );
+    let status = layouts.status(&space("main")).unwrap();
+    assert_eq!(status.layout_revision, LayoutRevision(1));
+    assert_eq!(panels_in(&status.layout, "a").last().unwrap(), "p9");
+    assert!(layouts.has_work());
+    assert_eq!(layouts.take_changed(), [space("main")]);
+}
+
+#[test]
+fn place_and_unplace_only_queue_effects() {
+    let mut layouts = combined::core::Layouts::new(LayoutTiming::default());
+    layouts.place(&space("main"), p("p9"), None, Millis(0));
+    layouts.unplace(&space("main"), &p("p8"), Millis(0));
+    assert_eq!(
+        layouts.take_effects(),
+        [
+            LayoutEffect::Watch {
+                space: space("main")
+            },
+            LayoutEffect::Read {
+                space: space("main")
+            },
+        ]
+    );
+    assert_eq!(layouts.next_deadline(), None);
+    assert!(!layouts.has_work());
+}
+
+#[test]
+fn daemon_ops_never_change_the_structure() {
+    let before = two_tiles();
+    let mut sim = unwatched(&before);
+    place(&mut sim, "p8", Some("b"), Millis(10));
+    unplace(&mut sim, "p1", Millis(20));
+    let current = sim.current("main");
+    assert!(!diff_fields(&before, &current).contains(&FieldPath::Structure));
+    sim.layouts.tick(Millis(10_000));
+    sim.settle(Millis(10_000));
+    let (_, bytes, _) = sim.writes.last().unwrap();
+    assert_eq!(*bytes, bytes_of(&current));
+    assert!(!diff_fields(&before, &current).contains(&FieldPath::Structure));
+}
+
+#[test]
+fn placements_in_a_burst_are_written_by_two_seconds_after_the_first() {
+    let mut sim = unwatched(&two_tiles());
+    sim.layouts.tick(Millis(0));
+    for (n, panel) in ["p1x", "p2x", "p3x", "p4x"].iter().enumerate() {
+        place(&mut sim, panel, None, Millis(400 * (n as u64 + 1)));
+    }
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(2_000)));
+    sim.layouts.tick(Millis(1_999));
+    assert!(sim.layouts.take_effects().is_empty());
+    sim.layouts.tick(Millis(2_000));
+    let effects = sim.layouts.take_effects();
+    assert_eq!(write_effects(&effects), [("main".to_string(), 5)]);
+}
+
+#[test]
+fn unwatch_flushes_a_pending_placement() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.unwatch(MAIN, Millis(10));
+    let effects = sim.layouts.take_effects();
+    assert_eq!(write_effects(&effects), [("main".to_string(), 1)]);
+}
+
+#[test]
+fn a_placement_on_an_invalid_layout_waits_and_is_never_written() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), b"{ not json".to_vec());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.tick(Millis(100_000));
+    sim.layouts.flush_all(Millis(100_000));
+    sim.settle(Millis(100_000));
+    assert_eq!(sim.written(), 0);
+    assert_eq!(sim.disk[&space("main")], b"{ not json".to_vec());
+    assert!(!holds(&sim.current("main"), "p9"));
+    assert_eq!(sim.revision("main"), LayoutRevision(0));
+
+    let fixed = bytes_of(&two_tiles());
+    sim.outside_write(fixed, Millis(200_000));
+    assert!(holds(&sim.current("main"), "p9"));
+}
+
+#[test]
+fn a_placement_on_an_unreadable_layout_waits_and_is_never_written() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), bytes_of(&two_tiles()));
+    sim.failing_reads = Some("permission denied".to_string());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.flush_all(Millis(100));
+    sim.settle(Millis(100));
+    assert_eq!(sim.written(), 0);
+    assert!(!holds(&sim.current("main"), "p9"));
+    assert_eq!(sim.disk[&space("main")], bytes_of(&two_tiles()));
+}
+
+#[test]
+fn a_placement_held_on_a_failed_read_lands_after_retry_ms() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), bytes_of(&two_tiles()));
+    sim.failing_reads = Some("permission denied".to_string());
+    place(&mut sim, "p9", None, Millis(0));
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(5_000)));
+    sim.layouts.tick(Millis(4_999));
+    assert!(sim.layouts.take_effects().is_empty());
+    sim.failing_reads = None;
+    sim.layouts.tick(Millis(5_000));
+    sim.settle(Millis(5_000));
+    assert!(holds(&sim.current("main"), "p9"));
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(5_500)));
+    sim.layouts.tick(Millis(5_500));
+    sim.settle(Millis(5_500));
+    assert_eq!(sim.written(), 1);
+    last_write_is_current(&sim);
+}
+
+#[test]
+fn a_failed_read_with_a_waiting_placement_does_not_spin() {
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.failing_reads = Some("permission denied".to_string());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.tick(Millis(5_000));
+    sim.settle(Millis(5_000));
+    assert_eq!(sim.reads, 2);
+    assert_eq!(sim.layouts.next_deadline(), Some(Millis(10_000)));
+    sim.layouts.tick(Millis(5_001));
+    assert!(sim.layouts.take_effects().is_empty());
+}
+
+#[test]
+fn a_close_on_an_unreadable_layout_is_held_and_applied_after_a_good_read() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.failing_reads = Some("permission denied".to_string());
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+    unplace(&mut sim, "p1", Millis(20));
+    assert!(!holds(&sim.current("main"), "p1"));
+    sim.layouts.flush_all(Millis(30));
+    sim.settle(Millis(30));
+    assert_eq!(sim.written(), 0);
+
+    sim.failing_reads = None;
+    sim.layouts.tick(Millis(5_020));
+    sim.settle(Millis(5_020));
+    assert!(!holds(&sim.current("main"), "p1"));
+    sim.layouts.tick(Millis(5_520));
+    sim.settle(Millis(5_520));
+    assert_eq!(sim.written(), 1);
+    last_write_is_current(&sim);
+    assert!(!holds(&sim.current("main"), "p1"));
+}
+
+#[test]
+fn a_panel_recreated_before_its_removal_is_written_is_placed() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.tick(Millis(500));
+    sim.settle(Millis(500));
+    assert_eq!(sim.written(), 1);
+    assert!(holds(&layout_of_disk(&sim), "p9"));
+
+    unplace(&mut sim, "p9", Millis(1_000));
+    assert!(!holds(&sim.current("main"), "p9"));
+    place(&mut sim, "p9", None, Millis(1_100));
+    assert!(holds(&sim.current("main"), "p9"));
+    assert_eq!(active_of(&sim.current("main"), "a").as_deref(), Some("p9"));
+    sim.layouts.tick(Millis(1_600));
+    sim.settle(Millis(1_600));
+    assert_eq!(sim.written(), 2);
+    last_write_is_current(&sim);
+    assert!(holds(&layout_of_disk(&sim), "p9"));
+}
+
+fn layout_of_disk(sim: &Sim) -> SpaceLayout {
+    let value = serde_json::from_slice(&sim.disk[&space("main")]).unwrap();
+    combined::core::parse_layout(&value).unwrap()
+}
+
+#[test]
+fn a_panel_closed_while_invalid_and_recreated_is_placed_once_the_file_is_fixed() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.tick(Millis(500));
+    sim.settle(Millis(500));
+    sim.outside_write(b"{ broken".to_vec(), Millis(600));
+    unplace(&mut sim, "p9", Millis(700));
+    place(&mut sim, "p9", None, Millis(710));
+
+    let fixed = layout(split(
+        0.5,
+        tile("a", &["p1", "p2", "p3"], Some("p2")),
+        tile("b", &["p4", "p9"], Some("p4")),
+    ));
+    sim.outside_write(bytes_of(&fixed), Millis(800));
+    let current = sim.current("main");
+    assert_eq!(panels_in(&current, "a"), ["p1", "p2", "p3", "p9"]);
+    assert_eq!(panels_in(&current, "b"), ["p4"]);
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p9"));
+    sim.layouts.tick(Millis(1_300));
+    sim.settle(Millis(1_300));
+    last_write_is_current(&sim);
+}
+
+#[test]
+fn a_panel_recreated_before_the_first_read_is_removed_then_placed() {
+    let on_disk = layout(split(
+        0.5,
+        tile("a", &["p1"], Some("p1")),
+        tile("b", &["p4", "p9"], Some("p4")),
+    ));
+    let mut sim = Sim::new(LayoutTiming::default());
+    sim.disk.insert(space("main"), bytes_of(&on_disk));
+    unplace(&mut sim, "p9", Millis(0));
+    place(&mut sim, "p9", None, Millis(0));
+    let current = sim.current("main");
+    assert_eq!(panels_in(&current, "b"), ["p4"]);
+    assert_eq!(panels_in(&current, "a"), ["p1", "p9"]);
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p9"));
+}
+
+#[test]
+fn a_daemon_op_does_not_clear_dropped() {
+    let mut sim = Sim::open(&two_tiles());
+    sim.mutate(vec![set_active("a", "p3")], Millis(0)).unwrap();
+    sim.outside_write(bytes_of(&with_active(&two_tiles(), "a", "p1")), Millis(10));
+    assert!(sim
+        .layouts
+        .status(&space("main"))
+        .unwrap()
+        .dropped
+        .is_some());
+    place(&mut sim, "p9", None, Millis(20));
+    assert!(sim
+        .layouts
+        .status(&space("main"))
+        .unwrap()
+        .dropped
+        .is_some());
+    unplace(&mut sim, "p9", Millis(30));
+    assert!(sim
+        .layouts
+        .status(&space("main"))
+        .unwrap()
+        .dropped
+        .is_some());
+    sim.mutate(vec![set_active("a", "p2")], Millis(40)).unwrap();
+    assert!(sim
+        .layouts
+        .status(&space("main"))
+        .unwrap()
+        .dropped
+        .is_none());
+}
+
+#[test]
+fn an_outside_edit_to_the_placed_tiles_panels_drops_the_placement() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", Some("a"), Millis(0));
+    let edited = layout(split(
+        0.5,
+        tile("a", &["p2", "p3"], Some("p2")),
+        tile("b", &["p4"], Some("p4")),
+    ));
+    sim.outside_write(bytes_of(&edited), Millis(10));
+    let dropped = sim.layouts.status(&space("main")).unwrap().dropped.unwrap();
+    assert_eq!(dropped.op_count, 1);
+    assert!(dropped.fields.contains(&FieldPath::TilePanels(t("a"))));
+}
+
+#[test]
+fn a_dropped_placement_is_placed_again_without_activating() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", Some("a"), Millis(0));
+    let edited = layout(split(
+        0.5,
+        tile("a", &["p2", "p3"], Some("p2")),
+        tile("b", &["p4"], Some("p4")),
+    ));
+    sim.outside_write(bytes_of(&edited), Millis(10));
+    let current = sim.current("main");
+    assert_eq!(panels_in(&current, "a"), ["p2", "p3", "p9"]);
+    assert_eq!(active_of(&current, "a").as_deref(), Some("p2"));
+    sim.layouts.tick(Millis(510));
+    sim.settle(Millis(510));
+    last_write_is_current(&sim);
+}
+
+#[test]
+fn an_outside_edit_to_another_tile_keeps_the_placement() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", Some("a"), Millis(0));
+    let edited = layout(split(
+        0.5,
+        tile("a", &["p1", "p2", "p3"], Some("p2")),
+        tile("b", &["p4", "p5"], Some("p4")),
+    ));
+    sim.outside_write(bytes_of(&edited), Millis(10));
+    let status = sim.layouts.status(&space("main")).unwrap();
+    assert!(status.dropped.is_none());
+    assert_eq!(active_of(&status.layout, "a").as_deref(), Some("p9"));
+    assert_eq!(panels_in(&status.layout, "b"), ["p4", "p5"]);
+    sim.layouts.tick(Millis(510));
+    sim.settle(Millis(510));
+    assert_eq!(sim.written(), 1);
+    last_write_is_current(&sim);
+}
+
+#[test]
+fn removing_the_file_moves_a_pending_placement_to_the_default_tile() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", Some("b"), Millis(0));
+    sim.disk.remove(&space("main"));
+    sim.layouts.apply_change(&space("main"));
+    sim.settle(Millis(10));
+    let current = sim.current("main");
+    let default = combined::core::default_layout();
+    let first = combined::core::first_tile(&default.root).id.clone();
+    assert_eq!(
+        tile_of_panel(&current, "p9").as_deref(),
+        Some(first.as_str())
+    );
+}
+
+#[test]
+fn a_written_placement_is_not_placed_again_after_an_outside_removal() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", None, Millis(0));
+    sim.layouts.tick(Millis(500));
+    sim.settle(Millis(500));
+    sim.outside_write(bytes_of(&two_tiles()), Millis(600));
+    assert!(!holds(&sim.current("main"), "p9"));
+    sim.layouts.tick(Millis(10_000));
+    sim.settle(Millis(10_000));
+    assert_eq!(sim.written(), 1);
+}
+
+#[test]
+fn a_client_close_tile_before_the_write_ends_the_placement() {
+    let mut sim = Sim::open(&two_tiles());
+    place(&mut sim, "p9", Some("b"), Millis(0));
+    sim.mutate(vec![close("b")], Millis(10)).unwrap();
+    assert!(!holds(&sim.current("main"), "p9"));
+    sim.layouts.tick(Millis(510));
+    sim.settle(Millis(510));
+    assert!(!holds(&sim.current("main"), "p9"));
+    last_write_is_current(&sim);
+}
+
+#[test]
+fn a_client_mutate_against_the_pre_placement_revision_is_stale() {
+    let mut sim = Sim::open(&two_tiles());
+    let before = sim.revision("main");
+    place(&mut sim, "p9", None, Millis(0));
+    assert_eq!(sim.revision("main"), LayoutRevision(before.0 + 1));
+    let result = sim.layouts.mutate(
+        MAIN,
+        &space("main"),
+        3,
+        before,
+        vec![set_active("a", "p3")],
+        Millis(1),
+    );
+    assert_eq!(result, Err(MutateError::Stale));
 }

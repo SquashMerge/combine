@@ -492,3 +492,172 @@ fn diff_fields_reports_ratio_active_panels_structure() {
     let fields = diff_fields(&disk, &grouped);
     assert!(fields.contains(&FieldPath::Groups) && fields.contains(&FieldPath::Extra));
 }
+
+fn add(panel: &str, tile: Option<&str>, activate: bool) -> LayoutOp {
+    LayoutOp::AddPanel {
+        panel: p(panel),
+        tile: tile.map(t),
+        activate,
+    }
+}
+
+fn remove(panel: &str) -> LayoutOp {
+    LayoutOp::RemovePanel { panel: p(panel) }
+}
+
+fn panels_of(layout: &SpaceLayout, id: &str) -> Vec<String> {
+    tile_of(&layout.root, id)
+        .unwrap()
+        .panels
+        .iter()
+        .map(|panel| panel.as_str().to_string())
+        .collect()
+}
+
+#[test]
+fn add_panel_appends_to_the_hinted_tile_and_activates_it() {
+    let applied = apply(&two_tiles(), &[add("p9", Some("b"), true)]).unwrap();
+    let b = tile_of(&applied.layout.root, "b").unwrap();
+    assert_eq!(panels_of(&applied.layout, "b"), ["p4", "p9"]);
+    assert_eq!(b.active, Some(p("p9")));
+    assert_eq!(panels_of(&applied.layout, "a"), ["p1", "p2", "p3"]);
+
+    let quiet = apply(&two_tiles(), &[add("p9", Some("b"), false)]).unwrap();
+    assert_eq!(panels_of(&quiet.layout, "b"), ["p4", "p9"]);
+    assert_eq!(
+        tile_of(&quiet.layout.root, "b").unwrap().active,
+        Some(p("p4"))
+    );
+
+    let empty = layout(split(
+        0.5,
+        tile("a", &[], None),
+        tile("b", &["p4"], Some("p4")),
+    ));
+    let applied = apply(&empty, &[add("p9", Some("a"), false)]).unwrap();
+    assert_eq!(
+        tile_of(&applied.layout.root, "a").unwrap().active,
+        Some(p("p9"))
+    );
+
+    let held = apply(&two_tiles(), &[add("p1", Some("b"), true)]);
+    assert!(matches!(held, Err(LayoutError::PanelInLayout(id)) if id == p("p1")));
+    assert_eq!(
+        LayoutError::PanelInLayout(p("p1")).to_string(),
+        "panel p1 is already in the layout"
+    );
+}
+
+#[test]
+fn with_no_hint_the_first_tile_in_tree_order_gets_it() {
+    // Tile `z` is first in tree order, tile `a` sorts first by ID.
+    let tree = layout(split(
+        0.5,
+        split(0.5, tile("z", &["p1"], Some("p1")), tile("y", &[], None)),
+        tile("a", &["p2"], Some("p2")),
+    ));
+    let applied = apply(&tree, &[add("p9", None, true)]).unwrap();
+    assert_eq!(panels_of(&applied.layout, "z"), ["p1", "p9"]);
+    assert_eq!(panels_of(&applied.layout, "a"), ["p2"]);
+    assert_eq!(
+        applied.touched,
+        [FieldPath::TilePanels(t("z")), FieldPath::TileActive(t("z"))]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(combined::core::first_tile(&tree.root).id, t("z"));
+}
+
+#[test]
+fn a_hint_naming_no_tile_falls_back_to_the_first_tile() {
+    let applied = apply(&two_tiles(), &[add("p9", Some("nope"), true)]).unwrap();
+    assert_eq!(panels_of(&applied.layout, "a"), ["p1", "p2", "p3", "p9"]);
+    assert_eq!(
+        combined::core::target_tile(&two_tiles().root, Some(&t("nope"))).id,
+        t("a")
+    );
+    assert_eq!(
+        combined::core::target_tile(&two_tiles().root, Some(&t("b"))).id,
+        t("b")
+    );
+}
+
+#[test]
+fn add_and_remove_panel_never_change_the_tiles() {
+    let tiles = |layout: &SpaceLayout| {
+        let mut flat = Vec::new();
+        fn walk(node: &SplitNode, out: &mut Vec<String>) {
+            match node {
+                SplitNode::Tile(tile) => out.push(tile.id.as_str().to_string()),
+                SplitNode::Split(split) => {
+                    walk(&split.a, out);
+                    walk(&split.b, out);
+                }
+            }
+        }
+        walk(&layout.root, &mut flat);
+        flat
+    };
+    let before = two_tiles();
+    let added = apply(&before, &[add("p9", None, true)]).unwrap();
+    assert_eq!(tiles(&added.layout), tiles(&before));
+    assert!(!added.touched.contains(&FieldPath::Structure));
+    let removed = apply(&before, &[remove("p4")]).unwrap();
+    assert_eq!(tiles(&removed.layout), tiles(&before));
+
+    // RemovePanel moves active to the panel now at its index, else the one before, else none.
+    let middle = apply(&before, &[remove("p2")]).unwrap();
+    assert_eq!(
+        tile_of(&middle.layout.root, "a").unwrap().active,
+        Some(p("p3"))
+    );
+    let end = apply(&before, &[set_active_op("a", "p3"), remove("p3")]).unwrap();
+    assert_eq!(
+        tile_of(&end.layout.root, "a").unwrap().active,
+        Some(p("p2"))
+    );
+    assert_eq!(tile_of(&removed.layout.root, "b").unwrap().active, None);
+    let inactive = apply(&before, &[remove("p1")]).unwrap();
+    assert_eq!(
+        tile_of(&inactive.layout.root, "a").unwrap().active,
+        Some(p("p2"))
+    );
+    assert!(matches!(
+        apply(&before, &[remove("nope")]),
+        Err(LayoutError::UnknownPanel(_))
+    ));
+}
+
+fn set_active_op(tile: &str, panel: &str) -> LayoutOp {
+    LayoutOp::SetActive {
+        tile: t(tile),
+        panel: p(panel),
+    }
+}
+
+#[test]
+fn panel_ops_touch_only_the_target_tiles_fields() {
+    let before = two_tiles();
+    let only = |tile: &str| -> BTreeSet<FieldPath> {
+        [
+            FieldPath::TilePanels(t(tile)),
+            FieldPath::TileActive(t(tile)),
+        ]
+        .into_iter()
+        .collect()
+    };
+    assert_eq!(
+        apply(&before, &[add("p9", Some("b"), false)])
+            .unwrap()
+            .touched,
+        only("b")
+    );
+    assert_eq!(
+        apply(&before, &[add("p9", None, true)]).unwrap().touched,
+        only("a")
+    );
+    assert_eq!(apply(&before, &[remove("p4")]).unwrap().touched, only("b"));
+    let applied = apply(&before, &[add("p9", Some("b"), true)]).unwrap();
+    let changed = diff_fields(&before, &applied.layout);
+    assert_eq!(changed, only("b"));
+}

@@ -1,46 +1,13 @@
-//! The daemon's interim answers to the version 5 messages M2-S7 still builds. `mcp_open` and `mcp`
-//! (M2-S4), and `get_panel` and `report_render` (M2-S5), are handled by the server, so core's arms
-//! for them are fallbacks that a real connection never reaches.
+//! Core's fallbacks for the version 5 messages the server handles: `mcp_open` and `mcp`,
+//! `get_panel`, `close_panel`, `pin_panel` and `report_render`. A real connection never reaches
+//! them.
 
 use combine_protocol as wire;
-use combined::core::{ops_from_wire, Core, CoreConfig};
+use combined::core::{Core, CoreConfig};
 use combined::model::Millis;
 use combined::ports::Capabilities;
 
-const ADD_PANEL: &str = "the add_panel op is not supported by this daemon yet";
-const REMOVE_PANEL: &str = "the remove_panel op is not supported by this daemon yet";
-const PANEL: &str = "panel requests are not supported by this daemon yet";
-
-fn close_tile() -> wire::LayoutOp {
-    wire::LayoutOp::CloseTile {
-        tile: "a".to_string(),
-    }
-}
-
-fn refused(op: wire::LayoutOp) -> String {
-    match ops_from_wire(vec![close_tile(), op]) {
-        Err(text) => text,
-        Ok(_) => panic!("the op was accepted"),
-    }
-}
-
-#[test]
-fn panel_ops_are_refused_until_placement_lands() {
-    let add_with_tile = wire::LayoutOp::AddPanel {
-        panel: "p".to_string(),
-        tile: Some("a".to_string()),
-    };
-    let add_without_tile = wire::LayoutOp::AddPanel {
-        panel: "p".to_string(),
-        tile: None,
-    };
-    let remove = wire::LayoutOp::RemovePanel {
-        panel: "p".to_string(),
-    };
-    assert_eq!(refused(add_with_tile), ADD_PANEL);
-    assert_eq!(refused(add_without_tile), ADD_PANEL);
-    assert_eq!(refused(remove), REMOVE_PANEL);
-}
+const PANEL: &str = "panel requests are answered by the server, not by core";
 
 fn core() -> Core {
     let capabilities = Capabilities {
