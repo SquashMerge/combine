@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { HostsPort } from '../../src/ipc/port';
+import { CommandPalette } from '../../src/shell/CommandPalette';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
 import { MemoryLayoutPort } from '../support/memoryLayoutPort';
@@ -147,5 +148,60 @@ describe('CommandPalette', () => {
       expect(dialog()).toBeNull();
       expect(document.activeElement).toBe(rail());
     });
+  });
+
+  it('Tab and Shift+Tab stay in the search field', async () => {
+    await mount();
+    await open();
+    for (const shiftKey of [false, true]) {
+      const notPrevented = fireEvent.keyDown(search(), { key: 'Tab', shiftKey });
+      expect(notPrevented).toBe(false);
+      expect(document.activeElement).toBe(search());
+    }
+  });
+
+  it('the field has aria-autocomplete=list', async () => {
+    await mount();
+    await open();
+    expect(search().getAttribute('aria-autocomplete')).toBe('list');
+    expect(search().getAttribute('aria-label')).toBe('Search spaces, terminals and panels');
+  });
+
+  it('a backdrop click closes and a click inside does not', async () => {
+    await mount();
+    await open();
+    fireEvent.click(search());
+    expect(dialog()).not.toBeNull();
+    fireEvent.click(screen.getByRole('dialog', { name: 'Command palette' }));
+    expect(dialog()).not.toBeNull();
+    fireEvent.click(dialog()!.parentElement!);
+    expect(dialog()).toBeNull();
+  });
+
+  it('lists panels and runs the panel handlers when given them', async () => {
+    const space = { hostId: HOST_A, path: '/src/alpha' };
+    const onClosePanel = vi.fn();
+    render(
+      <CommandPalette
+        snapshot={sample()}
+        panels={{
+          space,
+          hostName: 'mac',
+          panels: [],
+          tiles: new Map(),
+          focused: { tile: 't', panel: 'notes' },
+          editable: true,
+        }}
+        onSelectSpace={() => {}}
+        onSelectTerminal={() => {}}
+        onRetryHost={() => {}}
+        onClosePanel={onClosePanel}
+      />,
+    );
+    await open();
+    fireEvent.change(search(), { target: { value: 'close panel' } });
+    expect(options()[0]?.getAttribute('data-palette-entry')).toBe('close-panel');
+    fireEvent.keyDown(search(), { key: 'Enter' });
+    expect(onClosePanel).toHaveBeenCalledExactlyOnceWith(space, 'notes');
   });
 });

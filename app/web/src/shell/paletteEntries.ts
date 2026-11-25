@@ -1,5 +1,6 @@
 import type { HostsSnapshot } from '../model/hosts';
 import type { TermId } from '../model/ids';
+import type { PanelSummary } from '../model/panels';
 import { type SpaceKey, folderName, spaceKeyId } from '../model/space';
 import type { Searchable } from './fuzzy';
 import { describeConnection } from './connectionText';
@@ -8,7 +9,10 @@ import { sortSpaces } from './order';
 export type PaletteAction =
   | { kind: 'switch-space'; space: SpaceKey }
   | { kind: 'focus-terminal'; space: SpaceKey; terminalId: TermId }
-  | { kind: 'retry-host'; hostName: string };
+  | { kind: 'retry-host'; hostName: string }
+  | { kind: 'show-panel'; space: SpaceKey; panel: string; tile: string | null }
+  | { kind: 'close-panel'; space: SpaceKey; panel: string }
+  | { kind: 'pin-panel'; space: SpaceKey; panel: string };
 
 export interface PaletteEntry extends Searchable {
   id: string;
@@ -19,14 +23,82 @@ export interface PaletteHandlers {
   onSelectSpace: (space: SpaceKey) => void;
   onSelectTerminal: (space: SpaceKey, terminalId: TermId) => void;
   onRetryHost: (hostName: string) => void;
+  onShowPanel?: (space: SpaceKey, panel: string, tile: string | null) => void;
+  onClosePanel?: (space: SpaceKey, panel: string) => void;
+  onPinPanel?: (space: SpaceKey, panel: string) => void;
 }
 
-const GROUP_SPACE = 0;
-const GROUP_TERMINAL = 1;
-const GROUP_HOST = 2;
+/** The watched space's panels, as the shell knows them; `editable` is false while the layout is held. */
+export interface PalettePanels {
+  space: SpaceKey;
+  hostName: string;
+  panels: readonly PanelSummary[];
+  /** Panel ID to the ID of the tile holding it. */
+  tiles: ReadonlyMap<string, string>;
+  focused: { tile: string; panel: string } | null;
+  editable: boolean;
+}
 
-export function buildPaletteEntries(snapshot: HostsSnapshot): PaletteEntry[] {
+const GROUP_PANEL_ACTION = 0;
+const GROUP_SPACE = 1;
+const GROUP_TERMINAL = 2;
+const GROUP_PANEL = 3;
+const GROUP_HOST = 4;
+
+function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
+  const { focused, space } = panels;
+  if (!panels.editable || focused === null) return [];
+  const summary = panels.panels.find((panel) => panel.id === focused.panel);
+  const key = spaceKeyId(space);
+  const detail = `${summary?.title ?? focused.panel} in ${folderName(space.path)}`;
+  const entries: PaletteEntry[] = [
+    {
+      id: `close-panel:${key}:${focused.panel}`,
+      group: GROUP_PANEL_ACTION,
+      label: 'Close panel',
+      detail,
+      action: { kind: 'close-panel', space, panel: focused.panel },
+    },
+  ];
+  if (summary?.lifetime === 'scratch') {
+    entries.push({
+      id: `pin-panel:${key}:${focused.panel}`,
+      group: GROUP_PANEL_ACTION,
+      label: 'Pin panel',
+      detail,
+      action: { kind: 'pin-panel', space, panel: focused.panel },
+    });
+  }
+  return entries;
+}
+
+function panelEntries(panels: PalettePanels): PaletteEntry[] {
+  const { space } = panels;
+  const key = spaceKeyId(space);
   const entries: PaletteEntry[] = [];
+  for (const summary of panels.panels) {
+    if (summary.state === 'removed') continue;
+    const tile = panels.tiles.get(summary.id) ?? null;
+    if (tile === null && !panels.editable) continue;
+    const state = summary.state.replaceAll('_', ' ');
+    entries.push({
+      id: `panel:${key}:${summary.id}`,
+      group: GROUP_PANEL,
+      label: summary.title ?? summary.id,
+      detail:
+        `${panels.hostName} ${folderName(space.path)} ${summary.renderer} ${state}` +
+        (tile === null ? ', not in a tile' : ''),
+      action: { kind: 'show-panel', space, panel: summary.id, tile },
+    });
+  }
+  return entries;
+}
+
+export function buildPaletteEntries(
+  snapshot: HostsSnapshot,
+  panels: PalettePanels | null = null,
+): PaletteEntry[] {
+  const entries: PaletteEntry[] = panels === null ? [] : panelActionEntries(panels);
   for (const host of snapshot.hosts) {
     for (const space of sortSpaces(host.spaces)) {
       entries.push({
@@ -51,6 +123,7 @@ export function buildPaletteEntries(snapshot: HostsSnapshot): PaletteEntry[] {
       }
     }
   }
+  if (panels !== null) entries.push(...panelEntries(panels));
   for (const host of snapshot.hosts) {
     if (host.connection.kind !== 'failed') continue;
     entries.push({
@@ -74,6 +147,15 @@ export function runPaletteAction(action: PaletteAction, handlers: PaletteHandler
       return;
     case 'retry-host':
       handlers.onRetryHost(action.hostName);
+      return;
+    case 'show-panel':
+      handlers.onShowPanel?.(action.space, action.panel, action.tile);
+      return;
+    case 'close-panel':
+      handlers.onClosePanel?.(action.space, action.panel);
+      return;
+    case 'pin-panel':
+      handlers.onPinPanel?.(action.space, action.panel);
       return;
   }
 }

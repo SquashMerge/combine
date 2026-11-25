@@ -1,9 +1,10 @@
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 
 export function useGlobalShortcut(key: string, onTrigger: () => void): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (!event.metaKey || event.key.toLowerCase() !== key) return;
+      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== key && event.code !== `Key${key.toUpperCase()}`) return;
       event.preventDefault();
       onTrigger();
     }
