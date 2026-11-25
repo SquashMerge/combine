@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use combine_protocol::{
     ClientMessage, DroppedNotice, ErrorCode, HostId, LayoutNode, LayoutOp, LayoutSnapshot,
-    MutateLayout, Ratio, RequestId, SplitDirection, UnwatchLayout, WatchLayout,
+    MutateLayout, Panels, Ratio, RequestId, SplitDirection, UnwatchLayout, WatchLayout,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
+use super::panels;
 use crate::hosts::model::DecimalU64;
 use crate::hosts::outbound::{Outbound, RequestKind};
+use crate::hosts::panels::PanelReply;
 use crate::hosts::service::HostsService;
 use crate::hosts::session::LayoutSink;
 
@@ -239,6 +241,14 @@ impl LayoutSink for TauriLayoutSink {
 
     fn layout_disconnected(&self, host_id: &HostId) {
         self.emit(disconnected_event(host_id));
+    }
+
+    fn panels(&self, host_id: &HostId, panels: Panels) {
+        panels::emit(&self.0, panels::list_event(host_id, panels));
+    }
+
+    fn panel_reply(&self, host_id: &HostId, reply: PanelReply) {
+        panels::emit(&self.0, panels::reply_event(host_id, reply));
     }
 }
 

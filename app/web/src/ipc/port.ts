@@ -2,6 +2,7 @@ import type { ClientSpaceState, ClientState } from '../model/clientState';
 import type { HostsSnapshot } from '../model/hosts';
 import type { DecimalU64, HostId, TermId } from '../model/ids';
 import type { LayoutEvent, LayoutOp } from '../model/layout';
+import type { PanelContent, PanelsEvent, RenderReport } from '../model/panels';
 import type { SpawnSource, TemplateList } from '../model/spawn';
 
 export type Unsubscribe = () => void;
@@ -38,4 +39,12 @@ export interface SpawnPort {
 export interface OpenUrlPort {
   /** Asks the shell to open the URL in the system browser. Never rejects; a refusal is a no-op. */
   openUrl(url: string): Promise<void>;
+}
+
+export interface PanelPort {
+  onPanelsEvent(listener: (event: PanelsEvent) => void): Promise<Unsubscribe>;
+  /** Through the host's PanelFetchQueue; rejects with PanelFetchError. */
+  fetchPanel(hostId: HostId, space: string, panel: string, urgent: boolean): Promise<PanelContent>;
+  /** Resolves true when the command was accepted, false otherwise; never rejects. */
+  reportRender(hostId: HostId, report: RenderReport): Promise<boolean>;
 }

@@ -19,6 +19,33 @@ use spawn_support::*;
 
 const QUIET: Duration = Duration::from_millis(300);
 
+/// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
+/// only on a client that has sent `watch_layout`.
+fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
+    loop {
+        match client.recv() {
+            DaemonMessage::Panels(_) => {}
+            other => return other,
+        }
+    }
+}
+
+/// [`WireClient::recv_within`], skipping `panels` frames. `None` when nothing else arrives
+/// within `wait`.
+fn recv_within_skipping_panels(
+    client: &WireClient,
+    wait: std::time::Duration,
+) -> Option<DaemonMessage> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match client.recv_within(left)? {
+            DaemonMessage::Panels(_) => {}
+            other => return Some(other),
+        }
+    }
+}
+
 /// A rig whose project has valid templates and a layout naming them.
 fn rig_with_templates() -> (Rig, Arc<MemoryFileStore>) {
     let (rig, store) = Rig::in_memory();
@@ -105,7 +132,7 @@ fn no_spawn_on_connect_watch_list_and_mutate() {
             }],
         },
     ));
-    assert!(client.recv_within(QUIET).is_some());
+    assert!(recv_within_skipping_panels(&client, QUIET).is_some());
     std::thread::sleep(QUIET);
 
     assert_eq!(spawn_attempts(&rig.control), 1);
@@ -137,7 +164,7 @@ fn no_spawn_on_layout_or_panel_file_change() {
         LAYOUT_FILE,
         bytes_of(&layout(tile("only", &["agent"], Some("agent")))),
     );
-    match client.recv() {
+    match recv_skipping_panels(&client) {
         DaemonMessage::Layout(push) => assert_eq!(push.request, None),
         other => panic!("expected the layout push, got {other:?}"),
     }

@@ -52,6 +52,20 @@ step "rust: shipped daemon, without test-support"
 cargo clippy -p combined --all-targets --locked -- -D warnings
 cargo test -p combined --locked --test shipped_build
 
+# The app users install has no csp-probe: its default handler list and data-dir setup are otherwise
+# never compiled (the steps above use --all-features), and no probe code may be in it.
+step "rust: shipped app, without csp-probe"
+cargo clippy -p combine-app --all-targets --locked -- -D warnings
+cargo build -p combine-app --locked
+if [ ! -f "$CARGO_TARGET_DIR/debug/combine-app" ]; then
+  echo "verify: $CARGO_TARGET_DIR/debug/combine-app is missing; cannot check it for csp-probe code" >&2
+  exit 1
+fi
+if grep -a -q -e COMBINE_CSP_PROBE_OUT -e COMBINE_CSP_PROBE_DATA "$CARGO_TARGET_DIR/debug/combine-app"; then
+  echo "verify: the default combine-app build holds csp-probe code" >&2
+  exit 1
+fi
+
 step "architecture: tools/arch-guard"
 python3 -I -B tools/arch-guard/test_check.py
 python3 -I -B tools/arch-guard/check.py

@@ -13,34 +13,37 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, HostId, JsonRpcMessage, Layout, Mcp,
-    McpOpen, McpOpened, RequestId, TermId,
+    ClientMessage, DaemonMessage, ErrorCode, ErrorMessage, GetPanel, HostId, JsonRpcMessage,
+    Layout, Mcp, McpOpen, McpOpened, PanelState, Panels, ReportRender, RequestId, TermId,
 };
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::StreamExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinError;
 use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 
 use super::connection::{self, ConnEvent, WriterCmd};
 use super::flush::{FlushAt, FlushSchedule};
 use super::mcp_channel::{self, ChannelStart, McpLink, Offer};
 use super::panel_calls::{PanelCall, PanelHandle};
+use super::panel_lane::{LaneOutcome, PanelIo};
 use super::socket::BoundSocket;
 use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
-    layout_snapshot, ops_from_wire, panel_file_bound, resolve_caller, ConnectionId, Driver,
-    LayoutEffect, LayoutRead, LayoutWritten, Layouts, MutateError, PanelApiError, PanelEffect,
-    PanelFolder, PanelList, PanelRead, PanelStore, PanelView, SaveEnd, SaveReport, SpawnEffect,
-    SpawnTicket, Spawns, TerminalList, WatchError, DS_STORE, LAYOUT_FILE, LAYOUT_MAX_BYTES,
-    PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES, SCRATCH_FILE, SCRATCH_LIST_MAX,
+    layout_snapshot, ops_from_wire, panel_folder_refusal, panel_reply, panels_loading,
+    panels_message, resolve_caller, ClientRender, ConnectionId, Driver, LayoutEffect, LayoutRead,
+    LayoutWritten, Layouts, MutateError, PanelApiError, PanelCreate, PanelEffect, PanelEvent,
+    PanelList, PanelRead, PanelStore, PanelView, RenderStatuses, SpawnEffect, SpawnTicket, Spawns,
+    TerminalList, WatchError, LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE,
+    PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
 use crate::mcp_server::{McpAudit, McpOptions};
-use crate::model::{ContentHash, LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
+use crate::model::{LayoutRevision, Millis, SpaceId, TermEvent, TermInfo};
 use crate::ports::{
     BackendResult, CallerIdentity, DiagramCheck, DiagramCheckError, DiagramVerdict, FileChange,
-    FileMark, FileStore, ScratchStore, StoreError, TerminalBackend, WallClock,
+    FileMark, FileStore, StoreError, TerminalBackend, WallClock,
 };
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
@@ -99,6 +102,16 @@ struct ConnState {
     /// The connection's MCP channel, once its `mcp_open` was accepted. Dropping it closes the
     /// channel.
     mcp: Option<McpLink>,
+    /// Replies to `get_panel`, in the order they arose.
+    panel_out: VecDeque<PanelOut>,
+    /// The panels of the watched space changed since the connection's last `panels` message.
+    panels_stale: bool,
+    /// The connection's last `panels` message was the loading form, so it is owed another once
+    /// the space has loaded.
+    panels_loading_sent: bool,
+    /// The request of a `watch_layout` whose answer has not been flushed. No `panels` push
+    /// precedes that answer.
+    watch_unanswered: Option<RequestId>,
     /// Replies to `mcp_open` and `mcp`, in the order they arose.
     mcp_out: VecDeque<DaemonMessage>,
     /// The connection's MCP channel thread has ended.
@@ -106,6 +119,17 @@ struct ConnState {
     /// The connection's last message is queued and its input is ignored. It still counts
     /// toward `max_connections` until its writer reports the socket closed.
     closing: bool,
+}
+
+/// A reply owed to a `get_panel`.
+enum PanelOut {
+    /// Answered from the store when it is flushed.
+    Get {
+        request: RequestId,
+        space: SpaceId,
+        panel: String,
+    },
+    Error(ErrorMessage),
 }
 
 enum LayoutOut {
@@ -127,6 +151,7 @@ enum Wake {
     Checked(CheckDone),
     Panel,
     PanelCall(Option<PanelCall>),
+    PanelIo(Result<LaneOutcome, JoinError>),
     Housekeeping,
     WatchRetry,
 }
@@ -137,6 +162,13 @@ struct CheckDone {
     panel: String,
     revision: u64,
     result: Result<DiagramVerdict, DiagramCheckError>,
+}
+
+/// Panel work that arrived while the lane was busy, applied in arrival order once it is idle.
+enum Deferred {
+    Change(SpaceId, String),
+    Check(CheckDone),
+    AddSpaces,
 }
 
 /// A reply to a panel call, held until the call's file work has run.
@@ -153,6 +185,10 @@ enum PanelAnswer {
         oneshot::Sender<Result<(PanelView, String), PanelApiError>>,
         Result<(PanelView, String), PanelApiError>,
     ),
+    Render(
+        oneshot::Sender<Result<Vec<ClientRender>, PanelApiError>>,
+        Result<Vec<ClientRender>, PanelApiError>,
+    ),
 }
 
 impl PanelAnswer {
@@ -162,6 +198,7 @@ impl PanelAnswer {
             PanelAnswer::View(reply, result) => drop(reply.send(result)),
             PanelAnswer::List(reply, result) => drop(reply.send(result)),
             PanelAnswer::Get(reply, result) => drop(reply.send(result)),
+            PanelAnswer::Render(reply, result) => drop(reply.send(result)),
         }
     }
 }
@@ -195,7 +232,16 @@ struct Server {
     spawns: Spawns,
     spawning: Spawning,
     panels: PanelStore,
-    scratch: Arc<dyn ScratchStore>,
+    panel_io: PanelIo,
+    /// The panel file effect running on a blocking thread, if any.
+    panel_running: Option<BoxFuture<'static, Result<LaneOutcome, JoinError>>>,
+    /// Effects taken from the panel store and not started yet.
+    panel_queue: VecDeque<PanelEffect>,
+    /// Panel work that arrived while the lane was busy.
+    panel_deferred: VecDeque<Deferred>,
+    /// A `create` waiting for its new space to load.
+    parked_create: Option<PanelCall>,
+    render: RenderStatuses,
     diagram_check: Arc<dyn DiagramCheck>,
     wall: Arc<dyn WallClock>,
     /// Diagram checks that run beside the loop, never awaited inline.
@@ -290,6 +336,7 @@ pub async fn serve_watched(
         mcp_audit,
     } = parts;
     let Watched { watch, list } = watched;
+    let file_store_for_lane = Arc::clone(&file_store);
     terminals.apply_list(&list);
     terminals.take_changed();
     let (mcp_calls, mut mcp_rx) = mpsc::channel(64);
@@ -332,7 +379,12 @@ pub async fn serve_watched(
         spawns: Spawns::new(project_dirs),
         spawning: FuturesUnordered::new(),
         panels: PanelStore::new(panel_timing),
-        scratch,
+        panel_io: PanelIo::new(Arc::clone(&file_store_for_lane), scratch),
+        panel_running: None,
+        panel_queue: VecDeque::new(),
+        panel_deferred: VecDeque::new(),
+        parked_create: None,
+        render: RenderStatuses::new(),
         diagram_check,
         wall: wall_clock,
         checking: FuturesUnordered::new(),
@@ -360,6 +412,11 @@ pub async fn serve_watched(
         Some(Err(error)) => Err(error),
         Some(Ok(())) => server.run(shutdown.as_mut()).await,
     };
+    // The panel file work in flight is awaited, so nothing is left running on a blocking
+    // thread. Nothing more starts.
+    if let Some(running) = server.panel_running.take() {
+        let _ = running.await;
+    }
     // A write that found an outside edit is rebased by the conflict and written by the second
     // pass. Panels have nothing to flush: a save retry still held here is lost, and a call
     // still queued is dropped with the receiver, which its handle reports as a stopped server.
@@ -375,6 +432,15 @@ pub async fn serve_watched(
 async fn next_item<T>(watch: &mut Option<BoxStream<'static, T>>) -> Option<T> {
     match watch {
         Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn lane_next(
+    running: &mut Option<BoxFuture<'static, Result<LaneOutcome, JoinError>>>,
+) -> Result<LaneOutcome, JoinError> {
+    match running {
+        Some(running) => running.await,
         None => std::future::pending().await,
     }
 }
@@ -395,8 +461,9 @@ impl Server {
                 () = &mut self.layout_timer, if self.layout_armed => Wake::Layout,
                 Some((ticket, result)) = self.spawning.next(), if !self.spawning.is_empty() => Wake::Spawned(ticket, result),
                 Some(done) = self.checking.next(), if !self.checking.is_empty() => Wake::Checked(done),
-                () = &mut self.panel_timer, if self.panel_armed => Wake::Panel,
-                item = next_item(&mut self.panel_calls), if self.panel_calls.is_some() => Wake::PanelCall(item),
+                () = &mut self.panel_timer, if self.panel_armed && self.panel_lane_idle() => Wake::Panel,
+                item = next_item(&mut self.panel_calls), if self.panel_calls.is_some() && self.panel_lane_idle() && self.parked_create.is_none() => Wake::PanelCall(item),
+                result = lane_next(&mut self.panel_running), if self.panel_running.is_some() => Wake::PanelIo(result),
                 _ = self.housekeeping.tick() => Wake::Housekeeping,
                 _ = self.watch_retry.tick() => Wake::WatchRetry,
             };
@@ -415,7 +482,15 @@ impl Server {
                         for state in self.conns.values_mut().filter(|state| state.watching) {
                             state.stale = true;
                         }
-                        self.add_terminal_spaces(self.clock.now());
+                        if self.panel_lane_idle() {
+                            self.add_terminal_spaces(self.clock.now());
+                        } else if !self
+                            .panel_deferred
+                            .iter()
+                            .any(|item| matches!(item, Deferred::AddSpaces))
+                        {
+                            self.panel_deferred.push_back(Deferred::AddSpaces);
+                        }
                     }
                 }
                 Wake::Watch(None) => {
@@ -427,8 +502,7 @@ impl Server {
                     } else if change.path == PANELS_DIR
                         || change.path.starts_with(&format!("{PANELS_DIR}/"))
                     {
-                        self.panels
-                            .apply_change(&change.space, &change.path, self.clock.now());
+                        self.panel_change(change.space, change.path);
                     }
                 }
                 Wake::File(None) => self.changes = None,
@@ -445,19 +519,33 @@ impl Server {
                     }
                 }
                 Wake::Spawned(ticket, result) => self.spawns.apply_spawned(ticket, result),
-                Wake::Checked(done) => self.panels.apply_check(
-                    &done.space,
-                    &done.panel,
-                    done.revision,
-                    done.result,
-                    self.clock.now(),
-                ),
+                Wake::Checked(done) => {
+                    if self.panel_lane_idle() {
+                        self.apply_check(done);
+                    } else {
+                        self.panel_deferred.push_back(Deferred::Check(done));
+                    }
+                }
                 Wake::Panel => {
                     self.panel_armed = false;
                     self.panels.tick(self.clock.now(), self.wall.now_unix_ms());
                 }
-                Wake::PanelCall(Some(call)) => self.panel_call(call).await,
+                Wake::PanelCall(Some(call)) => self.panel_call(call),
                 Wake::PanelCall(None) => self.panel_calls = None,
+                Wake::PanelIo(result) => {
+                    self.panel_running = None;
+                    match result {
+                        Ok(outcome) => self.apply_lane_outcome(outcome),
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(_) => {
+                            return Err(ServeError::State(
+                                "the panel file work was cancelled".to_string(),
+                            ))
+                        }
+                    }
+                }
                 Wake::Housekeeping => self.driver.core_mut().tick(self.clock.now()),
                 Wake::WatchRetry => self.retry_watches().await,
             }
@@ -514,6 +602,10 @@ impl Server {
                 layout_out: VecDeque::new(),
                 layout_stale: false,
                 spawn_out: VecDeque::new(),
+                panel_out: VecDeque::new(),
+                panels_stale: false,
+                panels_loading_sent: false,
+                watch_unanswered: None,
                 mcp: None,
                 mcp_out: VecDeque::new(),
                 mcp_ended: false,
@@ -544,7 +636,12 @@ impl Server {
                     ClientMessage::WatchLayout(watch) => {
                         self.watch_layout(conn, watch.request, watch.space, now)
                     }
-                    ClientMessage::UnwatchLayout(_) => self.layouts.unwatch(conn, now),
+                    ClientMessage::UnwatchLayout(_) => {
+                        self.layouts.unwatch(conn, now);
+                        if let Some(state) = self.conns.get_mut(&conn) {
+                            state.watch_unanswered = None;
+                        }
+                    }
                     ClientMessage::MutateLayout(mutate) => self.mutate_layout(conn, mutate, now),
                     ClientMessage::ListTemplates(list) => {
                         let space = SpaceId(list.space);
@@ -563,6 +660,8 @@ impl Server {
                             listed,
                         );
                     }
+                    ClientMessage::GetPanel(get) => self.get_panel(conn, get),
+                    ClientMessage::ReportRender(report) => self.report_render(conn, report),
                     ClientMessage::McpOpen(open) => self.mcp_open(conn, open),
                     ClientMessage::Mcp(mcp) => self.mcp_message(conn, mcp.message),
                     message => self.driver.core_mut().client_message(conn, message, now),
@@ -572,6 +671,7 @@ impl Server {
                 self.driver.core_mut().disconnect(conn, now);
                 self.layouts.unwatch(conn, now);
                 self.spawns.disconnect(conn);
+                self.render.disconnect(conn);
                 let Some(state) = self.conns.get_mut(&conn) else {
                     return;
                 };
@@ -585,6 +685,10 @@ impl Server {
                 state.layout_out.clear();
                 state.layout_stale = false;
                 state.spawn_out.clear();
+                state.panel_out.clear();
+                state.panels_stale = false;
+                state.panels_loading_sent = false;
+                state.watch_unanswered = None;
                 state.mcp_out.clear();
                 if let Some(link) = &state.mcp {
                     link.close();
@@ -745,14 +849,22 @@ impl Server {
             .spaces
             .iter()
             .any(|listed| listed.id == space.0);
+        if let Some(state) = self.conns.get_mut(&conn) {
+            state.watch_unanswered = Some(request);
+        }
         match self.layouts.watch(conn, space, request.0, known, now) {
             Ok(()) => {}
-            Err(WatchError::UnknownSpace) => self.layout_error(
-                conn,
-                ErrorCode::UnknownSpace,
-                "the host lists no such space".to_string(),
-                request,
-            ),
+            Err(WatchError::UnknownSpace) => {
+                if let Some(state) = self.conns.get_mut(&conn) {
+                    state.watch_unanswered = None;
+                }
+                self.layout_error(
+                    conn,
+                    ErrorCode::UnknownSpace,
+                    "the host lists no such space".to_string(),
+                    request,
+                )
+            }
         }
     }
 
@@ -842,6 +954,58 @@ impl Server {
         }
     }
 
+    /// Queues a `get_panel` reply for `conn`, and disconnects it when it has left more than
+    /// `watch_answer_limit` of them unread.
+    fn queue_panel_out(&mut self, conn: ConnectionId, item: PanelOut) {
+        let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) else {
+            return;
+        };
+        state.panel_out.push_back(item);
+        if state.panel_out.len() > self.options.watch_answer_limit {
+            eprintln!(
+                "combined: connection {} left more than {} panel replies unread; disconnecting",
+                conn.0, self.options.watch_answer_limit
+            );
+            self.driver.core_mut().disconnect(conn, self.clock.now());
+            self.remove(conn);
+        }
+    }
+
+    /// Queues the answer to a `get_panel`. The answer is read from the store when it is
+    /// flushed, so it is the revision current then.
+    fn get_panel(&mut self, conn: ConnectionId, get: GetPanel) {
+        let item = match panel_folder_refusal(&get.panel) {
+            Some(why) => PanelOut::Error(ErrorMessage {
+                code: ErrorCode::InvalidRequest,
+                message: format!("the panel ID isn't valid: {why}"),
+                request: Some(get.request),
+                attachment: None,
+            }),
+            None => PanelOut::Get {
+                request: get.request,
+                space: SpaceId(get.space),
+                panel: get.panel,
+            },
+        };
+        self.queue_panel_out(conn, item);
+    }
+
+    /// Records what the connection drew. It is never answered, not even with an error.
+    fn report_render(&mut self, conn: ConnectionId, report: ReportRender) {
+        let space = SpaceId(report.space);
+        let current = match self.panels.get(&space, &report.panel) {
+            Ok((view, _)) if view.state != PanelState::Removed => view.revision,
+            _ => return,
+        };
+        let render = ClientRender {
+            revision: report.revision,
+            status: report.status,
+            error: report.error,
+        };
+        self.render
+            .record(conn, &space, &report.panel, render, current);
+    }
+
     /// Queues an MCP reply for `conn`, and disconnects it when it has left more than
     /// `watch_answer_limit` of them unread.
     fn queue_mcp_out(&mut self, conn: ConnectionId, message: DaemonMessage) {
@@ -864,6 +1028,7 @@ impl Server {
     fn remove(&mut self, conn: ConnectionId) {
         self.layouts.unwatch(conn, self.clock.now());
         self.spawns.disconnect(conn);
+        self.render.disconnect(conn);
         if let Some(state) = self.conns.remove(&conn) {
             self.stats.removed();
             let _ = state.socket.shutdown(Shutdown::Both);
@@ -904,21 +1069,29 @@ impl Server {
                 || !state.layout_out.is_empty()
                 || state.layout_stale
                 || !state.spawn_out.is_empty()
+                || !state.panel_out.is_empty()
+                || (state.panels_stale && state.watch_unanswered.is_none())
                 || !state.mcp_out.is_empty()
         })
     }
 
-    /// Asks the file store to watch `space`. A refusal is remembered and retried every
-    /// `watch_retry`, and logged when it starts or its text changes, not on every retry.
+    /// Asks the file store to watch `space`.
     async fn watch_space(&mut self, space: &SpaceId) {
-        match self.store.watch(space).await {
+        let result = self.store.watch(space).await;
+        self.watched(space, result);
+    }
+
+    /// What the file store answered when asked to watch `space`. A refusal is remembered and
+    /// retried every `watch_retry`, and logged when it starts or its text changes, not on every
+    /// retry.
+    fn watched(&mut self, space: &SpaceId, result: Result<(), StoreError>) {
+        match result {
             Ok(()) => {
                 if self.unwatched.remove(space).is_some() {
                     eprintln!("combined: watching {} again", space.0);
                     // Edits made while it wasn't watched were never reported.
                     self.layouts.apply_change(space);
-                    self.panels
-                        .apply_change(space, PANELS_DIR, self.clock.now());
+                    self.panel_change(space.clone(), PANELS_DIR.to_string());
                 }
             }
             Err(error) => {
@@ -1075,11 +1248,11 @@ impl Server {
     }
 
     /// Runs one call of the panel API. A new space's listing and first reads are applied before
-    /// a create runs, so the first create in a space doesn't find it loading. The answer waits
-    /// in `panel_answers` until `settle` has run the call's file work.
-    async fn panel_call(&mut self, call: PanelCall) {
+    /// a create runs, so the first create in a space doesn't find it loading: a create that has
+    /// to wait for them is parked. The answer waits in `panel_answers` until the lane is idle.
+    /// A call is only taken while the lane is idle.
+    fn panel_call(&mut self, call: PanelCall) {
         let now = self.clock.now();
-        let wall_ms = self.wall.now_unix_ms();
         let answer = match call {
             PanelCall::Create {
                 space,
@@ -1087,11 +1260,16 @@ impl Server {
                 reply,
             } => {
                 self.panels.add_space(&space, now);
-                self.run_panel_effects().await;
-                let result =
-                    self.panels
-                        .create(&space, create, now, wall_ms, self.driver.core_mut());
-                PanelAnswer::View(reply, result)
+                self.pump_panels();
+                if !self.panel_lane_idle() {
+                    self.parked_create = Some(PanelCall::Create {
+                        space,
+                        create,
+                        reply,
+                    });
+                    return;
+                }
+                self.create_panel(space, create, reply)
             }
             PanelCall::Update {
                 space,
@@ -1099,6 +1277,7 @@ impl Server {
                 update,
                 reply,
             } => {
+                let wall_ms = self.wall.now_unix_ms();
                 let result =
                     self.panels
                         .update(&space, &id, update, now, wall_ms, self.driver.core_mut());
@@ -1124,8 +1303,40 @@ impl Server {
                     .map(|(view, source)| (view, source.to_owned()));
                 PanelAnswer::Get(reply, result)
             }
+            PanelCall::RenderStatus { space, id, reply } => {
+                PanelAnswer::Render(reply, Ok(self.render.render_status(&space, &id)))
+            }
         };
         self.panel_answers.push(answer);
+    }
+
+    fn create_panel(
+        &mut self,
+        space: SpaceId,
+        create: PanelCreate,
+        reply: oneshot::Sender<Result<PanelView, PanelApiError>>,
+    ) -> PanelAnswer {
+        let now = self.clock.now();
+        let wall_ms = self.wall.now_unix_ms();
+        let result = self
+            .panels
+            .create(&space, create, now, wall_ms, self.driver.core_mut());
+        PanelAnswer::View(reply, result)
+    }
+
+    /// Runs the create that was waiting for its space to load. The lane is idle.
+    fn run_parked_create(&mut self, call: PanelCall) {
+        let PanelCall::Create {
+            space,
+            create,
+            reply,
+        } = call
+        else {
+            return;
+        };
+        let answer = self.create_panel(space, create, reply);
+        self.panel_answers.push(answer);
+        self.pump_panels();
     }
 
     fn send_panel_answers(&mut self) {
@@ -1146,206 +1357,165 @@ impl Server {
         }
     }
 
-    /// Runs the file store, scratch store and check work the panels asked for, until they ask
-    /// for none. Each outcome is reported before the next effect runs, so the store applies
-    /// reads in the order they were asked and knows the hashes of its own writes before their
-    /// echoes arrive. A check is started and not awaited: its verdict arrives as
-    /// `Wake::Checked`, so a slow diagram never holds terminal output.
-    async fn run_panel_effects(&mut self) {
+    /// No panel file effect is running or waiting its turn.
+    fn panel_lane_idle(&self) -> bool {
+        self.panel_running.is_none() && self.panel_queue.is_empty()
+    }
+
+    /// Starts the next panel effect when none is running. The effects the store asked for are
+    /// started one at a time, in the order they were asked, and each outcome is applied before
+    /// the next starts, so the store applies reads in the order it asked them and knows the
+    /// hashes of its own writes before their echoes arrive. A check is started and not awaited:
+    /// its verdict arrives as `Wake::Checked`, so a slow diagram never holds terminal output.
+    fn pump_panels(&mut self) {
         loop {
-            let effects = self.panels.take_effects();
-            if effects.is_empty() {
+            if self.panel_running.is_some() {
                 return;
             }
-            for effect in effects {
-                match effect {
-                    PanelEffect::Watch { space } => {
-                        self.watch_space(&space).await;
-                    }
-                    PanelEffect::ListWorkspace { space } => {
-                        let listing = self
-                            .store
-                            .list_dir(&space, PANELS_DIR, PANEL_LIST_MAX)
-                            .await;
-                        self.panels.apply_listing(&space, listing, self.clock.now());
-                    }
-                    PanelEffect::ListScratch => {
-                        let listing = self.scratch.list(SCRATCH_LIST_MAX).await;
-                        self.panels.apply_scratch_listing(listing, self.clock.now());
-                    }
-                    PanelEffect::Read { at, file } => {
-                        let bound = panel_file_bound(file);
-                        let read = match &at {
-                            PanelFolder::Workspace { space, panel } => {
-                                let path = format!("{PANELS_DIR}/{panel}/{file}");
-                                self.store.read(space, &path, bound).await
-                            }
-                            PanelFolder::Scratch(dir) => self.scratch.read(dir, file, bound).await,
-                        };
-                        self.panels.apply_read(
-                            &at,
-                            file,
-                            PanelRead::from(read),
-                            self.clock.now(),
-                            self.driver.core_mut(),
-                        );
-                    }
-                    PanelEffect::Save { ticket, at, files } => {
-                        let report = self.run_save(&at, files).await;
-                        self.panels.apply_saved(ticket, report, self.clock.now());
-                    }
-                    PanelEffect::Delete { ticket, at, files } => {
-                        let report = self.run_delete(&at, files).await;
-                        self.panels.apply_deleted(ticket, report, self.clock.now());
-                    }
-                    PanelEffect::Check {
-                        space,
-                        panel,
-                        revision,
-                        source,
-                    } => {
-                        let check = Arc::clone(&self.diagram_check);
-                        self.checking.push(Box::pin(async move {
-                            CheckDone {
-                                space,
-                                panel,
-                                revision,
-                                result: check.check(&source).await,
-                            }
-                        }));
-                    }
-                    PanelEffect::Log { text } => eprintln!("combined: {text}"),
+            if self.panel_queue.is_empty() {
+                self.panel_queue.extend(self.panels.take_effects());
+            }
+            let Some(effect) = self.panel_queue.pop_front() else {
+                return;
+            };
+            match effect {
+                PanelEffect::Check {
+                    space,
+                    panel,
+                    revision,
+                    source,
+                } => {
+                    let check = Arc::clone(&self.diagram_check);
+                    self.checking.push(Box::pin(async move {
+                        CheckDone {
+                            space,
+                            panel,
+                            revision,
+                            result: check.check(&source).await,
+                        }
+                    }));
+                }
+                PanelEffect::Log { text } => eprintln!("combined: {text}"),
+                effect => {
+                    self.panel_running = Some(self.panel_io.start(effect));
+                    return;
                 }
             }
         }
     }
 
-    /// Writes a save's files in order and stops at the first failure or conflict.
-    ///
-    /// A workspace save writes only into the project, never the fallback copy, and compares
-    /// each file with what the store last saw right before it writes it. A create or pin lists
-    /// the content file first, so `panel.json` is compared up front: nothing is written into a
-    /// folder that already holds one. The window between a compare and the rename stays open:
-    /// an outside write landing in it is overwritten (at create and pin it runs from the
-    /// up-front compare to the content write). A transient error in the up-front read counts
-    /// as a conflict. A scratch save is not compared, because only the daemon writes there.
-    async fn run_save(&self, at: &PanelFolder, files: Vec<crate::core::FileWrite>) -> SaveReport {
-        let mut written: Vec<(&'static str, ContentHash)> = Vec::new();
-        match at {
-            PanelFolder::Scratch(dir) => {
-                for file in files {
-                    match self.scratch.write(dir, file.file, file.bytes).await {
-                        Ok(outcome) => written.push((file.file, outcome.hash)),
-                        Err(error) => {
-                            return SaveReport {
-                                written,
-                                end: SaveEnd::Failed {
-                                    file: file.file,
-                                    error,
-                                },
-                            }
-                        }
-                    }
-                }
+    /// Applies what the lane's effect found. This and the buffer drains are the only changes to
+    /// the panel store while the lane is busy.
+    fn apply_lane_outcome(&mut self, outcome: LaneOutcome) {
+        let now = self.clock.now();
+        match outcome {
+            LaneOutcome::Watched { space, result } => self.watched(&space, result),
+            LaneOutcome::Listed { space, listing } => {
+                self.panels.apply_listing(&space, listing, now)
             }
-            PanelFolder::Workspace { space, panel } => {
-                let checks_first = files.first().is_some_and(|w| w.file != PANEL_FILE)
-                    && files.iter().any(|w| {
-                        w.file == PANEL_FILE && matches!(w.expected, Some(FileMark::Missing))
-                    });
-                if checks_first {
-                    let path = format!("{PANELS_DIR}/{panel}/{PANEL_FILE}");
-                    let read = self
-                        .store
-                        .read(space, &path, panel_file_bound(PANEL_FILE))
-                        .await;
-                    if !FileMark::Missing.matches_project(&read) {
-                        return SaveReport {
-                            written,
-                            end: SaveEnd::Conflict { file: PANEL_FILE },
-                        };
-                    }
-                }
-                for file in files {
-                    let path = format!("{PANELS_DIR}/{panel}/{}", file.file);
-                    if let Some(expected) = file.expected {
-                        let read = self
-                            .store
-                            .read(space, &path, panel_file_bound(file.file))
-                            .await;
-                        if !expected.matches_project(&read) {
-                            return SaveReport {
-                                written,
-                                end: SaveEnd::Conflict { file: file.file },
-                            };
-                        }
-                    }
-                    match self.store.write_project(space, &path, file.bytes).await {
-                        Ok(outcome) => written.push((file.file, outcome.hash)),
-                        Err(error) => {
-                            return SaveReport {
-                                written,
-                                end: SaveEnd::Failed {
-                                    file: file.file,
-                                    error,
-                                },
-                            }
-                        }
-                    }
-                }
+            LaneOutcome::ScratchListed { listing } => {
+                self.panels.apply_scratch_listing(listing, now)
             }
-        }
-        SaveReport {
-            written,
-            end: SaveEnd::Done,
+            LaneOutcome::Read { at, file, read } => {
+                self.panels
+                    .apply_read(&at, file, read, now, self.driver.core_mut())
+            }
+            LaneOutcome::Saved { ticket, report } => self.panels.apply_saved(ticket, report, now),
+            LaneOutcome::Deleted { ticket, report } => {
+                self.panels.apply_deleted(ticket, report, now)
+            }
         }
     }
 
-    /// Removes a panel's files. A workspace delete compares every listed file first and removes
-    /// nothing when one differs; then it removes them in order, then Finder's `.DS_Store`
-    /// (uncompared, and a failure is only logged), then the folder if it is empty. A folder
-    /// that stays behind with no `panel.json` is no panel, so that failure is only logged too.
-    async fn run_delete(
-        &self,
-        at: &PanelFolder,
-        files: Vec<(&'static str, FileMark)>,
-    ) -> SaveReport {
-        let done = |end| SaveReport {
-            written: Vec::new(),
-            end,
-        };
-        match at {
-            PanelFolder::Scratch(dir) => match self.scratch.remove(dir).await {
-                Ok(()) => done(SaveEnd::Done),
-                Err(error) => done(SaveEnd::Failed {
-                    file: SCRATCH_FILE,
-                    error,
-                }),
-            },
-            PanelFolder::Workspace { space, panel } => {
-                for (file, expected) in &files {
-                    let path = format!("{PANELS_DIR}/{panel}/{file}");
-                    let read = self.store.read(space, &path, panel_file_bound(file)).await;
-                    if !expected.matches_project(&read) {
-                        return done(SaveEnd::Conflict { file });
-                    }
-                }
-                for (file, _) in &files {
-                    let path = format!("{PANELS_DIR}/{panel}/{file}");
-                    if let Err(error) = self.store.remove_file(space, &path).await {
-                        return done(SaveEnd::Failed { file, error });
-                    }
-                }
-                let path = format!("{PANELS_DIR}/{panel}/{DS_STORE}");
-                if let Err(error) = self.store.remove_file(space, &path).await {
-                    log_remove_failure(&path, &error);
-                }
-                let folder = format!("{PANELS_DIR}/{panel}");
-                if let Err(error) = self.store.remove_dir(space, &folder).await {
-                    log_remove_failure(&folder, &error);
-                }
-                done(SaveEnd::Done)
+    /// A file under `.workspace/` of `space` changed. It is applied at once when the lane is
+    /// idle, and when it is next idle otherwise.
+    fn panel_change(&mut self, space: SpaceId, path: String) {
+        if self.panel_lane_idle() {
+            self.panels.apply_change(&space, &path, self.clock.now());
+        } else {
+            self.panel_deferred.push_back(Deferred::Change(space, path));
+        }
+    }
+
+    fn apply_check(&mut self, done: CheckDone) {
+        self.panels.apply_check(
+            &done.space,
+            &done.panel,
+            done.revision,
+            done.result,
+            self.clock.now(),
+        );
+    }
+
+    fn apply_deferred(&mut self, item: Deferred) {
+        match item {
+            Deferred::Change(space, path) => {
+                self.panels.apply_change(&space, &path, self.clock.now())
             }
+            Deferred::Check(done) => self.apply_check(done),
+            Deferred::AddSpaces => self.add_terminal_spaces(self.clock.now()),
+        }
+    }
+
+    /// Marks the watchers of every space whose panels changed, so each is sent the new list.
+    fn consume_panel_events(&mut self) {
+        for event in self.panels.take_events() {
+            let (PanelEvent::Changed { space, .. } | PanelEvent::Listing { space }) = event;
+            for conn in self.layouts.subscribers(&space) {
+                if let Some(state) = self.conns.get_mut(&conn).filter(|state| !state.closing) {
+                    state.panels_stale = true;
+                }
+            }
+        }
+    }
+
+    /// Marks the watchers that were sent the loading form of a space that has loaded since.
+    fn mark_loaded_watchers(&mut self) {
+        for (conn, state) in &mut self.conns {
+            if !state.panels_loading_sent {
+                continue;
+            }
+            match self.layouts.watched(*conn) {
+                Some(space) => {
+                    if !matches!(
+                        self.panels.list(space),
+                        Err(PanelApiError::SpaceLoading | PanelApiError::UnknownSpace)
+                    ) {
+                        state.panels_stale = true;
+                    }
+                }
+                None => state.panels_loading_sent = false,
+            }
+        }
+    }
+
+    /// The panel part of a settle pass. Answers go out at the first point where the lane is
+    /// idle, before a parked create or a deferred item can start new file work.
+    fn settle_panels(&mut self) {
+        loop {
+            self.pump_panels();
+            if !self.panel_lane_idle() {
+                break;
+            }
+            self.send_panel_answers();
+            if let Some(call) = self.parked_create.take() {
+                self.run_parked_create(call);
+                continue;
+            }
+            match self.panel_deferred.pop_front() {
+                Some(item) => {
+                    self.apply_deferred(item);
+                    continue;
+                }
+                None => break,
+            }
+        }
+        self.consume_panel_events();
+        self.mark_loaded_watchers();
+        if self.panel_lane_idle() {
+            self.arm_panels();
+        } else {
+            self.panel_armed = false;
         }
     }
 
@@ -1358,12 +1528,8 @@ impl Server {
             self.queue_layouts();
             self.run_spawn_effects().await;
             self.queue_spawn_replies();
-            self.run_panel_effects().await;
-            // Nothing consumes the events yet.
-            drop(self.panels.take_events());
-            self.send_panel_answers();
+            self.settle_panels();
             self.arm_layouts();
-            self.arm_panels();
             for conn in self.driver.take_disconnects() {
                 self.remove(conn);
             }
@@ -1397,6 +1563,8 @@ impl Server {
         self.stats.flush_pass(gap);
         let max_bytes = self.options.max_pull_bytes;
         let conns: Vec<ConnectionId> = self.conns.keys().copied().collect();
+        // Each space's `panels` body is built once per pass and given each connection's request.
+        let mut bodies: BTreeMap<SpaceId, (Panels, bool)> = BTreeMap::new();
         for conn in conns {
             let Some(state) = self.conns.get_mut(&conn) else {
                 continue;
@@ -1415,13 +1583,27 @@ impl Server {
             state.answers.clear();
             state.stale = false;
             let mut answered = false;
-            for item in state.layout_out.drain(..) {
+            let mut panels_answered = false;
+            for item in std::mem::take(&mut state.layout_out) {
                 match item {
                     LayoutOut::Answer(request, space) => {
                         if let Some(message) = layout_message(&self.layouts, &space, Some(request))
                         {
                             answered = true;
                             batch.push(message);
+                            // The answer to the watch is followed at once by the space's panels.
+                            if state.watch_unanswered == Some(request) {
+                                state.watch_unanswered = None;
+                                state.panels_stale = false;
+                                panels_answered = true;
+                                batch.push(DaemonMessage::Panels(panels_for(
+                                    &self.panels,
+                                    &mut bodies,
+                                    state,
+                                    &space,
+                                    Some(request),
+                                )));
+                            }
                         }
                     }
                     LayoutOut::Error(error) => batch.push(DaemonMessage::Error(error)),
@@ -1434,7 +1616,47 @@ impl Server {
                     .and_then(|space| layout_message(&self.layouts, space, None));
                 batch.extend(push);
             }
+            let watched = self.layouts.watched(conn);
+            if panels_push_due(
+                state.panels_stale,
+                state.watch_unanswered,
+                panels_answered,
+                watched.is_some(),
+            ) {
+                if let Some(space) = watched {
+                    batch.push(DaemonMessage::Panels(panels_for(
+                        &self.panels,
+                        &mut bodies,
+                        state,
+                        space,
+                        None,
+                    )));
+                }
+            }
+            if state.watch_unanswered.is_none() {
+                state.panels_stale = false;
+            }
             batch.extend(state.spawn_out.drain(..));
+            for item in state.panel_out.drain(..) {
+                batch.push(match item {
+                    PanelOut::Get {
+                        request,
+                        space,
+                        panel,
+                    } => match self.panels.get(&space, &panel) {
+                        Ok((view, source)) => {
+                            DaemonMessage::Panel(panel_reply(request, &view, source))
+                        }
+                        Err(error) => DaemonMessage::Error(ErrorMessage {
+                            code: panel_error_code(&error),
+                            message: error.to_string(),
+                            request: Some(request),
+                            attachment: None,
+                        }),
+                    },
+                    PanelOut::Error(error) => DaemonMessage::Error(error),
+                });
+            }
             batch.extend(state.mcp_out.drain(..));
             batch.extend(self.driver.core_mut().pull(conn, max_bytes, now));
             if batch.is_empty() {
@@ -1449,6 +1671,79 @@ impl Server {
 
 /// The space's layout as a message, answering `request` or pushed when it is `None`. Nothing
 /// before the space's first read.
+/// Whether a `panels` push is due: the watched space's panels changed, the connection's watch
+/// has been answered, and that answer did not already carry the list. A push never precedes
+/// the `layout` that answers the connection's watch.
+fn panels_push_due(
+    stale: bool,
+    watch_unanswered: Option<RequestId>,
+    answered_now: bool,
+    watching: bool,
+) -> bool {
+    stale && watch_unanswered.is_none() && !answered_now && watching
+}
+
+/// The `panels` message for `space` with `request`, and whether it is the loading form, which
+/// the connection is then owed a replacement for.
+fn panels_for(
+    panels: &PanelStore,
+    bodies: &mut BTreeMap<SpaceId, (Panels, bool)>,
+    state: &mut ConnState,
+    space: &SpaceId,
+    request: Option<RequestId>,
+) -> Panels {
+    let (body, loading) = bodies
+        .entry(space.clone())
+        .or_insert_with(|| panels_body(panels, space));
+    state.panels_loading_sent = *loading;
+    Panels {
+        request,
+        ..body.clone()
+    }
+}
+
+fn panels_body(panels: &PanelStore, space: &SpaceId) -> (Panels, bool) {
+    match panels.list(space) {
+        Ok(list) => (panels_message(None, space, list), false),
+        Err(PanelApiError::SpaceLoading | PanelApiError::UnknownSpace) => {
+            (panels_loading(None, space), true)
+        }
+        Err(error) => (
+            Panels {
+                request: None,
+                space: space.0.clone(),
+                panels: Vec::new(),
+                skipped: Vec::new(),
+                error: Some(error.to_string()),
+            },
+            false,
+        ),
+    }
+}
+
+/// The error code of a refused `get_panel`. Every variant is named, so a new one is a compile
+/// error here.
+fn panel_error_code(error: &PanelApiError) -> ErrorCode {
+    match error {
+        PanelApiError::UnknownSpace => ErrorCode::UnknownSpace,
+        PanelApiError::UnknownPanel { .. } => ErrorCode::UnknownPanel,
+        PanelApiError::SpaceLoading
+        | PanelApiError::Removed { .. }
+        | PanelApiError::ReadOnly
+        | PanelApiError::InvalidId { .. }
+        | PanelApiError::IdTaken { .. }
+        | PanelApiError::InvalidField { .. }
+        | PanelApiError::PanelLimit { .. }
+        | PanelApiError::TooLarge { .. }
+        | PanelApiError::NotScratch { .. }
+        | PanelApiError::ListingFailed { .. }
+        | PanelApiError::ScratchListingFailed { .. }
+        | PanelApiError::PanelFileInvalid { .. }
+        | PanelApiError::Unreadable { .. }
+        | PanelApiError::Stopped => ErrorCode::InvalidRequest,
+    }
+}
+
 fn layout_message(
     layouts: &Layouts,
     space: &SpaceId,
@@ -1466,6 +1761,21 @@ fn layout_message(
     })
 }
 
-fn log_remove_failure(path: &str, error: &StoreError) {
-    eprintln!("combined: cannot remove .workspace/{path}: {error}");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_push_precedes_the_answer_to_a_watch() {
+        let watch = Some(RequestId(4));
+        // Stale and watching, but the watch is unanswered: the answer carries the list.
+        assert!(!panels_push_due(true, watch, false, true));
+        assert!(!panels_push_due(true, watch, true, true));
+        // Once answered, a stale list is pushed...
+        assert!(panels_push_due(true, None, false, true));
+        // ...unless the answer itself carried it, nothing changed, or nothing is watched.
+        assert!(!panels_push_due(true, None, true, true));
+        assert!(!panels_push_due(false, None, false, true));
+        assert!(!panels_push_due(true, None, false, false));
+    }
 }

@@ -8,22 +8,25 @@ use std::thread;
 
 use combine_protocol::{
     read_message, write_message, ClientMessage, DaemonMessage, ErrorCode, HostId, LayoutSnapshot,
-    ReadError, RequestId, WatchTerminals,
+    Panels, ReadError, RequestId, WatchTerminals,
 };
 
 use super::attachments::Attachments;
 use super::outbound::{Outbound, Outgoing, RequestKind};
+use super::panels::PanelReply;
 use super::spawn::SpawnReply;
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
 use super::terminals::space_views;
 use super::text::display_text;
 
-/// Where a host's layout traffic goes. The three methods mirror the layout methods of
-/// [`HostEvents`](super::supervisor::HostEvents).
+/// Where a host's layout traffic goes, with the panel list that rides the layout watch. The
+/// methods mirror the layout and panel methods of [`HostEvents`](super::supervisor::HostEvents).
 pub trait LayoutSink: Send + Sync {
     fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot);
     fn layout_error(&self, host_id: &HostId, request: RequestId, code: ErrorCode, message: String);
     fn layout_disconnected(&self, host_id: &HostId);
+    fn panels(&self, _host_id: &HostId, _panels: Panels) {}
+    fn panel_reply(&self, _host_id: &HostId, _reply: PanelReply) {}
 }
 
 pub struct LivePhase {
@@ -88,6 +91,10 @@ impl SessionPhase for LivePhase {
                         DaemonMessage::Layout(reply) => {
                             events.layout(host_id, reply.request, reply.layout);
                         }
+                        DaemonMessage::Panels(panels) => events.panels(host_id, panels),
+                        DaemonMessage::Panel(panel) => {
+                            events.panel_reply(host_id, PanelReply::Panel(panel));
+                        }
                         DaemonMessage::Templates(templates) => {
                             events.spawn_reply(host_id, SpawnReply::Templates(templates));
                         }
@@ -102,6 +109,14 @@ impl SessionPhase for LivePhase {
                                         request,
                                         error.code,
                                         display_text(error.trimmed_message()),
+                                    ),
+                                    Some(RequestKind::Panel) => events.panel_reply(
+                                        host_id,
+                                        PanelReply::Error {
+                                            request,
+                                            code: error.code,
+                                            message: display_text(error.trimmed_message()),
+                                        },
                                     ),
                                     Some(RequestKind::Spawn) => events.spawn_reply(
                                         host_id,
@@ -127,6 +142,7 @@ impl SessionPhase for LivePhase {
             drop(registration);
             self.attachments.session_ended_by(host_id, session);
             events.layout_disconnected(host_id);
+            events.panel_reply(host_id, PanelReply::Disconnected);
             events.spawn_reply(host_id, SpawnReply::Disconnected);
             let _ = tx.send(Outgoing::Stop);
             let _ = writer_thread.join();
@@ -149,6 +165,7 @@ mod tests {
         LayoutNode, LayoutSnapshot, ListTemplates, MutateLayout, RequestId, Seq, SpaceInfo,
         SpaceKind, Spawned, Started, TemplateInfo, Templates, TermId, Terminals, WatchLayout,
     };
+    use combine_protocol::{CreatedBy, GetPanel, Panel, PanelState, PanelSummary, Renderer};
 
     use super::super::attachments::StreamId;
     use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
@@ -384,6 +401,12 @@ mod tests {
         }
         fn layout_disconnected(&self, host_id: &HostId) {
             self.0.layout_disconnected(host_id);
+        }
+        fn panels(&self, host_id: &HostId, panels: Panels) {
+            self.0.panels(host_id, panels);
+        }
+        fn panel_reply(&self, host_id: &HostId, reply: PanelReply) {
+            self.0.panel_reply(host_id, reply);
         }
     }
 
@@ -698,6 +721,97 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert_eq!(end_session(rig), SessionEnd::Closed);
         assert_eq!(recv(&received), (host_id(HOST_A), SpawnReply::Disconnected));
+    }
+
+    fn panel_content(request: RequestId) -> Panel {
+        Panel {
+            request,
+            space: "/work".to_string(),
+            id: "notes".to_string(),
+            revision: 12,
+            renderer: Renderer::Markdown,
+            source: "# Notes\n".to_string(),
+            state: PanelState::Validated,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn panels_and_panel_replies_route_to_the_events() {
+        let (mut rig, received) = layout_rig();
+        let host = host_id(HOST_A);
+        let list = Panels {
+            request: Some(RequestId(7)),
+            space: "/work".to_string(),
+            panels: vec![PanelSummary {
+                id: "notes".to_string(),
+                title: None,
+                renderer: Renderer::Markdown,
+                revision: 12,
+                state: PanelState::Validated,
+                error: None,
+                created_by: Some(CreatedBy::User),
+            }],
+            skipped: Vec::new(),
+            error: None,
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::Panels(list.clone())).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::Panels(host.clone(), list.clone())
+        );
+        let push = Panels {
+            request: None,
+            ..list
+        };
+        write_message(&mut rig.daemon, &DaemonMessage::Panels(push.clone())).expect("write");
+        assert_eq!(recv(&received), LayoutEvent::Panels(host.clone(), push));
+        let fetched = rig
+            .outbound
+            .send(&host, RequestKind::Panel, |request| {
+                ClientMessage::GetPanel(GetPanel {
+                    request,
+                    space: "/work".to_string(),
+                    panel: "gone".to_string(),
+                })
+            })
+            .expect("registered");
+        read_client(&mut rig.daemon);
+        let panel = panel_content(RequestId(9));
+        write_message(&mut rig.daemon, &DaemonMessage::Panel(panel.clone())).expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::PanelReply(host.clone(), PanelReply::Panel(panel))
+        );
+        write_message(
+            &mut rig.daemon,
+            &error_for(fetched, ErrorCode::UnknownPanel, "the space\nhas no panel"),
+        )
+        .expect("write");
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::PanelReply(
+                host,
+                PanelReply::Error {
+                    request: fetched,
+                    code: ErrorCode::UnknownPanel,
+                    message: "the space has no panel".to_string(),
+                }
+            )
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
+    fn a_session_end_sends_layout_disconnected_then_panel_disconnected() {
+        let (rig, received) = layout_rig();
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        assert_eq!(recv(&received), LayoutEvent::Disconnected(host_id(HOST_A)));
+        assert_eq!(
+            recv(&received),
+            LayoutEvent::PanelReply(host_id(HOST_A), PanelReply::Disconnected)
+        );
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

@@ -158,7 +158,7 @@ pub fn spawn_attempts(control: &FakeControl) -> usize {
     control.spawn_specs().len()
 }
 
-/// The next `templates` message, which must answer `request`. Pushes are skipped.
+/// The next `templates` message, which must answer `request`. Pushes and `panels` frames are skipped.
 pub fn expect_templates(client: &WireClient, request: u64) -> Templates {
     loop {
         match client.recv() {
@@ -166,13 +166,13 @@ pub fn expect_templates(client: &WireClient, request: u64) -> Templates {
                 assert_eq!(templates.request, RequestId(request));
                 return templates;
             }
-            DaemonMessage::Terminals(_) => {}
+            DaemonMessage::Terminals(_) | DaemonMessage::Panels(_) => {}
             other => panic!("expected templates, got {other:?}"),
         }
     }
 }
 
-/// The next `spawned` message, which must answer `request`. Pushes are skipped.
+/// The next `spawned` message, which must answer `request`. Pushes and `panels` frames are skipped.
 pub fn expect_spawned(client: &WireClient, request: u64) -> Spawned {
     loop {
         match client.recv() {
@@ -180,13 +180,13 @@ pub fn expect_spawned(client: &WireClient, request: u64) -> Spawned {
                 assert_eq!(spawned.request, RequestId(request));
                 return spawned;
             }
-            DaemonMessage::Terminals(_) => {}
+            DaemonMessage::Terminals(_) | DaemonMessage::Panels(_) => {}
             other => panic!("expected spawned, got {other:?}"),
         }
     }
 }
 
-/// The next error, which must carry `code` and answer `request`. Pushes are skipped.
+/// The next error, which must carry `code` and answer `request`. Pushes and `panels` frames are skipped.
 pub fn expect_error(client: &WireClient, request: u64, code: ErrorCode) -> ErrorMessage {
     loop {
         match client.recv() {
@@ -195,7 +195,7 @@ pub fn expect_error(client: &WireClient, request: u64, code: ErrorCode) -> Error
                 assert_eq!(error.request, Some(RequestId(request)));
                 return error;
             }
-            DaemonMessage::Terminals(_) => {}
+            DaemonMessage::Terminals(_) | DaemonMessage::Panels(_) => {}
             other => panic!("expected an error, got {other:?}"),
         }
     }

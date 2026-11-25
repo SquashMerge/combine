@@ -3,11 +3,15 @@ import { resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import {
   CLIENT_STATE_COMMAND,
+  CSP_PROBE_REPORT_COMMAND,
+  GET_PANEL_COMMAND,
   HOSTS_EVENT,
   HOSTS_SNAPSHOT_COMMAND,
   LAYOUT_EVENT,
   MUTATE_LAYOUT_COMMAND,
   OPEN_URL_COMMAND,
+  PANELS_EVENT,
+  REPORT_RENDER_COMMAND,
   RETRY_HOST_COMMAND,
   SET_CLIENT_SPACE_STATE_COMMAND,
   SET_LAST_SPACE_COMMAND,
@@ -32,6 +36,7 @@ const contract = JSON.parse(
 ) as {
   hostsEvent: string;
   layoutEvent: string;
+  panelsEvent: string;
   commands: {
     snapshot: string;
     retry: string;
@@ -54,6 +59,9 @@ const contract = JSON.parse(
     terminalInput: string;
     terminalAutomaticReply: string;
     openUrl: string;
+    getPanel: string;
+    reportRender: string;
+    cspProbeReport: string;
   };
 };
 
@@ -81,4 +89,8 @@ it('matches the shared ipc contract fixture', () => {
   expect(TERMINAL_INPUT_COMMAND).toBe(contract.commands.terminalInput);
   expect(TERMINAL_AUTOMATIC_REPLY_COMMAND).toBe(contract.commands.terminalAutomaticReply);
   expect(OPEN_URL_COMMAND).toBe(contract.commands.openUrl);
+  expect(PANELS_EVENT).toBe(contract.panelsEvent);
+  expect(GET_PANEL_COMMAND).toBe(contract.commands.getPanel);
+  expect(REPORT_RENDER_COMMAND).toBe(contract.commands.reportRender);
+  expect(CSP_PROBE_REPORT_COMMAND).toBe(contract.commands.cspProbeReport);
 });

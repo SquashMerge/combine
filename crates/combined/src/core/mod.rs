@@ -11,7 +11,9 @@ mod machine;
 mod ownership;
 mod panel_file;
 mod panel_store;
+mod panel_wire;
 mod panels;
+mod render_status;
 mod spaces;
 mod spawn;
 mod terminal_list;
@@ -45,11 +47,18 @@ pub use panel_store::{
     PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd, SaveReport, SaveTicket,
     MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
 };
+pub use panel_wire::{
+    panel_reply, panel_summary, panels_loading, panels_message, PANELS_LOADING, SKIPPED_TRIMMED,
+    TRIMMED_REASON,
+};
 pub use panels::{
     normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,
     template_spec, valid_panel_folder, CwdRefusal, PanelSkip, TerminalTemplate, DEFAULT_COLS,
     DEFAULT_ROWS, MAX_PANELS, PANELS_DIR, PANEL_FILE, PANEL_ID_MAX_BYTES, PANEL_LIST_MAX,
     PANEL_MAX_BYTES, REASON_MAX_BYTES,
+};
+pub use render_status::{
+    ClientRender, RenderStatuses, RENDER_ERROR_CODE_MAX, RENDER_STATUS_MAX_PER_CONNECTION,
 };
 pub use spaces::Spaces;
 pub use spawn::{PanelRead, SpawnEffect, SpawnTicket, Spawns, MAX_SPAWN_IN_FLIGHT};

@@ -7,11 +7,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use combine_protocol::{HostId, TermId};
+use combine_protocol::{
+    ClientMessage, DaemonMessage, ErrorCode, HostId, Layout, Panels, RequestId, TermId, WatchLayout,
+};
 use combine_protocol::{PanelState, Renderer};
 use combined::adapters::fs::data_dir::DataDir;
 use combined::adapters::loader::DiagramLimits;
@@ -423,6 +427,188 @@ impl FileStore for RacingStore {
     }
 }
 
+/// A file store call a [`StallingStore`] saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreOp {
+    Read(String),
+    List(String),
+    Write(String, Vec<u8>),
+    Remove(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StallKind {
+    Read,
+    List,
+}
+
+struct StallSlot {
+    kind: StallKind,
+    space: SpaceId,
+    path: String,
+    release: mpsc::Receiver<()>,
+}
+
+/// Frees the call a [`StallingStore`] is holding when it is released or dropped.
+pub struct Stall {
+    release: Option<mpsc::Sender<()>>,
+}
+
+impl Stall {
+    pub fn release(mut self) {
+        self.release.take();
+    }
+}
+
+/// A [`MemoryFileStore`] whose next read or listing of a chosen path blocks its thread, with a
+/// record of every call it saw.
+pub struct StallingStore {
+    inner: Arc<MemoryFileStore>,
+    slots: Mutex<Vec<StallSlot>>,
+    entered: AtomicBool,
+    log: Mutex<Vec<StoreOp>>,
+}
+
+impl StallingStore {
+    pub fn new(inner: Arc<MemoryFileStore>) -> StallingStore {
+        StallingStore {
+            inner,
+            slots: Mutex::new(Vec::new()),
+            entered: AtomicBool::new(false),
+            log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The next `read` of `path` in `space` blocks in `recv`, not awaiting, until the returned
+    /// guard is released or dropped.
+    pub fn stall(&self, space: &SpaceId, path: &str) -> Stall {
+        self.arm_stall(StallKind::Read, space, path)
+    }
+
+    /// As [`StallingStore::stall`], for the next `list_dir`.
+    pub fn stall_list(&self, space: &SpaceId, path: &str) -> Stall {
+        self.arm_stall(StallKind::List, space, path)
+    }
+
+    fn arm_stall(&self, kind: StallKind, space: &SpaceId, path: &str) -> Stall {
+        let (release, wait) = mpsc::channel();
+        self.entered.store(false, Ordering::SeqCst);
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(StallSlot {
+                kind,
+                space: space.clone(),
+                path: path.to_string(),
+                release: wait,
+            });
+        Stall {
+            release: Some(release),
+        }
+    }
+
+    /// Whether a stalled call has started.
+    pub fn entered(&self) -> bool {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    /// Every read, listing, write and removal so far, in the order the calls started.
+    pub fn log(&self) -> Vec<StoreOp> {
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record(&self, op: StoreOp) {
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(op);
+    }
+
+    fn block_if_stalled(&self, kind: StallKind, space: &SpaceId, path: &str) {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            let at = slots
+                .iter()
+                .position(|slot| slot.kind == kind && &slot.space == space && slot.path == path);
+            at.map(|at| slots.remove(at))
+        };
+        if let Some(slot) = slot {
+            self.entered.store(true, Ordering::SeqCst);
+            let _ = slot.release.recv();
+        }
+    }
+}
+
+#[async_trait]
+impl FileStore for StallingStore {
+    async fn read(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<StoredFile>, StoreError> {
+        self.record(StoreOp::Read(path.to_string()));
+        self.block_if_stalled(StallKind::Read, space, path);
+        self.inner.read(space, path, max_bytes).await
+    }
+
+    async fn write(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.record(StoreOp::Write(path.to_string(), bytes.clone()));
+        self.inner.write(space, path, bytes).await
+    }
+
+    async fn write_project(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.record(StoreOp::Write(path.to_string(), bytes.clone()));
+        self.inner.write_project(space, path, bytes).await
+    }
+
+    async fn remove_file(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        self.record(StoreOp::Remove(path.to_string()));
+        self.inner.remove_file(space, path).await
+    }
+
+    async fn remove_dir(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
+        self.record(StoreOp::Remove(path.to_string()));
+        self.inner.remove_dir(space, path).await
+    }
+
+    async fn revision(&self, space: &SpaceId) -> Result<StoreRevision, StoreError> {
+        self.inner.revision(space).await
+    }
+
+    async fn list_dir(
+        &self,
+        space: &SpaceId,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Option<DirListing>, StoreError> {
+        self.record(StoreOp::List(path.to_string()));
+        self.block_if_stalled(StallKind::List, space, path);
+        self.inner.list_dir(space, path, max_entries).await
+    }
+
+    async fn watch(&self, space: &SpaceId) -> Result<(), StoreError> {
+        self.inner.watch(space).await
+    }
+
+    fn changes(&self) -> BoxStream<'static, FileChange> {
+        self.inner.changes()
+    }
+}
+
 /// A [`PanelServer`] with the panel API's helpers: the project folder's panels are made, read
 /// and counted through it. `restart` keeps the data dir and every store.
 pub struct PanelRig {
@@ -460,6 +646,19 @@ impl PanelRig {
     /// A rig whose file store is a [`RacingStore`] over the rig's memory store.
     pub fn racing() -> (PanelRig, Arc<RacingStore>) {
         PanelRig::racing_with(ServeOptions::default())
+    }
+
+    /// A rig whose file store is a [`StallingStore`] over the rig's memory store.
+    pub fn stalling() -> (PanelRig, Arc<StallingStore>) {
+        let store = Arc::new(MemoryFileStore::new());
+        let stalling = Arc::new(StallingStore::new(Arc::clone(&store)));
+        let served: Arc<dyn FileStore> = stalling.clone();
+        let mut inner = PanelServer::start(PanelServerConfig {
+            served: Some(served),
+            ..PanelServerConfig::default()
+        });
+        inner.store = store;
+        (PanelRig { inner }, stalling)
     }
 
     /// A rig serving with `options`.
@@ -622,5 +821,45 @@ pub fn settled_read_count(store: &MemoryFileStore, space: &SpaceId, path: &str, 
             Instant::now() < deadline,
             "the read count of {path} never settled at {min} or more; it is {now}"
         );
+    }
+}
+
+/// Sends `watch_layout` for `space` and returns the `layout` that answers it and the `panels`
+/// that follows it at once. Anything between the two fails the test.
+pub fn watch_panels(client: &mut WireClient, space: &SpaceId, request: u64) -> (Layout, Panels) {
+    let deadline = Instant::now() + WAIT;
+    let layout = loop {
+        client.send(&ClientMessage::WatchLayout(WatchLayout {
+            request: RequestId(request),
+            space: space.0.clone(),
+        }));
+        match client.recv() {
+            DaemonMessage::Layout(layout) => break layout,
+            // The terminal that made the project a space may not have been seen yet.
+            DaemonMessage::Error(error)
+                if error.code == ErrorCode::UnknownSpace && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => panic!("expected the layout, got {other:?}"),
+        }
+    };
+    assert_eq!(layout.request, Some(RequestId(request)));
+    let panels = match client.recv() {
+        DaemonMessage::Panels(panels) => panels,
+        other => panic!("expected the panels right after the layout, got {other:?}"),
+    };
+    assert_eq!(panels.request, Some(RequestId(request)));
+    (layout, panels)
+}
+
+/// The next `panels` message, skipping any other. `None` when none arrives within `within`.
+pub fn next_panels(client: &WireClient, within: Duration) -> Option<Panels> {
+    let deadline = Instant::now() + within;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let DaemonMessage::Panels(panels) = client.recv_within(left)? {
+            return Some(panels);
+        }
     }
 }

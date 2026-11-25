@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+csp-probe = []
+
 [dependencies]
 combine-protocol = { path = "../../crates/combine-protocol" }
 serde = { version = "=1.0.229", features = ["derive"] }
