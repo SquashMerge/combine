@@ -286,6 +286,26 @@ fn a_placement_in_an_unwritable_project_writes_the_fallback() {
     assert!(!work.join(".workspace").exists());
 }
 
+/// Takes the placed tab out the way someone editing the file would, and waits until the daemon
+/// has read the edit: the layout then holds no panel, and no placement is waiting. Returns the
+/// layout write count, which nothing may change from here on.
+fn settle_without_the_tab(rig: &PanelRig) -> u64 {
+    let reads = rig.store.read_count(&rig.space, LAYOUT_FILE);
+    rig.store
+        .write_outside(&rig.space, LAYOUT_FILE, TWO_TILES.as_bytes().to_vec());
+    assert!(
+        wait_until(WAIT, || rig.store.read_count(&rig.space, LAYOUT_FILE)
+            > reads),
+        "the daemon never read the edited layout"
+    );
+    std::thread::sleep(QUIET);
+    rig.write_count(LAYOUT_FILE)
+}
+
+fn the_two_empty_tiles() -> Option<Vec<Tile>> {
+    Some(vec![tile("main", &[], None), tile("side", &[], None)])
+}
+
 #[test]
 fn a_repeated_key_adds_no_second_tab() {
     let (rig, mut wire) = rig_and_wire(PROMPT);
@@ -293,13 +313,14 @@ fn a_repeated_key_adds_no_second_tab() {
     args["idempotency_key"] = json!("K");
     assert!(!wire.tool("create_panel", args.clone()).is_error);
     wait_stored(&rig, &[tile("main", &["k1"], Some("k1"))]);
+    let writes = settle_without_the_tab(&rig);
 
     let again = wire.tool("create_panel", args);
     assert_eq!(again.body["panel"], "k1");
     std::thread::sleep(QUIET);
 
-    assert_eq!(rig.write_count(LAYOUT_FILE), 1);
-    assert_eq!(stored(&rig), Some(vec![tile("main", &["k1"], Some("k1"))]));
+    assert_eq!(rig.write_count(LAYOUT_FILE), writes);
+    assert_eq!(stored(&rig), the_two_empty_tiles());
 }
 
 #[test]
@@ -307,13 +328,15 @@ fn an_update_does_not_place_again() {
     let (rig, mut wire) = rig_and_wire(PROMPT);
     assert!(!wire.tool("create_panel", markdown_args("u")).is_error);
     wait_stored(&rig, &[tile("main", &["u"], Some("u"))]);
+    let writes = settle_without_the_tab(&rig);
 
     let updated = wire.tool("update_panel", json!({"panel": "u", "content": "two"}));
     assert!(!updated.is_error, "{updated:?}");
     rig.wait_state("u", PanelState::Validated);
     std::thread::sleep(QUIET);
 
-    assert_eq!(rig.write_count(LAYOUT_FILE), 1);
+    assert_eq!(rig.write_count(LAYOUT_FILE), writes);
+    assert_eq!(stored(&rig), the_two_empty_tiles());
 }
 
 #[test]
@@ -356,6 +379,7 @@ fn a_restart_places_nothing_again() {
     let (mut rig, mut wire) = rig_and_wire(PROMPT);
     assert!(!wire.tool("create_panel", markdown_args("r")).is_error);
     wait_stored(&rig, &[tile("main", &["r"], Some("r"))]);
+    let writes = settle_without_the_tab(&rig);
     let written = rig.bytes(LAYOUT_FILE);
     drop(wire);
 
@@ -363,8 +387,9 @@ fn a_restart_places_nothing_again() {
     rig.wait_state("r", PanelState::Validated);
     std::thread::sleep(QUIET);
 
-    assert_eq!(rig.write_count(LAYOUT_FILE), 1);
+    assert_eq!(rig.write_count(LAYOUT_FILE), writes);
     assert_eq!(rig.bytes(LAYOUT_FILE), written);
+    assert_eq!(stored(&rig), the_two_empty_tiles());
 }
 
 #[test]
