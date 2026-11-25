@@ -52,7 +52,7 @@ pub enum PanelCall {
 pub struct PanelHandle(mpsc::Sender<PanelCall>);
 
 fn stopped() -> PanelApiError {
-    PanelApiError::Store("the server has stopped".into())
+    PanelApiError::Stopped
 }
 
 impl PanelHandle {

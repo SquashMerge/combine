@@ -57,10 +57,11 @@ fn the_largest_view_panel_file_encodes_within_8192() {
         created_by: Some(CreatedBy::Agent {
             slot: Some("\"".repeat(256)),
         }),
+        placement: Some("\"".repeat(256)),
     };
     let bytes = encode_view_panel(&file);
-    // 144 bytes of fixed text plus 3,072 of fully escaped fields; far below the 8,192 bound.
-    assert_eq!(bytes.len(), 3_216);
+    // 163 bytes of fixed text plus 3,584 of fully escaped fields; far below the 8,192 bound.
+    assert_eq!(bytes.len(), 3_747);
     assert!(bytes.len() <= PANEL_MAX_BYTES as usize);
     assert_eq!(parse_view_panel("p", &bytes), Ok(file));
 }
@@ -72,6 +73,7 @@ fn encode_writes_the_fields_in_order_with_a_trailing_newline() {
         title: Some("Flow".to_owned()),
         idempotency_key: None,
         created_by: Some(CreatedBy::User),
+        placement: Some("main".to_owned()),
     };
     let text = String::from_utf8(encode_view_panel(&file)).unwrap();
     assert!(text.ends_with("}\n"));
@@ -79,9 +81,32 @@ fn encode_writes_the_fields_in_order_with_a_trailing_newline() {
     let renderer = text.find("\"renderer\"").unwrap();
     let title = text.find("\"title\"").unwrap();
     let created_by = text.find("\"created_by\"").unwrap();
-    assert!(version < renderer && renderer < title && title < created_by);
+    let placement = text.find("\"placement\"").unwrap();
+    assert!(version < renderer && renderer < title && title < created_by && created_by < placement);
     assert!(!text.contains("idempotency_key"));
     assert!(!text.contains("\"id\""));
+}
+
+#[test]
+fn placement_round_trips_and_a_file_without_it_parses() {
+    let file = ViewPanelFile {
+        renderer: Renderer::Markdown,
+        title: None,
+        idempotency_key: None,
+        created_by: None,
+        placement: Some("main".to_owned()),
+    };
+    let bytes = encode_view_panel(&file);
+    assert!(String::from_utf8(bytes.clone())
+        .unwrap()
+        .contains("\"placement\": \"main\""));
+    assert_eq!(parse_view_panel("p", &bytes), Ok(file));
+    let bare = parse(r#"{"version":1,"renderer":"markdown"}"#).unwrap();
+    assert_eq!(bare.placement, None);
+    assert!(!String::from_utf8(encode_view_panel(&bare))
+        .unwrap()
+        .contains("placement"));
+    assert!(parse(r#"{"version":1,"renderer":"markdown","placement":""}"#).is_err());
 }
 
 fn parse(json: &str) -> Result<ViewPanelFile, PanelSkip> {
@@ -137,12 +162,19 @@ fn view_panel_parse_checks_run_in_order_with_their_texts() {
             .to_string(),
         "created_by.slot must be 1 to 256 bytes with no control characters"
     );
+    assert_eq!(
+        parse(r#"{"version":1,"renderer":"markdown","placement":"a\nb"}"#)
+            .unwrap_err()
+            .to_string(),
+        "placement must be a tile ID of 1 to 256 bytes with no control characters"
+    );
     let file = parse(
         r#"{"version":1,"id":"p","renderer":"markdown","extra":true,
-            "created_by":{"type":"agent","slot":null}}"#,
+            "created_by":{"type":"agent","slot":null},"placement":"main"}"#,
     )
     .unwrap();
     assert_eq!(file.created_by, Some(CreatedBy::Agent { slot: None }));
+    assert_eq!(file.placement.as_deref(), Some("main"));
 }
 
 #[test]

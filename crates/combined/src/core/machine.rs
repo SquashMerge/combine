@@ -36,7 +36,6 @@ const UNEXPECTED_WATCH: &str = "unexpected watch_terminals";
 const UNEXPECTED_LAYOUT: &str = "unexpected layout message";
 const UNEXPECTED_SPAWN: &str = "unexpected spawn message";
 const UNEXPECTED_PANEL: &str = "panel requests are not supported by this daemon yet";
-const UNEXPECTED_MCP: &str = "the MCP channel is not supported by this daemon yet";
 const UNKNOWN_TERMINAL: &str = "unknown terminal";
 const ATTACH_FAILED: &str = "the backend could not attach";
 const REFUSED_INPUT: &str = "the backend refused input for this attachment";
@@ -460,14 +459,8 @@ impl Core {
                 Some(pin.request),
                 None,
             ),
-            ClientMessage::McpOpen(open) => self.send_error(
-                connection,
-                ErrorCode::InvalidRequest,
-                UNEXPECTED_MCP,
-                Some(open.request),
-                None,
-            ),
-            ClientMessage::ReportRender(_) | ClientMessage::Mcp(_) => {}
+            // The server answers mcp_open and mcp itself (rpc/server.rs); they never reach core. report_render waits for M2-S5.
+            ClientMessage::McpOpen(_) | ClientMessage::ReportRender(_) | ClientMessage::Mcp(_) => {}
             ClientMessage::UnwatchLayout(_) => self.send_error(
                 connection,
                 ErrorCode::InvalidRequest,
