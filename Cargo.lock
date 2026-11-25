@@ -368,6 +368,9 @@ name = "combine"
 version = "0.0.0"
 dependencies = [
  "combine-protocol",
+ "combined",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
