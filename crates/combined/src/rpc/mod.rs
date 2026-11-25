@@ -12,14 +12,16 @@ use combine_protocol::HostId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core::{Driver, LayoutTiming, PanelTiming, TerminalList};
+use crate::mcp_server::McpAudit;
 use crate::model::Millis;
-use crate::ports::{DiagramCheck, FileStore, ProjectDirs, ScratchStore, WallClock};
+use crate::ports::{CallerIdentity, DiagramCheck, FileStore, ProjectDirs, ScratchStore, WallClock};
 use crate::wiring::clock::MonotonicClock;
 use crate::wiring::ids::IdReservation;
 
 pub mod connect;
 mod connection;
 pub mod flush;
+mod mcp_channel;
 mod panel_calls;
 mod server;
 pub mod socket;
@@ -59,7 +61,14 @@ pub struct ServeOptions {
     /// How long a write may make no progress before its connection is closed.
     pub write_timeout: Duration,
     pub max_connections: usize,
-    /// The most `watch_terminals` answers one connection may leave unflushed.
+    /// MCP channels open at once, besides `max_connections`.
+    pub max_mcp_connections: usize,
+    /// How long a create or update waits for a verdict.
+    pub mcp_wait: Duration,
+    /// How often a waiting tool asks for the panel's state, and checks its closed flag.
+    pub mcp_poll: Duration,
+    /// The most `watch_terminals` answers one connection may leave unflushed. It also bounds the
+    /// requests an MCP channel may queue and the replies it may leave unflushed.
     pub watch_answer_limit: usize,
 }
 
@@ -73,6 +82,9 @@ impl Default for ServeOptions {
             handshake_timeout: Duration::from_secs(10),
             write_timeout: Duration::from_secs(10),
             max_connections: 64,
+            max_mcp_connections: 16,
+            mcp_wait: Duration::from_secs(5),
+            mcp_poll: Duration::from_millis(50),
             watch_answer_limit: 16,
         }
     }
@@ -97,14 +109,21 @@ pub struct ServerParts {
     /// Where scratch panels live.
     pub scratch: Arc<dyn ScratchStore>,
     pub panel_timing: PanelTiming,
-    /// Calls to the panel API. `spawn` fills it; `combined serve` has none.
+    /// Calls to the panel API from embedders. `spawn` fills it; the MCP channels use the
+    /// server's own.
     pub panel_calls: Option<mpsc::Receiver<PanelCall>>,
+    /// Vouches for the terminal an MCP caller names. `None`: no terminal is accepted, callers
+    /// resolve by cwd.
+    pub caller_identity: Option<Arc<dyn CallerIdentity>>,
+    /// Where each mutating MCP call's audit line goes.
+    pub mcp_audit: Arc<dyn McpAudit>,
 }
 
 /// Counters the server keeps for whoever started it.
 #[derive(Debug)]
 pub struct ServerStats {
     connections: AtomicUsize,
+    mcp: AtomicUsize,
     flushes: AtomicU64,
     min_flush_gap: AtomicU64,
 }
@@ -113,6 +132,7 @@ impl ServerStats {
     pub fn new() -> ServerStats {
         ServerStats {
             connections: AtomicUsize::new(0),
+            mcp: AtomicUsize::new(0),
             flushes: AtomicU64::new(0),
             min_flush_gap: AtomicU64::new(u64::MAX),
         }
@@ -121,6 +141,11 @@ impl ServerStats {
     /// Connections admitted and not yet removed.
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    /// MCP channels whose tool thread hasn't ended.
+    pub fn mcp_channels(&self) -> usize {
+        self.mcp.load(Ordering::SeqCst)
     }
 
     /// Flush passes so far.
@@ -143,6 +168,14 @@ impl ServerStats {
 
     fn removed(&self) {
         self.connections.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn mcp_started(&self) {
+        self.mcp.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn mcp_ended(&self) {
+        self.mcp.fetch_sub(1, Ordering::SeqCst);
     }
 
     fn flush_pass(&self, gap: Option<Millis>) {

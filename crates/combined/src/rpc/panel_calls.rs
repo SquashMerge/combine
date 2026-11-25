@@ -38,6 +38,12 @@ pub enum PanelCall {
         space: SpaceId,
         reply: oneshot::Sender<Result<PanelList, PanelApiError>>,
     },
+    /// Answers with the panel, without its source.
+    Status {
+        space: SpaceId,
+        id: String,
+        reply: oneshot::Sender<Result<PanelView, PanelApiError>>,
+    },
     /// Answers with the panel and its served source.
     Get {
         space: SpaceId,
@@ -118,6 +124,15 @@ impl PanelHandle {
     pub fn list(&self, space: &SpaceId) -> Result<PanelList, PanelApiError> {
         self.call(|reply| PanelCall::List {
             space: space.clone(),
+            reply,
+        })
+    }
+
+    /// The panel as it is now, without its source: a read that changes nothing.
+    pub fn status(&self, space: &SpaceId, id: &str) -> Result<PanelView, PanelApiError> {
+        self.call(|reply| PanelCall::Status {
+            space: space.clone(),
+            id: id.to_owned(),
             reply,
         })
     }

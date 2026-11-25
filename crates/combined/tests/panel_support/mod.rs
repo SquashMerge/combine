@@ -3,39 +3,41 @@
 //! stores and a fake diagram check, a file store that lets an outside write land at a chosen
 //! moment, and polls that never block the runtime driving the server.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use combine_protocol::{
-    AttachmentId, ClientMessage, Cursor, DaemonMessage, HostId, RequestId, TermId,
-};
+use combine_protocol::{HostId, TermId};
 use combine_protocol::{PanelState, Renderer};
 use combined::adapters::fs::data_dir::DataDir;
+use combined::adapters::loader::DiagramLimits;
 use combined::core::{LayoutTiming, PanelApiError, PanelCreate, PanelTiming, PanelView};
+use combined::mcp_server::McpAudit;
 use combined::model::{Lifetime, SpaceId, SpawnSpec};
 use combined::ports::{
-    DirListing, FileChange, FileStore, ScratchStore, StoreError, StoreRevision, StoredFile,
-    TerminalBackend, WriteOutcome,
+    DiagramCheck, DirListing, FileChange, FileStore, ScratchStore, StoreError, StoreRevision,
+    StoredFile, TerminalBackend, WriteOutcome,
 };
 use combined::rpc::{self, PanelHandle, ServeOptions, ServerHandle};
 use combined::testing::{
-    FakeBackend, FakeConfig, FakeControl, FakeDiagramCheck, FakeWallClock, MemoryFileStore,
-    MemoryScratchStore,
+    FakeBackend, FakeCallerIdentity, FakeConfig, FakeControl, FakeDiagramCheck, FakeWallClock,
+    MemoryFileStore, MemoryScratchStore,
 };
 use combined::wiring::ids::IdReservation;
 use combined::wiring::panels::PanelParts;
 use combined::wiring::server_parts_with_panels;
 use futures::stream::BoxStream;
 
-use crate::common::request_options;
-use crate::daemon_support::{
-    check_in_scratch, wait_until, work_dir, DaemonPaths, ShortTempDir, WireClient,
-};
+#[allow(unused_imports)]
+pub use combined::testing::{attach, read_until_tail};
 
-/// The wall time every rig starts at: far from the epoch, so a stamp is never 0.
+use crate::daemon_support::{check_in_scratch, wait_until, work_dir, ShortTempDir, WireClient};
+
+/// The wall time every server starts at: far from the epoch, so a stamp is never 0.
 pub const START_WALL_MS: u64 = 1_700_000_000_000;
 
 /// Short timers, so a test waits for tens of milliseconds, not seconds.
@@ -46,6 +48,244 @@ pub const TEST_TIMING: PanelTiming = PanelTiming {
     check_retry_ms: [10, 20, 40],
     sweep_every_ms: 50,
 };
+
+/// Which diagram check the server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestDiagramCheck {
+    /// The test's own [`FakeDiagramCheck`].
+    Fake,
+    /// The daemon's real checker, built as `combined serve` builds it.
+    Pele,
+}
+
+/// How a [`PanelServer`] is built.
+pub struct PanelServerConfig {
+    pub timing: PanelTiming,
+    pub options: ServeOptions,
+    /// The file store the server uses, when it isn't the memory store itself.
+    pub served: Option<Arc<dyn FileStore>>,
+    pub diagram: TestDiagramCheck,
+}
+
+impl Default for PanelServerConfig {
+    fn default() -> Self {
+        PanelServerConfig {
+            timing: TEST_TIMING,
+            options: ServeOptions::default(),
+            served: None,
+            diagram: TestDiagramCheck::Fake,
+        }
+    }
+}
+
+/// A server on the fake backend with in-memory stores, called through its [`PanelHandle`].
+pub struct PanelServer {
+    pub server: ServerHandle,
+    pub panels: PanelHandle,
+    pub backend: Arc<FakeBackend>,
+    pub control: FakeControl,
+    pub store: Arc<MemoryFileStore>,
+    pub scratch: Arc<MemoryScratchStore>,
+    pub check: Arc<FakeDiagramCheck>,
+    pub wall: Arc<FakeWallClock>,
+    pub callers: Arc<FakeCallerIdentity>,
+    pub audit: Arc<AuditLog>,
+    /// The project folder the panels are made in. It is a space once a terminal runs there.
+    pub space: SpaceId,
+    pub socket: PathBuf,
+    pub dir: ShortTempDir,
+    served: Arc<dyn FileStore>,
+    config: PanelServerConfig,
+    starts: u32,
+}
+
+impl PanelServer {
+    pub fn start(config: PanelServerConfig) -> PanelServer {
+        let store = Arc::new(MemoryFileStore::new());
+        let served: Arc<dyn FileStore> = match &config.served {
+            Some(served) => Arc::clone(served),
+            None => store.clone(),
+        };
+        let dir = ShortTempDir::new();
+        let (backend, control) = FakeBackend::new(FakeConfig::default());
+        let work = work_dir(&dir);
+        fs::create_dir_all(work.join(".git")).unwrap();
+        let space = SpaceId(work.to_str().unwrap().to_string());
+        let scratch = Arc::new(MemoryScratchStore::new());
+        let check = Arc::new(FakeDiagramCheck::new());
+        let wall = Arc::new(FakeWallClock::new(START_WALL_MS));
+        let callers = Arc::new(FakeCallerIdentity::new(None));
+        let audit = Arc::new(AuditLog::new());
+        let fixtures = Fixtures {
+            scratch: scratch.clone(),
+            check: check.clone(),
+            wall: wall.clone(),
+            callers: callers.clone(),
+            audit: audit.clone(),
+        };
+        let (server, socket) = launch_server(&dir, 1, &backend, &served, &fixtures, &config);
+        PanelServer {
+            panels: server.panels(),
+            server,
+            backend,
+            control,
+            store,
+            scratch,
+            check,
+            wall,
+            callers,
+            audit,
+            space,
+            socket,
+            dir,
+            served,
+            config,
+            starts: 1,
+        }
+    }
+
+    /// Stops the server and starts another on the same data dir and stores, as a daemon restart.
+    pub fn restart(&mut self) {
+        assert!(self.server.shutdown().is_none());
+        self.starts += 1;
+        let fixtures = Fixtures {
+            scratch: self.scratch.clone(),
+            check: self.check.clone(),
+            wall: self.wall.clone(),
+            callers: self.callers.clone(),
+            audit: self.audit.clone(),
+        };
+        let (server, socket) = launch_server(
+            &self.dir,
+            self.starts,
+            &self.backend,
+            &self.served,
+            &fixtures,
+            &self.config,
+        );
+        self.panels = server.panels();
+        self.server = server;
+        self.socket = socket;
+    }
+
+    /// Runs a terminal in the project folder, which makes the project a space.
+    pub fn spawn_terminal(&self) -> TermId {
+        self.spawn_terminal_in(Path::new(&self.space.0))
+    }
+
+    /// Runs a terminal in `cwd`.
+    pub fn spawn_terminal_in(&self, cwd: &Path) -> TermId {
+        let spec = SpawnSpec {
+            argv: vec!["sh".to_string()],
+            cwd: cwd.to_str().unwrap().to_string(),
+            env: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        futures::executor::block_on(TerminalBackend::spawn(&*self.backend, spec)).unwrap()
+    }
+}
+
+/// The fakes a server is wired to, which a restart keeps.
+struct Fixtures {
+    scratch: Arc<dyn ScratchStore>,
+    check: Arc<FakeDiagramCheck>,
+    wall: Arc<FakeWallClock>,
+    callers: Arc<FakeCallerIdentity>,
+    audit: Arc<AuditLog>,
+}
+
+/// Starts a server on a fresh socket and the data dir `dir` keeps across starts.
+fn launch_server(
+    dir: &ShortTempDir,
+    start: u32,
+    backend: &Arc<FakeBackend>,
+    served: &Arc<dyn FileStore>,
+    fixtures: &Fixtures,
+    config: &PanelServerConfig,
+) -> (ServerHandle, PathBuf) {
+    let data_path = dir.path().join("p").join("data");
+    let socket_path = dir.sock(&format!("p-{start}.sock"));
+    check_in_scratch(&data_path, dir);
+    check_in_scratch(&socket_path, dir);
+    let data_dir = DataDir::open(&data_path).unwrap();
+    let (ids, id_base) = IdReservation::start(&data_dir.ids_json()).unwrap();
+    let socket = rpc::socket::bind(&socket_path).unwrap();
+    let backend: Arc<dyn TerminalBackend> = backend.clone();
+    let served = Arc::clone(served);
+    let fake_check: Arc<dyn DiagramCheck> = fixtures.check.clone();
+    let diagram = config.diagram;
+    let wall = fixtures.wall.clone();
+    let scratch = fixtures.scratch.clone();
+    let timing = config.timing;
+    let callers = fixtures.callers.clone();
+    let audit = fixtures.audit.clone();
+    let server = rpc::spawn(
+        socket,
+        move || {
+            // Each test serves its own data dir, so no other writer needs the lock.
+            drop(data_dir);
+            // Built here, inside the server's runtime, which Pele's warm-up needs.
+            let diagram_check = match diagram {
+                TestDiagramCheck::Fake => fake_check,
+                TestDiagramCheck::Pele => {
+                    combined::wiring::diagram::build(DiagramLimits::default())
+                }
+            };
+            let mut parts = server_parts_with_panels(
+                backend,
+                id_base,
+                HostId("host-a".to_string()),
+                ids,
+                served,
+                LayoutTiming::default(),
+                PanelParts {
+                    diagram_check,
+                    wall_clock: wall,
+                    scratch,
+                    timing,
+                },
+            )
+            .unwrap();
+            parts.caller_identity = Some(callers);
+            parts.mcp_audit = audit;
+            parts
+        },
+        config.options.clone(),
+    )
+    .unwrap();
+    (server, socket_path)
+}
+
+/// Collects the audit lines of the MCP calls.
+#[derive(Default)]
+pub struct AuditLog {
+    lines: Mutex<Vec<String>>,
+}
+
+impl AuditLog {
+    pub fn new() -> AuditLog {
+        AuditLog::default()
+    }
+
+    /// Every line recorded so far, in order.
+    pub fn lines(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl McpAudit for AuditLog {
+    fn record(&self, line: &str) {
+        self.lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(line.to_string());
+    }
+}
 
 /// How long a test waits for something the server does by itself.
 pub const WAIT: Duration = Duration::from_secs(5);
@@ -183,24 +423,24 @@ impl FileStore for RacingStore {
     }
 }
 
-/// A server on the fake backend with in-memory stores, the fake diagram check and a fake wall
-/// clock, called through its [`PanelHandle`]. `restart` keeps the data dir and every store.
+/// A [`PanelServer`] with the panel API's helpers: the project folder's panels are made, read
+/// and counted through it. `restart` keeps the data dir and every store.
 pub struct PanelRig {
-    pub server: ServerHandle,
-    pub panels: PanelHandle,
-    pub backend: Arc<FakeBackend>,
-    pub control: FakeControl,
-    pub store: Arc<MemoryFileStore>,
-    pub scratch: Arc<MemoryScratchStore>,
-    pub check: Arc<FakeDiagramCheck>,
-    pub wall: Arc<FakeWallClock>,
-    /// The project folder the panels are made in. It is a space once a terminal runs there.
-    pub space: SpaceId,
-    pub socket: PathBuf,
-    pub dir: ShortTempDir,
-    served: Arc<dyn FileStore>,
-    timing: PanelTiming,
-    starts: u32,
+    inner: PanelServer,
+}
+
+impl Deref for PanelRig {
+    type Target = PanelServer;
+
+    fn deref(&self) -> &PanelServer {
+        &self.inner
+    }
+}
+
+impl DerefMut for PanelRig {
+    fn deref_mut(&mut self) -> &mut PanelServer {
+        &mut self.inner
+    }
 }
 
 impl PanelRig {
@@ -209,94 +449,48 @@ impl PanelRig {
     }
 
     pub fn with_timing(timing: PanelTiming) -> PanelRig {
-        let store = Arc::new(MemoryFileStore::new());
-        PanelRig::start_on(timing, Arc::clone(&store), store)
+        PanelRig {
+            inner: PanelServer::start(PanelServerConfig {
+                timing,
+                ..PanelServerConfig::default()
+            }),
+        }
     }
 
     /// A rig whose file store is a [`RacingStore`] over the rig's memory store.
     pub fn racing() -> (PanelRig, Arc<RacingStore>) {
-        let store = Arc::new(MemoryFileStore::new());
-        let racing = Arc::new(RacingStore::new(Arc::clone(&store)));
-        let served: Arc<dyn FileStore> = racing.clone();
-        (PanelRig::start_on(TEST_TIMING, store, served), racing)
+        PanelRig::racing_with(ServeOptions::default())
     }
 
-    fn start_on(
-        timing: PanelTiming,
-        store: Arc<MemoryFileStore>,
-        served: Arc<dyn FileStore>,
-    ) -> PanelRig {
-        let dir = ShortTempDir::new();
-        let (backend, control) = FakeBackend::new(FakeConfig::default());
-        let work = work_dir(&dir);
-        fs::create_dir_all(work.join(".git")).unwrap();
-        let space = SpaceId(work.to_str().unwrap().to_string());
-        let scratch = Arc::new(MemoryScratchStore::new());
-        let check = Arc::new(FakeDiagramCheck::new());
-        let wall = Arc::new(FakeWallClock::new(START_WALL_MS));
-        let (server, socket) = launch(
-            &dir,
-            1,
-            &backend,
-            &served,
-            scratch.clone(),
-            &check,
-            &wall,
-            timing,
-        );
+    /// A rig serving with `options`.
+    pub fn with_options(options: ServeOptions) -> PanelRig {
         PanelRig {
-            panels: server.panels(),
-            server,
-            backend,
-            control,
-            store,
-            scratch,
-            check,
-            wall,
-            space,
-            socket,
-            dir,
-            served,
-            timing,
-            starts: 1,
+            inner: PanelServer::start(PanelServerConfig {
+                options,
+                ..PanelServerConfig::default()
+            }),
         }
     }
 
-    /// Stops the server and starts another on the same data dir and stores, as a daemon restart.
-    pub fn restart(&mut self) {
-        assert!(self.server.shutdown().is_none());
-        self.starts += 1;
-        let (server, socket) = launch(
-            &self.dir,
-            self.starts,
-            &self.backend,
-            &self.served,
-            self.scratch.clone(),
-            &self.check,
-            &self.wall,
-            self.timing,
-        );
-        self.panels = server.panels();
-        self.server = server;
-        self.socket = socket;
+    /// [`PanelRig::racing`], serving with `options`.
+    pub fn racing_with(options: ServeOptions) -> (PanelRig, Arc<RacingStore>) {
+        // The server's own memory store goes unused when a served store is given, so the field
+        // is pointed at the one the racing store wraps.
+        let store = Arc::new(MemoryFileStore::new());
+        let racing = Arc::new(RacingStore::new(Arc::clone(&store)));
+        let served: Arc<dyn FileStore> = racing.clone();
+        let mut inner = PanelServer::start(PanelServerConfig {
+            served: Some(served),
+            options,
+            ..PanelServerConfig::default()
+        });
+        inner.store = store;
+        (PanelRig { inner }, racing)
     }
 
     /// A client of the running server.
     pub fn client(&self) -> WireClient {
         WireClient::open(&self.socket).0
-    }
-
-    /// Runs a terminal in the project folder, which makes the project a space.
-    pub fn spawn_terminal(&self) -> TermId {
-        let spec = SpawnSpec {
-            argv: vec!["sh".to_string()],
-            cwd: self.space.0.clone(),
-            env: std::collections::BTreeMap::new(),
-            labels: std::collections::BTreeMap::new(),
-            cols: 80,
-            rows: 24,
-        };
-        futures::executor::block_on(TerminalBackend::spawn(&*self.backend, spec)).unwrap()
     }
 
     pub fn create(&self, create: PanelCreate) -> Result<PanelView, PanelApiError> {
@@ -344,7 +538,8 @@ impl PanelRig {
     }
 }
 
-/// Starts a server on a fresh socket and the data dir `dir` keeps across starts.
+/// Starts a server on a fresh socket and the data dir `dir` keeps across starts, with the
+/// default serve options and its own caller identity and audit log.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     dir: &ShortTempDir,
@@ -356,41 +551,18 @@ pub fn launch(
     wall: &Arc<FakeWallClock>,
     timing: PanelTiming,
 ) -> (ServerHandle, PathBuf) {
-    let paths = DaemonPaths::in_scratch(dir, "p");
-    let socket_path = dir.sock(&format!("p-{start}.sock"));
-    check_in_scratch(&paths.data_dir, dir);
-    check_in_scratch(&socket_path, dir);
-    let data_dir = DataDir::open(&paths.data_dir).unwrap();
-    let (ids, id_base) = IdReservation::start(&data_dir.ids_json()).unwrap();
-    let socket = rpc::socket::bind(&socket_path).unwrap();
-    let backend: Arc<dyn TerminalBackend> = backend.clone();
-    let served = Arc::clone(served);
-    let parts = PanelParts {
-        diagram_check: check.clone(),
-        wall_clock: wall.clone(),
+    let fixtures = Fixtures {
         scratch,
-        timing,
+        check: check.clone(),
+        wall: wall.clone(),
+        callers: Arc::new(FakeCallerIdentity::new(None)),
+        audit: Arc::new(AuditLog::new()),
     };
-    let server = rpc::spawn(
-        socket,
-        move || {
-            // Each test serves its own data dir, so no other writer needs the lock.
-            drop(data_dir);
-            server_parts_with_panels(
-                backend,
-                id_base,
-                HostId("host-a".to_string()),
-                ids,
-                served,
-                LayoutTiming::default(),
-                parts,
-            )
-            .unwrap()
-        },
-        ServeOptions::default(),
-    )
-    .unwrap();
-    (server, socket_path)
+    let config = PanelServerConfig {
+        timing,
+        ..PanelServerConfig::default()
+    };
+    launch_server(dir, start, backend, served, &fixtures, &config)
 }
 
 /// A persistent Markdown panel with a daemon-made ID.
@@ -451,50 +623,4 @@ pub fn settled_read_count(store: &MemoryFileStore, space: &SpaceId, path: &str, 
             "the read count of {path} never settled at {min} or more; it is {now}"
         );
     }
-}
-
-/// Attaches `client` to `term` and returns the attachment, with everything up to and including
-/// `started` read.
-pub fn attach(client: &mut WireClient, term: &TermId) -> AttachmentId {
-    client.send(&ClientMessage::Attach(combine_protocol::Attach {
-        request: RequestId(1),
-        terminal: term.clone(),
-        options: request_options(80, 24, false),
-    }));
-    let mut attachment = None;
-    loop {
-        let message = client.recv();
-        if let DaemonMessage::Attached(attached) = &message {
-            attachment = Some(attached.attachment);
-        }
-        if matches!(message, DaemonMessage::Started(_)) {
-            return attachment.expect("started before attached");
-        }
-    }
-}
-
-/// Reads until the bytes of `attachment`'s data end with `tail`, acking each event, or until
-/// `within` passes: then `None`.
-pub fn read_until_tail(
-    client: &mut WireClient,
-    attachment: AttachmentId,
-    tail: &[u8],
-    within: Duration,
-) -> Option<Vec<u8>> {
-    let deadline = Instant::now() + within;
-    let mut bytes = Vec::new();
-    while !bytes.ends_with(tail) {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let message = client.recv_within(left)?;
-        if let Some(cursor) = message
-            .cursor()
-            .filter(|c: &Cursor| c.attachment == attachment)
-        {
-            if let DaemonMessage::Data(data) = &message {
-                bytes.extend_from_slice(&data.bytes);
-            }
-            client.ack(cursor);
-        }
-    }
-    Some(bytes)
 }
