@@ -10,6 +10,7 @@ pub mod link;
 pub mod local;
 pub mod model;
 pub mod outbound;
+pub mod panels;
 pub mod registry;
 pub mod service;
 pub mod session;

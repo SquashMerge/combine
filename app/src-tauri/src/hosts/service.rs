@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use combine_protocol::{ErrorCode, HostId, LayoutSnapshot, RequestId};
+use combine_protocol::{ErrorCode, HostId, LayoutSnapshot, Panels, RequestId};
 
 use super::attachments::{Attachments, TerminalSink};
 use super::config::{HostConfig, HostsStore, Transport};
@@ -14,6 +14,7 @@ use super::link::Connector;
 use super::local::{LocalSocketConnector, SocketGuardEnv};
 use super::model::{ConfigStatus, ConnectionState, HostView, HostsSnapshot, SpaceView};
 use super::outbound::Outbound;
+use super::panels::PanelReply;
 use super::registry::HostRegistry;
 use super::session::{LayoutSink, LivePhase};
 use super::spawn::{SpawnReply, SpawnSink};
@@ -146,6 +147,14 @@ impl HostEvents for Inner {
 
     fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
         self.deps.spawn_sink.spawn_reply(host_id, reply);
+    }
+
+    fn panels(&self, host_id: &HostId, panels: Panels) {
+        self.deps.layout_sink.panels(host_id, panels);
+    }
+
+    fn panel_reply(&self, host_id: &HostId, reply: PanelReply) {
+        self.deps.layout_sink.panel_reply(host_id, reply);
     }
 }
 
@@ -535,6 +544,62 @@ mod tests {
             ))
         );
         assert_eq!(recv(&received), Ok(LayoutEvent::Disconnected(host)));
+        service.stop();
+    }
+
+    #[test]
+    fn panel_events_reach_the_layout_sink() {
+        use super::super::testing::LayoutEvent;
+        use combine_protocol::{Panel, PanelState, Renderer};
+
+        let dir = ShortTempDir::new();
+        let (sink, snapshots) = RecordingSink::new();
+        let (layout_sink, received) = RecordingLayoutSink::new();
+        let service = HostsService::start(
+            dir.path(),
+            ServiceDeps::system(
+                layout_sink,
+                RecordingSpawnSink::new().0,
+                RecordingTerminalSink::new(),
+            ),
+            sink,
+        );
+        drop(snapshots);
+        let events: &dyn HostEvents = &*service.inner;
+        let host = host_id(HOST_A);
+        let list = Panels {
+            request: None,
+            space: "/work".to_string(),
+            panels: Vec::new(),
+            skipped: Vec::new(),
+            error: None,
+        };
+        let panel = Panel {
+            request: RequestId(3),
+            space: "/work".to_string(),
+            id: "notes".to_string(),
+            revision: 1,
+            renderer: Renderer::Markdown,
+            source: String::new(),
+            state: PanelState::Validated,
+            error: None,
+        };
+        events.panels(&host, list.clone());
+        events.panel_reply(&host, PanelReply::Panel(panel.clone()));
+        events.panel_reply(&host, PanelReply::Disconnected);
+        let recv = |rx: &Receiver<LayoutEvent>| rx.recv_timeout(super::super::testing::WAIT);
+        assert_eq!(recv(&received), Ok(LayoutEvent::Panels(host.clone(), list)));
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::PanelReply(
+                host.clone(),
+                PanelReply::Panel(panel)
+            ))
+        );
+        assert_eq!(
+            recv(&received),
+            Ok(LayoutEvent::PanelReply(host, PanelReply::Disconnected))
+        );
         service.stop();
     }
 

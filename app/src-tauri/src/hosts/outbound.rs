@@ -22,6 +22,7 @@ pub enum RequestKind {
     Spawn,
     Attach,
     Resume,
+    Panel,
 }
 
 /// What the writer thread receives.
