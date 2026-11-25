@@ -1069,6 +1069,7 @@ fn testing_files_start_with_the_feature_gate() {
     assert_eq!(
         names,
         [
+            "caller_identity.rs",
             "control.rs",
             "diagram_check.rs",
             "fake_attachment.rs",
