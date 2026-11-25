@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use combine_protocol::{
     daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, ErrorCode,
-    ErrorMessage, HostId, LayoutSnapshot, RequestId, Welcome, WireMessage,
+    ErrorMessage, HostId, LayoutSnapshot, Panels, RequestId, Welcome, WireMessage,
 };
 
 use super::attachments::{StreamDelivery, StreamId, TerminalSink};
@@ -26,6 +26,7 @@ use super::config::StoreError;
 use super::identity::HostIdStore;
 use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link};
 use super::model::{ConnectionState, HostsSnapshot, SpaceView};
+use super::panels::PanelReply;
 use super::service::SnapshotSink;
 use super::session::LayoutSink;
 use super::spawn::{SpawnReply, SpawnSink};
@@ -438,6 +439,8 @@ pub enum LayoutEvent {
     Layout(HostId, Option<RequestId>, LayoutSnapshot),
     Error(HostId, RequestId, ErrorCode, String),
     Disconnected(HostId),
+    Panels(HostId, Panels),
+    PanelReply(HostId, PanelReply),
 }
 
 /// Sends every layout call to a channel.
@@ -467,6 +470,14 @@ impl LayoutSink for RecordingLayoutSink {
 
     fn layout_disconnected(&self, host_id: &HostId) {
         self.send(LayoutEvent::Disconnected(host_id.clone()));
+    }
+
+    fn panels(&self, host_id: &HostId, panels: Panels) {
+        self.send(LayoutEvent::Panels(host_id.clone(), panels));
+    }
+
+    fn panel_reply(&self, host_id: &HostId, reply: PanelReply) {
+        self.send(LayoutEvent::PanelReply(host_id.clone(), reply));
     }
 }
 

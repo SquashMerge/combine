@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use combine_protocol::{
-    read_message, DaemonMessage, ErrorCode, HostId, LayoutSnapshot, ReadError, RequestId,
+    read_message, DaemonMessage, ErrorCode, HostId, LayoutSnapshot, Panels, ReadError, RequestId,
 };
 
 use super::backoff::Backoff;
@@ -24,6 +24,7 @@ use super::identity::{
 use super::link::{abort_link, Closer, ConnectError, Connector, ExitInfo, Link};
 use super::model::{ConnectionState, SpaceView};
 use super::outbound::Outbound;
+use super::panels::PanelReply;
 use super::spawn::SpawnReply;
 use super::text::is_blank;
 
@@ -148,6 +149,10 @@ pub trait HostEvents: Send + Sync {
     fn layout_disconnected(&self, _host_id: &HostId) {}
     /// A reply to a spawn request, or the end of the session that could still answer one.
     fn spawn_reply(&self, _host_id: &HostId, _reply: SpawnReply) {}
+    /// A space's panel list: the reply to a layout watch, or a push after a change.
+    fn panels(&self, _host_id: &HostId, _panels: Panels) {}
+    /// A reply to a panel fetch, or the end of the session that could still answer one.
+    fn panel_reply(&self, _host_id: &HostId, _reply: PanelReply) {}
 }
 
 pub struct SessionIo<'a> {
