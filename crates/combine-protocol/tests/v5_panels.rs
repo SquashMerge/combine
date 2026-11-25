@@ -67,6 +67,7 @@ fn entry(state: PanelState, renderer: Renderer) -> PanelSummary {
         state,
         error: None,
         created_by: None,
+        lifetime: None,
     }
 }
 
@@ -128,6 +129,41 @@ fn render_statuses_have_their_wire_spellings() {
         assert!(text.contains(&format!(r#""status":"{name}""#)), "{text}");
         assert_eq!(decode_client(&text).unwrap(), message, "{name}");
     }
+}
+
+#[test]
+fn lifetimes_have_their_wire_spellings() {
+    for (lifetime, spelling) in [
+        (
+            Some(PanelLifetime::Persistent),
+            r#""lifetime":"persistent""#,
+        ),
+        (Some(PanelLifetime::Scratch), r#""lifetime":"scratch""#),
+        (None, r#""lifetime":null"#),
+    ] {
+        let message = panels_message(Panels {
+            panels: vec![PanelSummary {
+                lifetime,
+                ..entry(PanelState::Validated, Renderer::Mermaid)
+            }],
+            ..panels_golden()
+        });
+        let text = text_of(&message);
+        assert!(text.contains(spelling), "{text}");
+        assert_eq!(decode_daemon(&text).unwrap(), message, "{spelling}");
+    }
+}
+
+#[test]
+fn a_panels_entry_without_lifetime_decodes_as_none() {
+    let base = golden_json("panels");
+    let text = patched(&base, "/panels/0/lifetime", None);
+    assert!(!text.contains(r#""lifetime":"persistent""#), "{text}");
+    assert_eq!(decoded_panels(&text).panels[0].lifetime, None);
+    assert_eq!(
+        decoded_panels(&base).panels[0].lifetime,
+        Some(PanelLifetime::Persistent)
+    );
 }
 
 #[test]

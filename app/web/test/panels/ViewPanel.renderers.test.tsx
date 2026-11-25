@@ -23,6 +23,7 @@ function listed(revision: string): PanelEntry {
       state: 'validated',
       error: null,
       createdBy: null,
+      lifetime: null,
     },
   };
 }

@@ -24,7 +24,7 @@ function saved(): ClientState {
 }
 
 function summary(id: string, title: string | null = null): PanelSummary {
-  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null };
+  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null, lifetime: null };
 }
 
 function content(id: string): PanelContent {

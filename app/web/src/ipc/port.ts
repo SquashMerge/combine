@@ -45,6 +45,10 @@ export interface PanelPort {
   onPanelsEvent(listener: (event: PanelsEvent) => void): Promise<Unsubscribe>;
   /** Through the host's PanelFetchQueue; rejects with PanelFetchError. */
   fetchPanel(hostId: HostId, space: string, panel: string, urgent: boolean): Promise<PanelContent>;
+  /** Closes a panel and resolves when the daemon says it is closed; rejects with PanelFetchError. */
+  closePanel(hostId: HostId, space: string, panel: string): Promise<void>;
+  /** Keeps a scratch panel in the project and resolves when the daemon says it is kept; rejects with PanelFetchError. */
+  pinPanel(hostId: HostId, space: string, panel: string): Promise<void>;
   /** Resolves true when the command was accepted, false otherwise; never rejects. */
   reportRender(hostId: HostId, report: RenderReport): Promise<boolean>;
 }

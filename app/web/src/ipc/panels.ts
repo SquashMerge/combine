@@ -8,7 +8,13 @@ import {
   type PanelsEvent,
   parsePanelsChanged,
 } from '../model/panels';
-import { GET_PANEL_COMMAND, PANELS_EVENT, REPORT_RENDER_COMMAND } from './names';
+import {
+  CLOSE_PANEL_COMMAND,
+  GET_PANEL_COMMAND,
+  PANELS_EVENT,
+  PIN_PANEL_COMMAND,
+  REPORT_RENDER_COMMAND,
+} from './names';
 import type { PanelPort } from './port';
 
 function failureText(error: unknown): string {
@@ -36,6 +42,24 @@ export function createTauriPanelPort(): PanelPort {
     if (generation(hostId) !== started) throw new PanelFetchError(null, 'The host disconnected.');
     return replies.wait(hostId, id);
   });
+
+  async function act(
+    command: string,
+    hostId: HostId,
+    space: string,
+    panel: string,
+  ): Promise<void> {
+    await ensureListening();
+    const started = generation(hostId);
+    let id;
+    try {
+      id = parseDecimalU64(await invoke(command, { hostId, space, panel }));
+    } catch (error) {
+      throw new PanelFetchError(null, failureText(error));
+    }
+    if (generation(hostId) !== started) throw new PanelFetchError(null, 'The host disconnected.');
+    await replies.waitDone(hostId, id);
+  }
 
   function ensureListening(): Promise<unknown> {
     if (listening === null) {
@@ -67,6 +91,8 @@ export function createTauriPanelPort(): PanelPort {
       };
     },
     fetchPanel: (hostId, space, panel, urgent) => queue.fetch(hostId, space, panel, urgent),
+    closePanel: (hostId, space, panel) => act(CLOSE_PANEL_COMMAND, hostId, space, panel),
+    pinPanel: (hostId, space, panel) => act(PIN_PANEL_COMMAND, hostId, space, panel),
     async reportRender(hostId, report) {
       try {
         await invoke(REPORT_RENDER_COMMAND, { hostId, report });

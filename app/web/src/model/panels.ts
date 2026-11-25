@@ -21,6 +21,9 @@ export interface PanelError {
 
 export type CreatedBy = { type: 'user' } | { type: 'agent'; slot: string | null };
 
+/** Where a panel lives: in the project's `.workspace/`, or in the daemon's own data. */
+export type PanelLifetime = 'persistent' | 'scratch';
+
 export interface PanelSummary {
   id: string;
   title: string | null;
@@ -29,6 +32,7 @@ export interface PanelSummary {
   state: PanelState;
   error: PanelError | null;
   createdBy: CreatedBy | null;
+  lifetime: PanelLifetime | null;
 }
 
 export interface PanelList {
@@ -61,6 +65,7 @@ export interface RenderReport {
 export type PanelsChanged =
   | { kind: 'list'; hostId: string; request: DecimalU64 | null; list: PanelList }
   | { kind: 'panel'; hostId: string; request: DecimalU64; panel: PanelContent }
+  | { kind: 'closed' | 'pinned'; hostId: string; request: DecimalU64; space: string; panel: string }
   | { kind: 'error'; hostId: string; request: DecimalU64; code: string; message: string }
   | { kind: 'disconnected'; hostId: string };
 
@@ -146,6 +151,14 @@ function parseCreatedBy(value: unknown, what: string): CreatedBy | null {
   }
 }
 
+function parseLifetime(value: unknown, what: string): PanelLifetime | null {
+  if (value === null) return null;
+  if (value !== 'persistent' && value !== 'scratch') {
+    throw new ModelError(`${what} must be "persistent", "scratch" or null`);
+  }
+  return value;
+}
+
 function parseSummary(value: unknown, what: string): PanelSummary {
   const r = record(value, what);
   return {
@@ -156,6 +169,7 @@ function parseSummary(value: unknown, what: string): PanelSummary {
     state: panelState(r['state'], `${what}.state`),
     error: parseError(r['error'], `${what}.error`),
     createdBy: parseCreatedBy(r['createdBy'], `${what}.createdBy`),
+    lifetime: parseLifetime(r['lifetime'], `${what}.lifetime`),
   };
 }
 
@@ -209,6 +223,15 @@ export function parsePanelsChanged(json: unknown): PanelsChanged {
         request: parseDecimalU64(r['request']),
         panel: parseContent(r['panel']),
       };
+    case 'closed':
+    case 'pinned':
+      return {
+        kind: r['kind'],
+        hostId,
+        request: parseDecimalU64(r['request']),
+        space: str(r['space'], 'panels event.space'),
+        panel: str(r['panel'], 'panels event.panel'),
+      };
     case 'error':
       return {
         kind: 'error',
@@ -220,7 +243,7 @@ export function parsePanelsChanged(json: unknown): PanelsChanged {
     case 'disconnected':
       return { kind: 'disconnected', hostId };
     default:
-      throw new ModelError('panels event.kind must be "list", "panel", "error" or "disconnected"');
+      throw new ModelError('panels event.kind must be "list", "panel", "closed", "pinned", "error" or "disconnected"');
   }
 }
 
@@ -277,7 +300,7 @@ type ReplyEvent = Exclude<PanelsChanged, { kind: 'list' | 'disconnected' }>;
 
 interface PendingWait {
   hostId: string;
-  resolve: (content: PanelContent) => void;
+  resolve: (event: ReplyEvent) => void;
   reject: (error: PanelFetchError) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -286,12 +309,29 @@ function replyKey(hostId: string, request: DecimalU64): string {
   return JSON.stringify([hostId, request]);
 }
 
-/** Matches each `get_panel` reply to the call that waits for it, whichever of the two comes first. */
+/**
+ * Matches each reply to a `get_panel`, `close_panel` or `pin_panel` request to the call that
+ * waits for it, whichever of the two comes first.
+ */
 export class PanelReplies {
   private readonly pending = new Map<string, PendingWait>();
   private readonly early = new Map<string, ReplyEvent>();
 
-  wait(hostId: HostId | string, request: DecimalU64): Promise<PanelContent> {
+  /** Resolves with the panel a `get_panel` request asked for. */
+  async wait(hostId: HostId | string, request: DecimalU64): Promise<PanelContent> {
+    const event = await this.waitEvent(hostId, request);
+    if (event.kind === 'panel') return event.panel;
+    throw unexpectedReply();
+  }
+
+  /** Resolves when a `close_panel` or `pin_panel` request is answered. */
+  async waitDone(hostId: HostId | string, request: DecimalU64): Promise<void> {
+    const event = await this.waitEvent(hostId, request);
+    if (event.kind === 'closed' || event.kind === 'pinned') return;
+    throw unexpectedReply();
+  }
+
+  private waitEvent(hostId: HostId | string, request: DecimalU64): Promise<ReplyEvent> {
     const key = replyKey(hostId, request);
     const buffered = this.early.get(key);
     if (buffered !== undefined) {
@@ -304,7 +344,7 @@ export class PanelReplies {
       this.pending.delete(key);
       displaced.reject(new PanelFetchError(null, 'Another request took this reply.'));
     }
-    return new Promise<PanelContent>((resolve, reject) => {
+    return new Promise<ReplyEvent>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(key);
         reject(new PanelFetchError(null, 'No reply from the host within 30 s.'));
@@ -332,8 +372,8 @@ export class PanelReplies {
     if (wait !== undefined) {
       clearTimeout(wait.timer);
       this.pending.delete(key);
-      if (event.kind === 'panel') wait.resolve(event.panel);
-      else wait.reject(new PanelFetchError(event.code, event.message));
+      if (event.kind === 'error') wait.reject(new PanelFetchError(event.code, event.message));
+      else wait.resolve(event);
       return;
     }
     this.early.delete(key);
@@ -346,10 +386,14 @@ export class PanelReplies {
   }
 }
 
-function settled(event: ReplyEvent): Promise<PanelContent> {
-  return event.kind === 'panel'
-    ? Promise.resolve(event.panel)
-    : Promise.reject(new PanelFetchError(event.code, event.message));
+function settled(event: ReplyEvent): Promise<ReplyEvent> {
+  return event.kind === 'error'
+    ? Promise.reject(new PanelFetchError(event.code, event.message))
+    : Promise.resolve(event);
+}
+
+function unexpectedReply(): PanelFetchError {
+  return new PanelFetchError(null, 'The host sent an unexpected reply.');
 }
 
 export const PANEL_FETCHES_IN_FLIGHT = 4;

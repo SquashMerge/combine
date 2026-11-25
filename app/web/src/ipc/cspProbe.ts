@@ -55,6 +55,8 @@ export function withCspProbe(port: PanelPort, win: Window = window): PanelPort {
   return {
     onPanelsEvent: (listener) => port.onPanelsEvent(listener),
     fetchPanel: (hostId, space, panel, urgent) => port.fetchPanel(hostId, space, panel, urgent),
+    closePanel: (hostId, space, panel) => port.closePanel(hostId, space, panel),
+    pinPanel: (hostId, space, panel) => port.pinPanel(hostId, space, panel),
     reportRender(hostId, report) {
       renders.push({
         space: report.space,

@@ -99,6 +99,19 @@ describe('withCspProbe', () => {
     window.removeEventListener(PROBE_READY_EVENT, ready);
   });
 
+  it('forwards_close_and_pin_to_the_wrapped_port', async () => {
+    const inner = new MemoryPanelPort();
+    const port = withCspProbe(inner, install({ panels: 1, violations: [], count: 0, notify: null }));
+    const closed = port.closePanel(host, '/work', 'a');
+    const pinned = port.pinPanel(host, '/work', 'b');
+    expect(inner.actions.map(({ kind, hostId, space, panel }) => ({ kind, hostId, space, panel }))).toEqual([
+      { kind: 'close', hostId: host, space: '/work', panel: 'a' },
+      { kind: 'pin', hostId: host, space: '/work', panel: 'b' },
+    ]);
+    inner.actions.forEach((action) => action.resolve());
+    await expect(Promise.all([closed, pinned])).resolves.toEqual([undefined, undefined]);
+  });
+
   it('reports_timed_out_at_the_deadline', async () => {
     const probe: Probe = { panels: 2, violations: [], count: 0, notify: null };
     const port = withCspProbe(new MemoryPanelPort(), install(probe));

@@ -28,6 +28,14 @@ const failure = (request: number): PanelsChanged => ({
   message: 'no such panel',
 });
 
+const done = (kind: 'closed' | 'pinned', request: number, hostId = 'h1'): PanelsChanged => ({
+  kind,
+  hostId,
+  request: req(request),
+  space: '/work',
+  panel: 'p',
+});
+
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
@@ -69,6 +77,43 @@ describe('PanelReplies', () => {
     });
     replies.onEvent(panel(1));
     await expect(wait).resolves.toBe(content);
+  });
+
+  it('waitDone resolves closed and pinned and rejects errors and panel replies', async () => {
+    const replies = new PanelReplies();
+    const closed = replies.waitDone('h1', req(1));
+    replies.onEvent(done('closed', 1));
+    await expect(closed).resolves.toBeUndefined();
+    replies.onEvent(done('pinned', 2));
+    await expect(replies.waitDone('h1', req(2))).resolves.toBeUndefined();
+
+    const refused = replies.waitDone('h1', req(3));
+    replies.onEvent(failure(3));
+    await expect(refused).rejects.toMatchObject({ code: 'unknown_panel', message: 'no such panel' });
+    replies.onEvent(failure(4));
+    await expect(replies.waitDone('h1', req(4))).rejects.toMatchObject({ code: 'unknown_panel' });
+
+    const content = replies.waitDone('h1', req(5));
+    replies.onEvent(panel(5));
+    await expect(content).rejects.toMatchObject({ code: null, message: 'The host sent an unexpected reply.' });
+    replies.onEvent(panel(6));
+    await expect(replies.waitDone('h1', req(6))).rejects.toMatchObject({ code: null });
+  });
+
+  it('wait rejects a closed or pinned reply as unexpected', async () => {
+    const replies = new PanelReplies();
+    const wait = replies.wait('h1', req(1));
+    replies.onEvent(done('closed', 1));
+    await expect(wait).rejects.toMatchObject({ code: null, message: 'The host sent an unexpected reply.' });
+    replies.onEvent(done('pinned', 2));
+    await expect(replies.wait('h1', req(2))).rejects.toMatchObject({ code: null });
+  });
+
+  it('a disconnect rejects a waitDone', async () => {
+    const replies = new PanelReplies();
+    const wait = replies.waitDone('h1', req(1));
+    replies.onEvent({ kind: 'disconnected', hostId: 'h1' });
+    await expect(wait).rejects.toMatchObject({ message: 'The host disconnected.' });
   });
 
   it('keeps the newest 32 early replies', async () => {

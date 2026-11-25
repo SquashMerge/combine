@@ -2,11 +2,12 @@
 //! whether a list fits one frame.
 
 use combine_protocol::{
-    DaemonMessage, Panel, PanelState, PanelSummary, Panels, RequestId, SkippedPanel, WireMessage,
+    DaemonMessage, Panel, PanelLifetime, PanelState, PanelSummary, Panels, RequestId, SkippedPanel,
+    WireMessage,
 };
 
 use crate::core::panel_store::{PanelList, PanelView};
-use crate::model::SpaceId;
+use crate::model::{Lifetime, SpaceId};
 
 /// The `error` of a `panels` message for a space whose panels aren't read yet.
 pub const PANELS_LOADING: &str = "the space's panels are loading";
@@ -16,7 +17,8 @@ pub const TRIMMED_REASON: &str = "the panel list is larger than one frame; this 
 pub const SKIPPED_TRIMMED: &str =
     "the panel list is larger than one frame; some skipped folders aren't listed";
 
-/// The entry `panels` lists for `view`; `error` is set only while the panel is `failed`.
+/// The entry `panels` lists for `view`; `error` is set only while the panel is `failed`, and `lifetime` is
+/// always the view's.
 pub fn panel_summary(view: &PanelView) -> PanelSummary {
     PanelSummary {
         id: view.id.clone(),
@@ -26,6 +28,10 @@ pub fn panel_summary(view: &PanelView) -> PanelSummary {
         state: view.state,
         error: failed_error(view),
         created_by: view.file.created_by.clone(),
+        lifetime: Some(match view.lifetime {
+            Lifetime::Persistent => PanelLifetime::Persistent,
+            Lifetime::Scratch => PanelLifetime::Scratch,
+        }),
     }
 }
 
