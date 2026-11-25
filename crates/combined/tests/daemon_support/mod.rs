@@ -500,6 +500,24 @@ pub fn server_on(
     )
 }
 
+/// [`server_on`] with the serve options named.
+pub fn server_on_with(
+    scratch: &ShortTempDir,
+    name: &str,
+    backend: Arc<FakeBackend>,
+    store: Arc<dyn FileStore>,
+    options: ServeOptions,
+) -> ServerHandle {
+    start_server(
+        scratch,
+        name,
+        backend,
+        "host-a",
+        options,
+        Some((store, LayoutTiming::default())),
+    )
+}
+
 /// What [`layout_server`] started.
 pub struct LayoutServer {
     pub server: ServerHandle,

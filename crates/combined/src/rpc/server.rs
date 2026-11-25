@@ -118,6 +118,7 @@ enum Wake {
     Panel,
     PanelCall(Option<PanelCall>),
     Housekeeping,
+    WatchRetry,
 }
 
 /// A diagram check that finished, for the panel it was started for.
@@ -194,6 +195,9 @@ struct Server {
     panel_calls: Option<BoxStream<'static, PanelCall>>,
     panel_answers: Vec<PanelAnswer>,
     housekeeping: Interval,
+    /// The spaces the file store could not watch, with the error of the last attempt.
+    unwatched: BTreeMap<SpaceId, String>,
+    watch_retry: Interval,
 }
 
 /// What the backend reported when the server started watching it.
@@ -272,6 +276,9 @@ pub async fn serve_watched(
     let (inbox_tx, inbox) = mpsc::channel(INBOX);
     let mut housekeeping = tokio::time::interval(options.housekeeping);
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut watch_retry =
+        tokio::time::interval_at(Instant::now() + options.watch_retry, options.watch_retry);
+    watch_retry.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut server = Server {
         driver,
         terminals,
@@ -305,6 +312,8 @@ pub async fn serve_watched(
         panel_calls,
         panel_answers: Vec::new(),
         housekeeping,
+        unwatched: BTreeMap::new(),
+        watch_retry,
     };
     let mut shutdown = std::pin::pin!(shutdown);
     let now = server.clock.now();
@@ -355,6 +364,7 @@ impl Server {
                 () = &mut self.panel_timer, if self.panel_armed => Wake::Panel,
                 item = next_item(&mut self.panel_calls), if self.panel_calls.is_some() => Wake::PanelCall(item),
                 _ = self.housekeeping.tick() => Wake::Housekeeping,
+                _ = self.watch_retry.tick() => Wake::WatchRetry,
             };
             match wake {
                 Wake::Shutdown => return Ok(()),
@@ -415,6 +425,7 @@ impl Server {
                 Wake::PanelCall(Some(call)) => self.panel_call(call).await,
                 Wake::PanelCall(None) => self.panel_calls = None,
                 Wake::Housekeeping => self.driver.core_mut().tick(self.clock.now()),
+                Wake::WatchRetry => self.retry_watches().await,
             }
             self.settle().await?;
         }
@@ -709,6 +720,39 @@ impl Server {
         })
     }
 
+    /// Asks the file store to watch `space`. A refusal is remembered and retried every
+    /// `watch_retry`, and logged when it starts or its text changes, not on every retry.
+    async fn watch_space(&mut self, space: &SpaceId) {
+        match self.store.watch(space).await {
+            Ok(()) => {
+                if self.unwatched.remove(space).is_some() {
+                    eprintln!("combined: watching {} again", space.0);
+                    // Edits made while it wasn't watched were never reported.
+                    self.layouts.apply_change(space);
+                    self.panels
+                        .apply_change(space, PANELS_DIR, self.clock.now());
+                }
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                if self.unwatched.get(space) != Some(&detail) {
+                    eprintln!(
+                        "combined: cannot watch {}, so edits made outside Combine to its layout and panels are not seen until it can be: {detail}",
+                        space.0
+                    );
+                    self.unwatched.insert(space.clone(), detail);
+                }
+            }
+        }
+    }
+
+    async fn retry_watches(&mut self) {
+        let spaces: Vec<SpaceId> = self.unwatched.keys().cloned().collect();
+        for space in spaces {
+            self.watch_space(&space).await;
+        }
+    }
+
     /// Runs the file store work the layouts asked for. Each outcome is reported before the next
     /// effect runs and before the change stream is polled again, so the hash of the daemon's
     /// own write is known by the time its echo arrives.
@@ -721,9 +765,7 @@ impl Server {
             for effect in effects {
                 match effect {
                     LayoutEffect::Watch { space } => {
-                        if let Err(error) = self.store.watch(&space).await {
-                            eprintln!("combined: cannot watch {}: {error}", space.0);
-                        }
+                        self.watch_space(&space).await;
                     }
                     LayoutEffect::Read { space } => {
                         let read =
@@ -927,9 +969,7 @@ impl Server {
             for effect in effects {
                 match effect {
                     PanelEffect::Watch { space } => {
-                        if let Err(error) = self.store.watch(&space).await {
-                            eprintln!("combined: cannot watch {}: {error}", space.0);
-                        }
+                        self.watch_space(&space).await;
                     }
                     PanelEffect::ListWorkspace { space } => {
                         let listing = self
