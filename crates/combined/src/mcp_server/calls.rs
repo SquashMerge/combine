@@ -11,7 +11,7 @@ use serde_json::value::RawValue;
 use super::api::PanelApi;
 use super::jsonrpc::{clip, fits, present, quoted, SERDE_TEXT_MAX};
 use super::{tool_error_code, McpServer};
-use crate::core::{PanelApiError, PanelCreate, PanelUpdate, PanelView};
+use crate::core::{PanelApiError, PanelCreate, PanelUpdate, PanelView, PANEL_ID_MAX_BYTES};
 use crate::model::Lifetime;
 
 const LATER_MILESTONES_SUFFIX: &str = "create_panel makes static Mermaid and Markdown panels";
@@ -293,17 +293,6 @@ struct Entry {
 /// A tool call's answer (`None` when its connection closed first) and its audit entry.
 type Outcome = (Option<Reply>, Entry);
 
-/// The longest panel argument an audit line holds; a longer one is cut on a character boundary.
-const AUDIT_PANEL_MAX: usize = 255;
-
-fn clipped(text: &str) -> &str {
-    let mut end = text.len().min(AUDIT_PANEL_MAX);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
 fn refused(error: ToolError, panel: Option<String>) -> Outcome {
     let entry = Entry {
         panel,
@@ -398,7 +387,7 @@ impl McpServer {
             .map_or_else(|| "null".to_owned(), |slot| format!("{slot:?}"));
         let panel = entry.panel.as_deref().map_or_else(
             || "null".to_owned(),
-            |panel| format!("{:?}", clipped(panel)),
+            |panel| format!("{:?}", clip(panel, PANEL_ID_MAX_BYTES)),
         );
         let end = match &entry.end {
             End::View { revision, state } => {
