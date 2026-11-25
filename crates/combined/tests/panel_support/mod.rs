@@ -402,6 +402,7 @@ pub fn markdown(content: &str) -> PanelCreate {
         title: None,
         idempotency_key: None,
         created_by: None,
+        placement: None,
         content: content.to_string(),
     }
 }

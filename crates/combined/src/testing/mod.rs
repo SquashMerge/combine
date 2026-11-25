@@ -7,6 +7,7 @@
 //! to do. The fake runs no threads and reads no clock: nothing happens until a test calls into
 //! it, or polls an event stream.
 
+mod caller_identity;
 mod control;
 mod diagram_check;
 mod fake_attachment;
@@ -20,6 +21,7 @@ use combine_protocol::{Display, TermId};
 
 use crate::ports::{AttachOptions, Capabilities};
 
+pub use caller_identity::FakeCallerIdentity;
 pub use control::FakeControl;
 pub use diagram_check::{FakeAnswer, FakeDiagramCheck, FakeHold};
 pub use fake_backend::FakeBackend;

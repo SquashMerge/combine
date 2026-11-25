@@ -1,6 +1,10 @@
 //! The host's terminals and their spaces, as `terminals` snapshots report them.
 
-use combine_protocol::{RequestId, SpaceInfo, SpaceKind, TerminalInfo, TerminalState, Terminals};
+use std::path::{Component, Path, PathBuf};
+
+use combine_protocol::{
+    RequestId, SpaceInfo, SpaceKind, TermId, TerminalInfo, TerminalState, Terminals,
+};
 
 use super::spaces::Spaces;
 use crate::model::{RootKind, Space, SpaceId, TermEvent, TermInfo, TermState};
@@ -78,6 +82,24 @@ impl TerminalList {
             .into_iter()
             .map(|space| space.id)
             .collect()
+    }
+
+    /// The space a listed terminal was placed in.
+    pub fn space_of_terminal(&self, terminal: &TermId) -> Option<SpaceId> {
+        self.spaces.space_of(terminal).cloned()
+    }
+
+    /// The nearest listed space that is `cwd` or an ancestor of it, compared by path components.
+    /// `None` for a relative `cwd`, one with a `..` component, or one under no listed space.
+    pub fn space_for_cwd(&self, cwd: &str) -> Option<SpaceId> {
+        let path: PathBuf = Path::new(cwd).components().collect();
+        if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+            return None;
+        }
+        self.space_ids()
+            .into_iter()
+            .filter(|space| path.starts_with(Path::new(&space.0)))
+            .max_by_key(|space| Path::new(&space.0).components().count())
     }
 
     /// A full snapshot: terminals in the backend's list order, and the spaces that hold them

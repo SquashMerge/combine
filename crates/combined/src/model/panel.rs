@@ -16,4 +16,6 @@ pub struct ViewPanelFile {
     pub title: Option<String>,
     pub idempotency_key: Option<String>,
     pub created_by: Option<CreatedBy>,
+    /// The layout tile the creator asked to show the panel in; stored, applied by M2-S7.
+    pub placement: Option<String>,
 }

@@ -10,8 +10,9 @@ use combined::model::{
     ContentHash, Millis, RootKind, Space, SpaceId, SpawnSpec, TermEvent, TermInfo, TermState,
 };
 use combined::ports::{
-    AttachOptions, Attachment, BackendError, DiagramCheck, FileMark, FileStore, GitEntry, GitProbe,
-    ScratchStore, StoreError, StoreRevision, StoredFile, TerminalBackend, WallClock,
+    AttachOptions, Attachment, BackendError, CallerIdentity, DiagramCheck, FileMark, FileStore,
+    GitEntry, GitProbe, ScratchStore, StoreError, StoreRevision, StoredFile, TerminalBackend,
+    WallClock,
 };
 use common::{display, request_options, spawn_spec, FakeGitProbe};
 use sha2::{Digest, Sha256};
@@ -224,6 +225,7 @@ fn traits_are_object_safe() {
     fn _backend(_: &dyn TerminalBackend) {}
     fn _attachment(_: &dyn Attachment) {}
     fn _git(_: &dyn GitProbe) {}
+    fn _callers(_: &dyn CallerIdentity) {}
     fn _store(_: &dyn FileStore) {}
     fn _scratch(_: &dyn ScratchStore) {}
     fn _clock(_: &dyn WallClock) {}
