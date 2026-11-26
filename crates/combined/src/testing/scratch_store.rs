@@ -19,6 +19,7 @@ struct State {
     write_counts: BTreeMap<(ScratchDir, String), u64>,
     remove_counts: BTreeMap<ScratchDir, u64>,
     fail_next_write: Option<StoreError>,
+    fail_next_remove: Option<StoreError>,
 }
 
 /// Scratch folders held in memory. A folder exists while it holds a file.
@@ -71,6 +72,11 @@ impl MemoryScratchStore {
     /// How many removals of the folder were asked for, whether or not it existed.
     pub fn remove_count(&self, dir: &ScratchDir) -> u64 {
         self.state().remove_counts.get(dir).copied().unwrap_or(0)
+    }
+
+    /// The next removal fails with `error`, and the folder stays.
+    pub fn fail_next_remove(&self, error: StoreError) {
+        self.state().fail_next_remove = Some(error);
     }
 
     /// The next write fails with `error`.
@@ -143,8 +149,11 @@ impl ScratchStore for MemoryScratchStore {
 
     async fn remove(&self, dir: &ScratchDir) -> Result<(), StoreError> {
         let mut state = self.state();
-        state.dirs.remove(dir);
         *state.remove_counts.entry(dir.clone()).or_default() += 1;
+        if let Some(error) = state.fail_next_remove.take() {
+            return Err(error);
+        }
+        state.dirs.remove(dir);
         Ok(())
     }
 }

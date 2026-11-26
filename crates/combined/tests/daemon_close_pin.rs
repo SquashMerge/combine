@@ -16,6 +16,7 @@ use combine_protocol::{
 };
 use combined::core::{LayoutTiming, LAYOUT_FILE, PIN_UNDONE, SCRATCH_TTL_MS};
 use combined::model::Lifetime;
+use combined::ports::StoreError;
 use combined::rpc::ServeOptions;
 use daemon_support::{wait_until, WireClient};
 use mcp_support::{cwd_caller, wire_options, McpWire};
@@ -416,6 +417,52 @@ fn close_answers_unknown_panel_invalid_request_and_unknown_space() {
     }));
     let seen = until_answered(&client, 5);
     assert_eq!(refusal(&seen, 5).code, ErrorCode::UnknownSpace);
+}
+
+#[test]
+fn a_close_whose_scratch_delete_fails_is_refused_and_keeps_the_panel() {
+    let rig = rig();
+    rig.create(named("s", scratch(markdown("one")))).unwrap();
+    wait_stored(&rig, &["s"]);
+    let (mut client, _) = watcher(&rig);
+    let writes = rig.write_count(LAYOUT_FILE);
+    rig.scratch
+        .fail_next_remove(StoreError::Unavailable("disk full".to_string()));
+
+    close(&mut client, &rig, 2, "s");
+    let seen = until_answered(&client, 2);
+
+    let error = refusal(&seen, 2);
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(
+        error
+            .message
+            .contains("couldn't delete the scratch panel s")
+            && error.message.contains("disk full"),
+        "{error:?}"
+    );
+    for message in &seen {
+        if let DaemonMessage::Layout(layout) = message {
+            assert_eq!(names(layout), ["s"], "the tab left the layout: {seen:?}");
+        }
+    }
+    let (layout, panels) = watch_panels(&mut client, &rig.space, 3);
+    assert_eq!(names(&layout), ["s"]);
+    let listed = panels.panels.iter().find(|panel| panel.id == "s").unwrap();
+    assert_ne!(listed.state, PanelState::Removed);
+    assert_eq!(listed.lifetime, Some(PanelLifetime::Scratch));
+    assert_eq!(rig.scratch.dirs().len(), 1);
+    assert_eq!(stored_names(&rig), Some(vec!["s".to_string()]));
+    assert_eq!(rig.write_count(LAYOUT_FILE), writes);
+    assert_eq!(rig.get("s").unwrap().1, "one");
+
+    close(&mut client, &rig, 4, "s");
+    let seen = until_answered(&client, 4);
+    assert!(
+        matches!(answer_of(&seen, 4), DaemonMessage::PanelClosed(_)),
+        "{seen:?}"
+    );
+    assert!(rig.scratch.dirs().is_empty());
 }
 
 #[test]

@@ -13,7 +13,7 @@ use combine_protocol::{
     ClientMessage, DaemonMessage, LayoutOp, MutateLayout, PanelState, RequestId,
 };
 use combined::core::{LayoutTiming, LAYOUT_FILE, SCRATCH_TTL_MS};
-use combined::ports::ScratchDir;
+use combined::ports::{ScratchDir, StoreError};
 use daemon_support::wait_until;
 use mcp_support::{cwd_caller, wire_options, McpWire};
 use panel_support::{settled_read_count, watch_panels, PanelRig, PanelServerConfig, Race};
@@ -380,6 +380,34 @@ fn a_remove_that_conflicts_with_an_outside_edit_is_remove_conflict_and_the_panel
         .last()
         .unwrap()
         .ends_with("error=remove_conflict"));
+}
+
+#[test]
+fn a_scratch_remove_whose_delete_fails_is_delete_failed_and_the_panel_and_tab_stay() {
+    let (rig, mut wire) = rig_and_wire();
+    wire.tool(
+        "create_panel",
+        json!({"id": "s", "renderer": "markdown", "content": "y", "lifetime": "scratch"}),
+    );
+    wait_tile(&rig, "main", &["s"]);
+    rig.scratch
+        .fail_next_remove(StoreError::Unavailable("disk full".to_string()));
+
+    let removed = wire.tool("remove_panel", json!({"panel": "s"}));
+
+    assert!(removed.is_error, "{removed:?}");
+    assert_eq!(removed.code(), "delete_failed");
+    let message = removed.body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("disk full"), "{message}");
+    assert_eq!(rig.scratch.dirs().len(), 1);
+    let status = wire.tool("panel_status", json!({"panel": "s"}));
+    assert!(!status.is_error, "{status:?}");
+    assert_ne!(status.body["state"], "removed");
+    std::thread::sleep(Duration::from_millis(700));
+    wait_tile(&rig, "main", &["s"]);
+
+    assert!(!wire.tool("remove_panel", json!({"panel": "s"})).is_error);
+    wait_tile(&rig, "main", &[]);
 }
 
 #[test]

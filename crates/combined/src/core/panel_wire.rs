@@ -133,6 +133,7 @@ pub fn panel_error_code(error: &PanelApiError) -> ErrorCode {
         | PanelApiError::ScratchListingFailed { .. }
         | PanelApiError::PanelFileInvalid { .. }
         | PanelApiError::Unreadable { .. }
+        | PanelApiError::DeleteFailed { .. }
         | PanelApiError::Stopped => ErrorCode::InvalidRequest,
     }
 }

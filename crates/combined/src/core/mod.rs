@@ -43,10 +43,10 @@ pub use panel_file::{
     SCRATCH_FILE_MAX_BYTES, SOURCE_MAX_BYTES, TITLE_MAX_BYTES,
 };
 pub use panel_store::{
-    CreateOutcome, FileWrite, IdSource, PanelApiError, PanelCreate, PanelEffect, PanelEvent,
-    PanelFolder, PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd, SaveReport,
-    SaveTicket, MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX,
-    SCRATCH_TTL_MS,
+    CreateOutcome, DeleteFailure, FileWrite, IdSource, PanelApiError, PanelCreate, PanelEffect,
+    PanelEvent, PanelFolder, PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd,
+    SaveReport, SaveTicket, MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN,
+    SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
 };
 pub use panel_wire::{
     panel_error_code, panel_reply, panel_summary, panels_loading, panels_message, pin_answer,

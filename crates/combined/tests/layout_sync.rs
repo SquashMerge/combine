@@ -1486,6 +1486,29 @@ fn a_placement_before_the_first_read_waits_and_bumps_the_revision_once_applied()
 }
 
 #[test]
+fn placements_queued_before_the_first_read_are_one_publication_and_one_revision() {
+    let mut layouts = combined::core::Layouts::new(LayoutTiming::default());
+    layouts.place(&space("main"), p("p9"), None, Millis(0));
+    layouts.place(&space("main"), p("p8"), None, Millis(0));
+    layouts.take_effects();
+    let found = bytes_of(&two_tiles());
+    layouts.apply_read(
+        &space("main"),
+        LayoutRead::Found {
+            hash: hash(&found),
+            bytes: found,
+            read_only: false,
+        },
+        Millis(5),
+    );
+    let status = layouts.status(&space("main")).unwrap();
+    assert_eq!(status.layout_revision, LayoutRevision(1));
+    let held = panels_in(&status.layout, "a");
+    assert!(held.contains(&"p9".to_string()) && held.contains(&"p8".to_string()));
+    assert_eq!(layouts.take_changed(), [space("main")]);
+}
+
+#[test]
 fn place_and_unplace_only_queue_effects() {
     let mut layouts = combined::core::Layouts::new(LayoutTiming::default());
     layouts.place(&space("main"), p("p9"), None, Millis(0));

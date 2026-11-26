@@ -35,10 +35,11 @@ use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
     dropped_notice, layout_snapshot, ops_from_wire, panel_error_code, panel_folder_refusal,
     panel_reply, panels_loading, panels_message, pin_answer, resolve_caller, ClientRender,
-    ConnectionId, Driver, LayoutEffect, LayoutOp, LayoutRead, LayoutWritten, Layouts, MutateError,
-    PanelApiError, PanelCreate, PanelEffect, PanelEvent, PanelList, PanelRead, PanelStore,
-    PanelView, RenderStatuses, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError,
-    LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
+    ConnectionId, DeleteFailure, Driver, LayoutEffect, LayoutOp, LayoutRead, LayoutWritten,
+    Layouts, MutateError, PanelApiError, PanelCreate, PanelEffect, PanelEvent, PanelList,
+    PanelRead, PanelStore, PanelView, RenderStatuses, SpawnEffect, SpawnTicket, Spawns,
+    TerminalList, WatchError, LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE,
+    PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
 use crate::mcp_server::{McpAudit, McpOptions};
 use crate::model::{
@@ -201,6 +202,13 @@ struct ClientAnswer {
 
 /// A reply to a panel call, held until the call's file work has run.
 enum PanelAnswer {
+    /// The answer to a close or remove, which becomes an error when the panel's scratch folder
+    /// couldn't be deleted.
+    Ended(
+        SpaceId,
+        oneshot::Sender<Result<PanelView, PanelApiError>>,
+        Result<PanelView, PanelApiError>,
+    ),
     View(
         oneshot::Sender<Result<PanelView, PanelApiError>>,
         Result<PanelView, PanelApiError>,
@@ -225,8 +233,16 @@ enum PanelAnswer {
 
 impl PanelAnswer {
     /// The caller may have stopped waiting, which is not an error.
-    fn send(self) {
+    fn send(self, failures: &[DeleteFailure]) {
         match self {
+            PanelAnswer::Ended(space, reply, result) => {
+                let result =
+                    result.and_then(|view| match delete_failure(failures, &space, &view.id) {
+                        Some(error) => Err(error),
+                        None => Ok(view),
+                    });
+                drop(reply.send(result))
+            }
             PanelAnswer::View(reply, result) => drop(reply.send(result)),
             PanelAnswer::List(reply, result) => drop(reply.send(result)),
             PanelAnswer::Get(reply, result) => drop(reply.send(result)),
@@ -234,6 +250,21 @@ impl PanelAnswer {
             PanelAnswer::Dropped(reply, result) => drop(reply.send(result)),
         }
     }
+}
+
+/// The error for a close of `panel` whose scratch folder couldn't be deleted, if there was one.
+fn delete_failure(
+    failures: &[DeleteFailure],
+    space: &SpaceId,
+    panel: &str,
+) -> Option<PanelApiError> {
+    failures
+        .iter()
+        .find(|failure| failure.space == *space && failure.panel == panel)
+        .map(|failure| PanelApiError::DeleteFailed {
+            id: failure.panel.clone(),
+            detail: failure.detail.clone(),
+        })
 }
 
 type Watch = BoxStream<'static, TermEvent>;
@@ -277,6 +308,8 @@ struct Server {
     /// Panels a close or remove may have deleted: each is taken out of its space's layout at the
     /// next idle point, if the store then holds it removed.
     removals: Vec<(SpaceId, String)>,
+    /// The scratch deletes that failed, for the answers sent at this idle point.
+    delete_failures: Vec<DeleteFailure>,
     /// Client close and pin calls the store has taken, answered at the next idle point.
     client_answers: Vec<ClientAnswer>,
     render: RenderStatuses,
@@ -423,6 +456,7 @@ pub async fn serve_watched(
         panel_deferred: VecDeque::new(),
         parked_create: None,
         removals: Vec::new(),
+        delete_failures: Vec::new(),
         client_answers: Vec::new(),
         render: RenderStatuses::new(),
         diagram_check,
@@ -1069,7 +1103,22 @@ impl Server {
 
     /// Runs a client's `close_panel` or `pin_panel` now when the panel lane is idle and no create is
     /// parked, and otherwise once it is, so the store is never changed while lane work runs.
+    ///
+    /// A connection may hold `watch_answer_limit` panel replies at once, counting those unread, those
+    /// of calls whose file work is running and those of calls still waiting. A call past that
+    /// disconnects it before anything is queued, and what it had waiting is dropped unrun.
     fn client_panel_call(&mut self, call: ClientPanelCall) {
+        if self.client_replies_held(call.conn) >= self.options.watch_answer_limit {
+            eprintln!(
+                "combined: connection {} has more than {} panel replies unread or waiting; disconnecting",
+                call.conn.0, self.options.watch_answer_limit
+            );
+            self.driver
+                .core_mut()
+                .disconnect(call.conn, self.clock.now());
+            self.remove(call.conn);
+            return;
+        }
         if let Some(why) = panel_folder_refusal(&call.panel) {
             let error = ErrorMessage {
                 code: ErrorCode::InvalidRequest,
@@ -1085,6 +1134,25 @@ impl Server {
         } else {
             self.panel_deferred.push_back(Deferred::Client(call));
         }
+    }
+
+    /// The panel replies `conn` is owed or has left unread.
+    fn client_replies_held(&self, conn: ConnectionId) -> usize {
+        let unread = self
+            .conns
+            .get(&conn)
+            .map_or(0, |state| state.panel_out.len());
+        let waiting = self
+            .panel_deferred
+            .iter()
+            .filter(|item| matches!(item, Deferred::Client(call) if call.conn == conn))
+            .count();
+        let running = self
+            .client_answers
+            .iter()
+            .filter(|answer| answer.call.conn == conn)
+            .count();
+        unread + waiting + running
     }
 
     fn run_client_panel_call(&mut self, call: ClientPanelCall) {
@@ -1142,6 +1210,10 @@ impl Server {
         self.layouts.unwatch(conn, self.clock.now());
         self.spawns.disconnect(conn);
         self.render.disconnect(conn);
+        self.panel_deferred
+            .retain(|item| !matches!(item, Deferred::Client(call) if call.conn == conn));
+        self.client_answers
+            .retain(|answer| answer.call.conn != conn);
         if let Some(state) = self.conns.remove(&conn) {
             self.stats.removed();
             let _ = state.socket.shutdown(Shutdown::Both);
@@ -1399,16 +1471,16 @@ impl Server {
             PanelCall::Remove { space, id, reply } => {
                 let result = self.panels.remove(&space, &id, now);
                 if result.is_ok() {
-                    self.removals.push((space, id));
+                    self.removals.push((space.clone(), id));
                 }
-                PanelAnswer::View(reply, result)
+                PanelAnswer::Ended(space, reply, result)
             }
             PanelCall::Close { space, id, reply } => {
                 let result = self.panels.close(&space, &id, now);
                 if result.is_ok() {
-                    self.removals.push((space, id));
+                    self.removals.push((space.clone(), id));
                 }
-                PanelAnswer::View(reply, result)
+                PanelAnswer::Ended(space, reply, result)
             }
             PanelCall::Pin { space, id, reply } => {
                 PanelAnswer::View(reply, self.panels.pin(&space, &id, now))
@@ -1492,6 +1564,12 @@ impl Server {
             }
         }
         for ClientAnswer { call, refused } in std::mem::take(&mut self.client_answers) {
+            let refused = refused.or_else(|| match call.kind {
+                ClientPanelKind::Close => {
+                    delete_failure(&self.delete_failures, &call.space, &call.panel)
+                }
+                ClientPanelKind::Pin => None,
+            });
             let ClientPanelCall {
                 conn,
                 request,
@@ -1541,7 +1619,7 @@ impl Server {
 
     fn send_panel_answers(&mut self) {
         for answer in std::mem::take(&mut self.panel_answers) {
-            answer.send();
+            answer.send(&self.delete_failures);
         }
     }
 
@@ -1668,11 +1746,12 @@ impl Server {
                     state: PanelState::Removed,
                     ..
                 } => {
-                    let expired = matches!(
-                        self.panels.get(&space, &panel),
-                        Ok((view, _)) if view.state == PanelState::Removed
-                            && view.lifetime == Lifetime::Scratch
-                    );
+                    let expired = !self.panels.close_pending(&space, &panel)
+                        && matches!(
+                            self.panels.get(&space, &panel),
+                            Ok((view, _)) if view.state == PanelState::Removed
+                                && view.lifetime == Lifetime::Scratch
+                        );
                     if expired {
                         self.unplace(&space, &panel);
                     }
@@ -1716,8 +1795,11 @@ impl Server {
             if !self.panel_lane_idle() {
                 break;
             }
+            self.delete_failures
+                .extend(self.panels.take_delete_failures());
             self.send_panel_answers();
             self.answer_panel_requests();
+            self.delete_failures.clear();
             if let Some(call) = self.parked_create.take() {
                 self.run_parked_create(call);
                 continue;

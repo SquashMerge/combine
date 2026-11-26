@@ -181,6 +181,71 @@ fn a_client_close_waits_for_lane_work_and_terminal_output_flows() {
     assert_eq!(rig.get("p").unwrap().0.state, PanelState::Removed);
 }
 
+fn close_of(client: &mut WireClient, rig: &PanelRig, request: u64, panel: &str) {
+    client.send(&ClientMessage::ClosePanel(ClosePanel {
+        request: RequestId(request),
+        space: rig.space.0.clone(),
+        panel: panel.to_string(),
+    }));
+}
+
+/// A connection may hold 16 panel replies at once, those waiting included. The call past that
+/// disconnects it while the lane is still busy, drops what it had waiting, and leaves another
+/// connection's waiting close to run once the lane is idle.
+#[test]
+fn a_connection_with_too_many_panel_calls_waiting_is_disconnected_when_it_sends_them() {
+    let (rig, store, _term) = rig_with_p();
+    rig.create(panel_support::named("q", markdown("other")))
+        .unwrap();
+    rig.wait_state("q", PanelState::Validated);
+    let mut greedy = rig.client();
+    let mut other = rig.client();
+    assert!(wait_until(WAIT, || rig.connections() == 2));
+    let stall = store.stall(&rig.space, CONTENT);
+    rig.store
+        .write_outside(&rig.space, CONTENT, b"outside".to_vec());
+    assert!(
+        wait_until(WAIT, || store.entered()),
+        "the stalled read never started"
+    );
+
+    close_of(&mut other, &rig, 100, "q");
+    close_of(&mut greedy, &rig, 1, "p");
+    for request in 2..=16 {
+        close_of(&mut greedy, &rig, request, "missing");
+    }
+    thread::sleep(QUIET);
+    assert_eq!(
+        rig.connections(),
+        2,
+        "16 waiting calls are within the bound"
+    );
+    close_of(&mut greedy, &rig, 17, "missing");
+
+    assert!(
+        wait_until(WAIT, || rig.connections() == 1),
+        "the connection was not disconnected while the lane was busy"
+    );
+    stall.release();
+    loop {
+        match other.recv() {
+            DaemonMessage::PanelClosed(closed) => {
+                assert_eq!(closed.request, RequestId(100));
+                break;
+            }
+            DaemonMessage::Error(error) => panic!("the close was refused: {error:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(rig.get("q").unwrap().0.state, PanelState::Removed);
+    assert_ne!(
+        rig.get("p").unwrap().0.state,
+        PanelState::Removed,
+        "a close the dead connection had waiting still ran"
+    );
+    assert_eq!(rig.connections(), 1);
+}
+
 #[test]
 fn calls_wait_while_panel_file_work_runs() {
     let (rig, store, _term) = rig_with_p();

@@ -7,10 +7,11 @@
 use combine_protocol::PanelState;
 
 use super::{
-    file_path, outside_source, split_read, too_large_source, unread_refusal, FileWrite,
-    FolderState, Got, IdSource, Missing, OpKind, Out, PanelApiError, PanelEffect, PanelEvent,
-    PanelFolder, PanelStore, PanelView, Record, SaveEnd, SaveReport, SaveTicket, ScratchGlobal,
-    ScratchLoad, SpaceState, Stamp, MAX_PANELS, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
+    file_path, outside_source, split_read, too_large_source, unread_refusal, DeleteFailure,
+    FileWrite, FolderState, Got, IdSource, Missing, OpKind, Out, PanelApiError, PanelEffect,
+    PanelEvent, PanelFolder, PanelStore, PanelView, Record, Restore, SaveEnd, SaveReport,
+    SaveTicket, ScratchGlobal, ScratchLoad, SpaceState, Stamp, MAX_PANELS, SCRATCH_ID_OPEN,
+    SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
 };
 use crate::core::layout_sync::store_error_detail;
 use crate::core::panel_file::{
@@ -131,29 +132,35 @@ impl SpaceState {
     // ---- close, remove, sweep
 
     /// A scratch panel ends: its record is dropped and remembered as removed.
-    fn drop_scratch(&mut self, out: &mut Out, id: &str) {
-        let Some(rec) = self.records.remove(id) else {
-            return;
-        };
+    fn drop_scratch(&mut self, out: &mut Out, id: &str) -> Option<Record> {
+        let rec = self.records.remove(id)?;
         out.events.push(PanelEvent::Changed {
             space: self.id.clone(),
             panel: id.to_owned(),
             revision: rec.revision,
             state: PanelState::Removed,
         });
-        self.remember(id, Lifetime::Scratch, rec.file, rec.revision);
+        self.remember(id, Lifetime::Scratch, rec.file.clone(), rec.revision);
         self.debounce.remove(id);
         self.reread_at.remove(id);
         self.deferred.remove(id);
+        Some(rec)
     }
 
-    fn delete_scratch_dir(&mut self, out: &mut Out, dir: ScratchDir, swept: Option<Stamp>) {
+    fn delete_scratch_dir(
+        &mut self,
+        out: &mut Out,
+        dir: ScratchDir,
+        swept: Option<Stamp>,
+        restore: Option<Box<Restore>>,
+    ) {
         let ticket = out.ticket(
             &self.id,
             &dir.panel,
             OpKind::ScratchGone {
                 dir: dir.clone(),
                 swept,
+                restore,
             },
         );
         out.effects.push(PanelEffect::Delete {
@@ -170,14 +177,36 @@ impl SpaceState {
         id: &str,
     ) -> Result<PanelView, PanelApiError> {
         let dir = self.scratch_dir(id);
-        out.scratch.stamped.remove(&dir);
-        self.drop_scratch(out, id);
-        self.delete_scratch_dir(out, dir, None);
+        let stamp = out.scratch.stamped.remove(&dir);
+        let restore = self
+            .drop_scratch(out, id)
+            .map(|record| Box::new(Restore { record, stamp }));
+        self.delete_scratch_dir(out, dir, None, restore);
         self.release_shadow(out, id);
         match self.remembered(id) {
             Some(entry) => Ok(self.removed_view(entry)),
             None => Err(PanelApiError::UnknownPanel { id: id.to_owned() }),
         }
+    }
+
+    /// A scratch folder couldn't be deleted: the panel of a close or remove is put back, as the
+    /// folder still holds it, unless its ID has been taken since.
+    pub(super) fn restore_scratch(&mut self, out: &mut Out, id: &str, restore: Restore) {
+        if self.records.contains_key(id) {
+            return;
+        }
+        let dir = self.scratch_dir(id);
+        if let Some(stamp) = restore.stamp {
+            out.scratch.stamped.insert(dir, stamp);
+        }
+        self.forget(id);
+        if self.folders.contains_key(id) {
+            let symlink = self.shadow_symlink(id);
+            self.reading.remove(id);
+            self.shadow(id, symlink);
+        }
+        self.records.insert(id.to_owned(), restore.record);
+        self.changed(out, id);
     }
 
     /// Whether the sweep leaves `dir` for a later sweep.
@@ -398,7 +427,7 @@ impl SpaceState {
         }
         self.changed(out, id);
         out.scratch.stamped.remove(&dir);
-        self.delete_scratch_dir(out, dir, None);
+        self.delete_scratch_dir(out, dir, None, None);
         self.service(out, id);
         self.release_deferred(out, id);
     }
@@ -471,7 +500,7 @@ impl SpaceState {
                 self.remember(id, Lifetime::Scratch, rec.file, rec.revision);
             }
             out.scratch.stamped.remove(&dir);
-            self.delete_scratch_dir(out, dir, None);
+            self.delete_scratch_dir(out, dir, None, None);
             self.folders.remove(id);
             self.skipped.remove(id);
             out.effects.push(PanelEffect::ListWorkspace {
@@ -776,6 +805,7 @@ impl PanelStore {
                 OpKind::ScratchGone {
                     dir: dir.clone(),
                     swept: Some(stamp.clone()),
+                    restore: None,
                 },
             );
             self.out.effects.push(PanelEffect::Delete {
@@ -793,6 +823,7 @@ impl PanelStore {
         space: &SpaceId,
         dir: &ScratchDir,
         swept: Option<Stamp>,
+        restore: Option<Box<Restore>>,
         report: SaveReport,
     ) {
         let detail = match report.end {
@@ -807,6 +838,16 @@ impl PanelStore {
             SaveEnd::Conflict { file } => format!("{file} changed"),
             SaveEnd::Failed { error, .. } => store_error_detail(error),
         };
+        if let Some(restore) = restore {
+            self.out.scratch.failures.push(DeleteFailure {
+                space: space.clone(),
+                panel: dir.panel.clone(),
+                detail: detail.clone(),
+            });
+            self.in_space(space, |state, out| {
+                state.restore_scratch(out, &dir.panel, *restore)
+            });
+        }
         self.out.effects.push(PanelEffect::Log {
             text: format!(
                 "couldn't remove the scratch folder {}/{} of {} ({detail})",

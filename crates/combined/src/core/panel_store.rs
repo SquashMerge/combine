@@ -249,6 +249,7 @@ pub enum PanelApiError {
     ScratchListingFailed { detail: String },
     PanelFileInvalid { reason: String },
     Unreadable { path: String, detail: String },
+    DeleteFailed { id: String, detail: String },
     Stopped,
 }
 
@@ -293,6 +294,10 @@ impl fmt::Display for PanelApiError {
                 f,
                 "couldn't read {path} ({detail}), so the panel isn't changed until it can be read"
             ),
+            PanelApiError::DeleteFailed { id, detail } => write!(
+                f,
+                "couldn't delete the scratch panel {id} ({detail}), so it is kept"
+            ),
             PanelApiError::Stopped => f.write_str("the server has stopped"),
         }
     }
@@ -333,6 +338,8 @@ struct ScratchGlobal {
     list_failed: Option<String>,
     pending: BTreeSet<ScratchDir>,
     stamped: BTreeMap<ScratchDir, Stamp>,
+    /// Closes whose delete failed, until the server answers them.
+    failures: Vec<DeleteFailure>,
 }
 
 impl ScratchGlobal {
@@ -445,9 +452,24 @@ enum OpKind {
     ScratchGone {
         dir: ScratchDir,
         swept: Option<Stamp>,
+        /// A close or remove keeps what it dropped, to put it back when the delete fails.
+        restore: Option<Box<Restore>>,
     },
     /// The undo of a pin that failed.
     Cleanup,
+}
+
+/// A scratch panel a close dropped: its record and the stamp of its folder.
+struct Restore {
+    record: Record,
+    stamp: Option<Stamp>,
+}
+
+/// A close or remove of a scratch panel whose folder couldn't be deleted.
+pub struct DeleteFailure {
+    pub space: SpaceId,
+    pub panel: String,
+    pub detail: String,
 }
 
 struct SaveOp {
@@ -2296,7 +2318,11 @@ impl PanelStore {
             return;
         };
         match op.kind {
-            OpKind::ScratchGone { dir, swept } => self.scratch_gone(&op.space, &dir, swept, report),
+            OpKind::ScratchGone {
+                dir,
+                swept,
+                restore,
+            } => self.scratch_gone(&op.space, &dir, swept, restore, report),
             kind => {
                 self.in_space(&op.space, |state, out| {
                     state.apply_report(out, &op.panel, ticket, kind, report, now);
@@ -2351,6 +2377,26 @@ impl PanelStore {
 
     pub fn take_effects(&mut self) -> Vec<PanelEffect> {
         std::mem::take(&mut self.out.effects)
+    }
+
+    /// The closes and removes whose scratch folder couldn't be deleted since the last call.
+    pub fn take_delete_failures(&mut self) -> Vec<DeleteFailure> {
+        std::mem::take(&mut self.out.scratch.failures)
+    }
+
+    /// A close or remove of this scratch panel waits for its folder's delete to end.
+    pub fn close_pending(&self, space: &SpaceId, panel: &str) -> bool {
+        self.out.saves.values().any(|op| {
+            op.space == *space
+                && op.panel == panel
+                && matches!(
+                    &op.kind,
+                    OpKind::ScratchGone {
+                        restore: Some(_),
+                        ..
+                    }
+                )
+        })
     }
 
     pub fn take_events(&mut self) -> Vec<PanelEvent> {
