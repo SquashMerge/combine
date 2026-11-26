@@ -135,3 +135,5 @@ no probe markers
 A plain `cargo build --release` would be a dev-mode (devUrl) binary, so the check builds the bundle with `tauri build`.
 
 Launching the x86_64 bundle on the Intel MBP is an S9 acceptance step.
+
+`app/src-tauri/Cargo.toml` spells the `tauri` and `tauri-build` dependencies as the tauri CLI writes them (`{ version = "=...", features = [] }`), so `tauri build` leaves the file unchanged.
