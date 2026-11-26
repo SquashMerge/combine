@@ -71,29 +71,11 @@ python3 -I -B tools/arch-guard/test_check.py
 python3 -I -B tools/arch-guard/check.py
 
 step "architecture: trellis rules check"
+python3 -I -B tools/trellis-check/test_ci_check.py
 if command -v trellis >/dev/null 2>&1 && [ "${CI:-}" = true ]; then
-  # On a CI runner the trellis daemon starts cold, so this checkout's first index and
-  # architecture build can outlast the CLI's own waits (90 s and 30 s). trellis then fails
-  # with a typed index_not_ready or deadline_exceeded, keeps building, and answers a retry.
-  # Only those two are retried, at most 4 attempts; deviations and every other failure fail
-  # at once, as they do locally.
-  report="${TMPDIR:-/tmp}/combine-trellis-$$.json"
-  log="${TMPDIR:-/tmp}/combine-trellis-$$.log"
-  attempt=1
-  while :; do
-    status=0
-    trellis rules check --format json >"$report" 2>"$log" || status=$?
-    cat "$log" >&2
-    if [ "$status" -eq 0 ] || [ "$attempt" -ge 4 ] ||
-      ! grep -q -E 'index_not_ready|deadline_exceeded' "$report" "$log"; then
-      break
-    fi
-    echo "verify: trellis is still building (attempt $attempt of 4); retrying in 20 s"
-    attempt=$((attempt + 1))
-    sleep 20
-  done
-  rm -f "$report" "$log"
-  [ "$status" -eq 0 ] || exit "$status"
+  # A cold daemon on a runner can answer index_not_ready or deadline_exceeded at first;
+  # ci-check.sh retries exactly those, and fails at once on anything else.
+  sh tools/trellis-check/ci-check.sh
 elif command -v trellis >/dev/null 2>&1; then
   trellis rules check --format json >"${TMPDIR:-/tmp}/combine-trellis-$$.json"
   status=$?
