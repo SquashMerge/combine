@@ -625,6 +625,10 @@ fn fs_file_store_refuses_to_write_a_symlinked_file() {
 
 const LAYOUT: &str = "layout.json";
 const BOUND: Duration = Duration::from_secs(10);
+/// How long a test waits for the watcher to report a change. It only matters when one is
+/// missing, and it is long because FSEvents holds deliveries back under load: 10-15 s was
+/// measured on a loaded machine, where [`BOUND`] failed (#81).
+const EVENT_BOUND: Duration = Duration::from_secs(30);
 
 fn sha256(bytes: &[u8]) -> ContentHash {
     ContentHash(Sha256::digest(bytes).into())
@@ -645,14 +649,14 @@ fn poll_change(changes: &mut BoxStream<'static, FileChange>) -> Option<FileChang
         .flatten()
 }
 
-/// Runs `cause` until a change for `space`'s layout arrives, for at most [`BOUND`]. A watcher
-/// may not be listening yet when the first cause happens, so the cause is repeated.
+/// Runs `cause` until a change for `space`'s layout arrives, for at most [`EVENT_BOUND`]. A
+/// watcher may not be listening yet when the first cause happens, so the cause is repeated.
 fn change_after(
     changes: &mut BoxStream<'static, FileChange>,
     space: &SpaceId,
     mut cause: impl FnMut(),
 ) -> Option<FileChange> {
-    let deadline = Instant::now() + BOUND;
+    let deadline = Instant::now() + EVENT_BOUND;
     while Instant::now() < deadline {
         cause();
         if let Some(change) = poll_change(changes) {

@@ -309,9 +309,9 @@ mod tests {
     use super::super::link::{ConnectError, FailureText};
     use super::super::supervisor::IdlePhase;
     use super::super::testing::{
-        host_id, wait_for_snapshot, Double, FakeClock, Probe, RecordingLayoutSink, RecordingSink,
-        RecordingSpawnSink, RecordingTerminalSink, ScriptedConnector, ShortTempDir, Step, HOST_A,
-        HOST_B,
+        host_id, wait_for_snapshot, within, Double, FakeClock, Probe, RecordingLayoutSink,
+        RecordingSink, RecordingSpawnSink, RecordingTerminalSink, ScriptedConnector, ShortTempDir,
+        Step, HOST_A, HOST_B,
     };
     use super::*;
 
@@ -319,7 +319,7 @@ mod tests {
 
     struct Fixture {
         dir: ShortTempDir,
-        service: HostsService,
+        service: Arc<HostsService>,
         snapshots: Receiver<HostsSnapshot>,
         connectors: Arc<HashMap<String, Arc<ScriptedConnector>>>,
         built: Arc<AtomicUsize>,
@@ -333,6 +333,18 @@ mod tests {
         fn bytes(&self) -> Vec<u8> {
             fs::read(self.hosts_json()).expect("read hosts.json")
         }
+    }
+
+    /// Stops the service, failing the test if its joins do not finish (#82).
+    fn stop(service: &Arc<HostsService>) {
+        let service = Arc::clone(service);
+        within("HostsService::stop", move || service.stop());
+    }
+
+    /// Retries a host, failing the test if the call does not return (#82).
+    fn retry(service: &Arc<HostsService>, name: &str) -> Result<(), RetryError> {
+        let (service, name) = (Arc::clone(service), name.to_string());
+        within("HostsService::retry", move || service.retry(&name))
     }
 
     fn file(entries: &[&str]) -> String {
@@ -366,7 +378,7 @@ mod tests {
             attachments: Arc::new(Attachments::new(RecordingTerminalSink::new())),
         };
         let (sink, snapshots) = RecordingSink::new();
-        let service = HostsService::start(dir.path(), deps, sink);
+        let service = Arc::new(HostsService::start(dir.path(), deps, sink));
         Fixture {
             dir,
             service,
@@ -426,14 +438,14 @@ mod tests {
         assert!(snapshot.hosts.is_empty());
         assert_eq!(f.built.load(Ordering::SeqCst), 0);
         assert_eq!(f.bytes(), bad.as_bytes());
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
     fn missing_hosts_json_means_no_hosts_and_no_error() {
         let dir = ShortTempDir::new();
         let (sink, _snapshots) = RecordingSink::new();
-        let service = HostsService::start(
+        let service = Arc::new(HostsService::start(
             dir.path(),
             ServiceDeps::system(
                 RecordingLayoutSink::new().0,
@@ -441,7 +453,7 @@ mod tests {
                 RecordingTerminalSink::new(),
             ),
             sink,
-        );
+        ));
         let snapshot = service.snapshot();
         assert_eq!(snapshot.config.error, None);
         assert!(snapshot.hosts.is_empty());
@@ -449,7 +461,7 @@ mod tests {
             snapshot.config.path,
             dir.path().join("hosts.json").to_string_lossy()
         );
-        service.stop();
+        stop(&service);
     }
 
     #[test]
@@ -457,7 +469,7 @@ mod tests {
         let dir = ShortTempDir::new();
         let (sink, _snapshots) = RecordingSink::new();
         let (spawn_sink, received) = RecordingSpawnSink::new();
-        let service = HostsService::start(
+        let service = Arc::new(HostsService::start(
             dir.path(),
             ServiceDeps::system(
                 RecordingLayoutSink::new().0,
@@ -465,7 +477,7 @@ mod tests {
                 RecordingTerminalSink::new(),
             ),
             sink,
-        );
+        ));
         let events: &dyn HostEvents = &*service.inner;
         let host = host_id(HOST_A);
         let spawned = Spawned {
@@ -482,7 +494,7 @@ mod tests {
             Ok((host.clone(), SpawnReply::Spawned(spawned)))
         );
         assert_eq!(recv(&received), Ok((host, SpawnReply::Disconnected)));
-        service.stop();
+        stop(&service);
     }
 
     #[test]
@@ -493,7 +505,7 @@ mod tests {
         let dir = ShortTempDir::new();
         let (sink, snapshots) = RecordingSink::new();
         let (layout_sink, received) = RecordingLayoutSink::new();
-        let service = HostsService::start(
+        let service = Arc::new(HostsService::start(
             dir.path(),
             ServiceDeps::system(
                 layout_sink,
@@ -501,7 +513,7 @@ mod tests {
                 RecordingTerminalSink::new(),
             ),
             sink,
-        );
+        ));
         drop(snapshots);
         let events: &dyn HostEvents = &*service.inner;
         let host = host_id(HOST_A);
@@ -544,7 +556,7 @@ mod tests {
             ))
         );
         assert_eq!(recv(&received), Ok(LayoutEvent::Disconnected(host)));
-        service.stop();
+        stop(&service);
     }
 
     #[test]
@@ -555,7 +567,7 @@ mod tests {
         let dir = ShortTempDir::new();
         let (sink, snapshots) = RecordingSink::new();
         let (layout_sink, received) = RecordingLayoutSink::new();
-        let service = HostsService::start(
+        let service = Arc::new(HostsService::start(
             dir.path(),
             ServiceDeps::system(
                 layout_sink,
@@ -563,7 +575,7 @@ mod tests {
                 RecordingTerminalSink::new(),
             ),
             sink,
-        );
+        ));
         drop(snapshots);
         let events: &dyn HostEvents = &*service.inner;
         let host = host_id(HOST_A);
@@ -600,7 +612,7 @@ mod tests {
             recv(&received),
             Ok(LayoutEvent::PanelReply(host, PanelReply::Disconnected))
         );
-        service.stop();
+        stop(&service);
     }
 
     #[test]
@@ -618,7 +630,7 @@ mod tests {
                 .iter()
                 .all(|h| matches!(h.connection, ConnectionState::Failed { .. }))
         });
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
@@ -636,7 +648,7 @@ mod tests {
         assert_eq!(snapshot.hosts[0].host_id, Some(host_id(HOST_A)));
         let written = parse_hosts(&f.bytes()).expect("hosts.json stays valid");
         assert_eq!(written.hosts[0].host_id, Some(host_id(HOST_A)));
-        f.service.stop();
+        stop(&f.service);
         assert!(probe.closed_by_client());
     }
 
@@ -655,7 +667,7 @@ mod tests {
         assert_eq!(wait_failed(&f, "mini"), failed(&expected, None));
         assert_eq!(f.bytes(), before);
         assert_eq!(f.service.snapshot().hosts[0].host_id, Some(host_id(HOST_A)));
-        f.service.stop();
+        stop(&f.service);
         assert!(probe.closed_by_client());
     }
 
@@ -691,7 +703,7 @@ mod tests {
         );
         assert_eq!(snapshot.hosts[1].host_id, None);
         assert_eq!(f.bytes(), before);
-        f.service.stop();
+        stop(&f.service);
         assert!(probe_first.closed_by_client());
         assert!(probe_second.closed_by_client());
     }
@@ -713,7 +725,7 @@ mod tests {
             )
         );
         assert_eq!(expected_detail.chars().count(), 257);
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
@@ -746,7 +758,7 @@ mod tests {
         );
         assert_eq!(detail.chars().count(), 257);
         assert!(detail.ends_with('…'));
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
@@ -779,15 +791,15 @@ mod tests {
                 retry_in_ms: 1000
             })
         );
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
     fn retry_names_an_unknown_host() {
         let f = start(&file(&[MINI_ENTRY]), Vec::new(), FakeClock::new());
-        let error = f.service.retry("nope").expect_err("unknown host");
+        let error = retry(&f.service, "nope").expect_err("unknown host");
         assert_eq!(error.to_string(), r#"no host named "nope" in hosts.json"#);
-        f.service.stop();
+        stop(&f.service);
     }
 
     #[test]
@@ -807,18 +819,16 @@ mod tests {
         let connector = f.connectors.get("mini").expect("scripted").clone();
         assert_eq!(connector.connect_count(), 1);
 
-        f.service.retry("mini").expect("retry a failed host");
+        retry(&f.service, "mini").expect("retry a failed host");
         wait_for_snapshot(&f.snapshots, |s| {
             connection_of(s, "mini") == Some(ConnectionState::Connected)
         });
         assert_eq!(connector.connect_count(), 2);
 
-        f.service
-            .retry("mini")
-            .expect("a connected host is a no-op");
+        retry(&f.service, "mini").expect("a connected host is a no-op");
         assert_eq!(connector.connect_count(), 2);
         assert_eq!(f.built.load(Ordering::SeqCst), 2);
-        f.service.stop();
+        stop(&f.service);
         assert!(probe.closed_by_client());
     }
 }

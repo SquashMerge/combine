@@ -12,7 +12,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link};
+use super::link::{
+    ticking_reader, Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link,
+};
 
 const HERDR_CORE_DIR: &str = "herdr-core";
 const DEFAULT_SOCKET_SUFFIX: &str = "herdr-core/default/default.sock";
@@ -107,13 +109,16 @@ impl Connector for LocalSocketConnector {
             }));
         }
         let stream = UnixStream::connect(&self.socket).map_err(|e| self.cannot_connect(e))?;
-        let reader = stream.try_clone().map_err(|e| self.cannot_connect(e))?;
+        let reader = stream
+            .try_clone()
+            .and_then(ticking_reader)
+            .map_err(|e| self.cannot_connect(e))?;
         let shutter = stream.try_clone().map_err(|e| self.cannot_connect(e))?;
         let closer: Closer = Arc::new(move || {
             let _ = shutter.shutdown(Shutdown::Both);
         });
         Ok(Link::new(
-            Box::new(reader),
+            reader,
             Box::new(stream),
             closer,
             Box::new(NoExit),

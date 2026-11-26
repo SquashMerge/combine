@@ -71,7 +71,12 @@ python3 -I -B tools/arch-guard/test_check.py
 python3 -I -B tools/arch-guard/check.py
 
 step "architecture: trellis rules check"
-if command -v trellis >/dev/null 2>&1; then
+python3 -I -B tools/trellis-check/test_ci_check.py
+if command -v trellis >/dev/null 2>&1 && [ "${CI:-}" = true ]; then
+  # A cold daemon on a runner can answer index_not_ready or deadline_exceeded at first;
+  # ci-check.sh retries exactly those, and fails at once on anything else.
+  sh tools/trellis-check/ci-check.sh
+elif command -v trellis >/dev/null 2>&1; then
   trellis rules check --format json >"${TMPDIR:-/tmp}/combine-trellis-$$.json"
   status=$?
   rm -f "${TMPDIR:-/tmp}/combine-trellis-$$.json"
@@ -82,6 +87,10 @@ else
   echo "verify: trellis is not on PATH; install it, or set COMBINE_VERIFY_WITHOUT_TRELLIS=1 where it can't run" >&2
   exit 1
 fi
+
+# The factory's verify on CI (.factory.json); its tests replay GitHub with stand-ins, offline.
+step "tools: ci_verify.sh"
+python3 -I -B tools/ci-verify/test_ci_verify.py
 
 if [ -f app/web/package-lock.json ]; then
   step "frontend: npm ci, typecheck, tests"
