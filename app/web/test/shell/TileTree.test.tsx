@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { dictWith, emptyDict } from '../../src/model/dict';
@@ -243,5 +245,37 @@ describe('TileTree panel controls', () => {
     expect(document.querySelector('main')?.hasAttribute('data-held')).toBe(false);
     expect(document.querySelector('.layout-held')).toBeNull();
     expect(control('Close panel p1').disabled).toBe(false);
+  });
+});
+
+describe('tile bar containment (shell.css)', () => {
+  const css = readFileSync(join(import.meta.dirname, '../../src/shell/shell.css'), 'utf8');
+
+  const declarations = (selector: string): string[] => {
+    const rule = css
+      .split('}')
+      .map((block) => block.split('{'))
+      .find(([head]) => head?.trim() === selector);
+    expect(rule, `shell.css has a rule for ${selector}`).toBeDefined();
+    return (rule?.[1] ?? '').split(';').map((line) => line.trim().replace(/\s+/g, ' '));
+  };
+
+  it('clips a tile to its own width so its bar cannot spill into a neighbour', () => {
+    expect(declarations('.tile')).toEqual(
+      expect.arrayContaining(['min-width: 0', 'overflow: hidden']),
+    );
+  });
+
+  it('wraps the bar and its tablist instead of overflowing the tile', () => {
+    expect(declarations('.tile-bar')).toContain('flex-wrap: wrap');
+    expect(declarations('.tile-bar [role="tablist"]')).toEqual(
+      expect.arrayContaining(['flex-wrap: wrap', 'min-width: 0']),
+    );
+  });
+
+  it('keeps tile buttons and tab controls at their natural size', () => {
+    expect(declarations('.tile-bar > button,\n.tile-bar .tab-wrap')).toEqual(
+      expect.arrayContaining(['flex: none', 'white-space: nowrap']),
+    );
   });
 });

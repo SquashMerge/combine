@@ -151,6 +151,8 @@
 .tile {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid GrayText;
 }
 
@@ -160,6 +162,7 @@
 
 .tile-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
 }
@@ -168,6 +171,14 @@
   display: flex;
   flex: 1 1 auto;
   gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tile-bar > button,
+.tile-bar .tab-wrap {
+  flex: none;
+  white-space: nowrap;
 }
 
 .tile-bar [role="tab"][aria-selected="true"] {
