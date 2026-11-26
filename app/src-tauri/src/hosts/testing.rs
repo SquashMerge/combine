@@ -12,9 +12,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use combine_protocol::{
     daemon_handshake, read_message, write_message, ClientMessage, DaemonMessage, ErrorCode,
@@ -24,7 +24,10 @@ use combine_protocol::{
 use super::attachments::{StreamDelivery, StreamId, TerminalSink};
 use super::config::StoreError;
 use super::identity::HostIdStore;
-use super::link::{Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link};
+use super::link::{
+    ticking_reader, Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link,
+    TimedSocket,
+};
 use super::model::{ConnectionState, HostsSnapshot, SpaceView};
 use super::panels::PanelReply;
 use super::service::SnapshotSink;
@@ -88,15 +91,21 @@ pub fn write_fake_ssh(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
+/// One encoded `welcome` frame naming `id`.
+pub fn welcome_frame(id: &HostId) -> Vec<u8> {
+    DaemonMessage::Welcome(Welcome {
+        protocol_version: combine_protocol::PROTOCOL_VERSION,
+        host_id: id.clone(),
+    })
+    .encode()
+    .expect("encode welcome")
+}
+
 /// Writes one encoded `welcome` frame, for a fake ssh to `cat`.
 pub fn write_welcome_file(dir: &Path, id: &HostId) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let path = dir.join(format!("welcome-{n}.bin"));
-    let welcome = DaemonMessage::Welcome(Welcome {
-        protocol_version: combine_protocol::PROTOCOL_VERSION,
-        host_id: id.clone(),
-    });
-    fs::write(&path, welcome.encode().expect("encode welcome")).expect("write the frame");
+    fs::write(&path, welcome_frame(id)).expect("write the frame");
     path
 }
 
@@ -114,6 +123,21 @@ pub fn joins_within(handle: JoinHandle<()>, limit: Duration) -> bool {
         let _ = done.send(());
     });
     joined.recv_timeout(limit).is_ok()
+}
+
+/// Runs `call` on a helper thread and returns its result, or fails the test naming `site` if it
+/// has not returned within [`WAIT`]. A blocking call that never returns then fails in seconds
+/// instead of using up the run's timeout (#82). On a timeout the helper is left behind.
+pub fn within<T: Send + 'static>(site: &str, call: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(call());
+    });
+    match finished.recv_timeout(WAIT) {
+        Ok(value) => value,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!("{site} did not return within {WAIT:?}"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("{site} panicked"),
+    }
 }
 
 enum Script {
@@ -169,18 +193,22 @@ impl Double {
     }
 
     /// Serves one connection over `UnixStream::pair()`. The thread ends when the client closes
-    /// the link, so joining it proves the client did.
+    /// the link, so joining it proves the client did. Both ends read through
+    /// [`ticking_reader`], as a local socket link does.
     pub fn pair(self) -> (Link, DropHandle, JoinHandle<()>) {
         let (client, server) = UnixStream::pair().expect("socket pair");
         let drop_handle = DropHandle {
             stream: server.try_clone().expect("clone the server end"),
         };
-        let reader = client.try_clone().expect("clone the client end");
+        let reader = client
+            .try_clone()
+            .and_then(ticking_reader)
+            .expect("clone the client end");
         let shutter = client.try_clone().expect("clone the client end");
         let closer: Closer = Arc::new(move || {
             let _ = shutter.shutdown(Shutdown::Both);
         });
-        let link = Link::new(Box::new(reader), Box::new(client), closer, Box::new(NoExit));
+        let link = Link::new(reader, Box::new(client), closer, Box::new(NoExit));
         let thread = thread::spawn(move || self.script.serve(server));
         (link, drop_handle, thread)
     }
@@ -194,19 +222,23 @@ impl Double {
 }
 
 impl Script {
-    fn serve(self, mut stream: UnixStream) {
-        if let Ok(mut writer) = stream.try_clone() {
-            if self.converse(&mut stream, &mut writer) {
+    fn serve(self, stream: UnixStream) {
+        let ends = stream
+            .try_clone()
+            .and_then(ticking_reader)
+            .and_then(|reader| Ok((reader, stream.try_clone()?)));
+        if let Ok((mut reader, mut writer)) = ends {
+            if self.converse(&mut *reader, &mut writer) {
                 let mut buf = [0u8; 256];
-                while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
+                while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
             }
         }
         let _ = stream.shutdown(Shutdown::Both);
     }
 
     /// Plays the daemon's side of the handshake. True when the link should now be held open.
-    fn converse(self, reader: &mut UnixStream, writer: &mut UnixStream) -> bool {
-        fn hello(reader: &mut UnixStream) -> bool {
+    fn converse(self, reader: &mut (dyn Read + Send), writer: &mut UnixStream) -> bool {
+        fn hello(reader: &mut (dyn Read + Send)) -> bool {
             matches!(read_message::<ClientMessage, _>(reader), Ok(Some(_)))
         }
         fn send(writer: &mut UnixStream, message: &DaemonMessage) -> bool {
@@ -277,7 +309,8 @@ impl Probe {
     }
 }
 
-struct NoExit;
+/// An exit report for a link with no child process.
+pub struct NoExit;
 
 impl ExitReport for NoExit {
     fn finish(self: Box<Self>) -> Option<ExitInfo> {
@@ -298,6 +331,8 @@ pub fn serve_on_socket(path: &Path, double: Double) -> JoinHandle<()> {
 
 pub enum Step {
     Serve(Double),
+    /// A link built by the test.
+    Link(Link),
     /// A link that is at EOF and whose child exited with `code` after writing `stderr`.
     Exit {
         stderr: &'static str,
@@ -340,6 +375,7 @@ impl Connector for ScriptedConnector {
         let step = lock(&self.steps).pop_front();
         match step {
             Some(Step::Serve(double)) => Ok(double.connect()),
+            Some(Step::Link(link)) => Ok(link),
             Some(Step::Exit { stderr, code }) => Ok(Link::new(
                 Box::new(io::empty()),
                 Box::new(io::sink()),
@@ -355,6 +391,102 @@ impl Connector for ScriptedConnector {
                 detail: None,
             })),
         }
+    }
+}
+
+struct LostWakeupState {
+    unread: Vec<u8>,
+    shut: bool,
+    timeout: Option<Duration>,
+    blocked: usize,
+}
+
+/// A socket whose closer's wake-up is always lost, as macOS sometimes loses it (#82).
+///
+/// Reads return `unread` first. After that a read blocks. The closer marks the socket shut but
+/// never wakes a blocked read, so the read ends only when its read timeout runs out, with
+/// `WouldBlock` as `SO_RCVTIMEO` reports it. A read with no timeout never returns. A read that
+/// starts after the closer ran returns end of file.
+#[derive(Clone)]
+pub struct LostWakeupSocket {
+    state: Arc<(Mutex<LostWakeupState>, Condvar)>,
+}
+
+impl LostWakeupSocket {
+    pub fn new(unread: Vec<u8>) -> Self {
+        LostWakeupSocket {
+            state: Arc::new((
+                Mutex::new(LostWakeupState {
+                    unread,
+                    shut: false,
+                    timeout: None,
+                    blocked: 0,
+                }),
+                Condvar::new(),
+            )),
+        }
+    }
+
+    /// Marks the socket shut without waking a blocked read.
+    pub fn closer(&self) -> Closer {
+        let state = Arc::clone(&self.state);
+        Arc::new(move || lock(&state.0).shut = true)
+    }
+
+    /// Adds bytes for the next read to return, without waking a blocked read.
+    pub fn push(&self, bytes: &[u8]) {
+        lock(&self.state.0).unread.extend_from_slice(bytes);
+    }
+
+    /// Waits until reads have blocked `count` times in all, or fails the test after [`WAIT`].
+    pub fn wait_blocked(&self, count: usize) {
+        let deadline = Instant::now() + WAIT;
+        while lock(&self.state.0).blocked < count {
+            assert!(
+                Instant::now() < deadline,
+                "reads did not block {count} times within {WAIT:?}"
+            );
+            thread::yield_now();
+        }
+    }
+}
+
+impl Read for LostWakeupSocket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let (state, never_notified) = &*self.state;
+        let mut s = lock(state);
+        if !s.unread.is_empty() {
+            let n = buf.len().min(s.unread.len());
+            buf[..n].copy_from_slice(&s.unread[..n]);
+            s.unread.drain(..n);
+            return Ok(n);
+        }
+        if s.shut {
+            return Ok(0);
+        }
+        s.blocked += 1;
+        match s.timeout {
+            Some(timeout) => {
+                drop(
+                    never_notified
+                        .wait_timeout(s, timeout)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            None => loop {
+                s = never_notified
+                    .wait(s)
+                    .unwrap_or_else(PoisonError::into_inner);
+            },
+        }
+    }
+}
+
+impl TimedSocket for LostWakeupSocket {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        lock(&self.state.0).timeout = timeout;
+        Ok(())
     }
 }
 
@@ -544,13 +676,18 @@ impl SnapshotSink for RecordingSink {
     }
 }
 
-/// Receives snapshots until one satisfies `wanted`, or fails the test after [`WAIT`].
+/// Receives snapshots until one satisfies `wanted`, or fails the test after [`WAIT`] in all, so a
+/// stream of other snapshots cannot keep it waiting.
 pub fn wait_for_snapshot(
     rx: &Receiver<HostsSnapshot>,
     wanted: impl Fn(&HostsSnapshot) -> bool,
 ) -> HostsSnapshot {
+    let deadline = Instant::now() + WAIT;
     loop {
-        let snapshot = recv(rx);
+        let left = deadline.saturating_duration_since(Instant::now());
+        let snapshot = rx
+            .recv_timeout(left)
+            .unwrap_or_else(|_| panic!("no wanted snapshot arrived within {WAIT:?}"));
         if wanted(&snapshot) {
             return snapshot;
         }

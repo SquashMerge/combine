@@ -449,12 +449,12 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use super::super::failure::SshFailure;
-    use super::super::link::FailureText;
+    use super::super::link::{ticking_reader, FailureText};
     use super::super::ssh::SshConnector;
     use super::super::testing::{
-        host_id, joins_within, recv, write_fake_ssh, write_welcome_file, Double, Event, FakeClock,
-        MemoryHostIdStore, RecordingEvents, ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B,
-        WAIT,
+        host_id, joins_within, recv, welcome_frame, write_fake_ssh, write_welcome_file, Double,
+        Event, FakeClock, LostWakeupSocket, MemoryHostIdStore, NoExit, RecordingEvents,
+        ScriptedConnector, ShortTempDir, Step, HOST_A, HOST_B, WAIT,
     };
     use super::*;
 
@@ -821,6 +821,35 @@ mod tests {
         assert!(joins_within(handle, WAIT));
         assert!(stop.is_stopped());
         assert!(probe.closed_by_client());
+    }
+
+    /// #82: macOS can lose the closer's wake-up of a session read that is just going to sleep,
+    /// and `HostsService::stop` then joined the supervisor for ever. The socket here always
+    /// loses it, and the test stops only once the session's read has blocked.
+    #[test]
+    fn stop_ends_a_session_whose_read_missed_the_wake_up() {
+        let socket = LostWakeupSocket::new(welcome_frame(&a()));
+        let link = Link::new(
+            ticking_reader(socket.clone()).expect("set the read timeout"),
+            Box::new(std::io::sink()),
+            socket.closer(),
+            Box::new(NoExit),
+        );
+        let rig = rig(vec![Step::Link(link)]);
+        let stop = StopSignal::new();
+        let handle = spawn_supervisor("mini".to_string(), Some(a()), None, rig.deps, stop.clone());
+        assert_eq!(connection(recv(&rig.events)), ConnectionState::Connecting);
+        assert_eq!(connection(recv(&rig.events)), ConnectionState::Connected);
+        socket.wait_blocked(1);
+        stop.stop();
+        assert!(
+            joins_within(handle, WAIT),
+            "the supervisor did not stop within {WAIT:?}: its read slept through the closer"
+        );
+        assert_eq!(
+            connection(recv(&rig.events)),
+            dropped("connection closed", None, 1000)
+        );
     }
 
     #[test]

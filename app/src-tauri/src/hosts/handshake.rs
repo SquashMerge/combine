@@ -113,13 +113,16 @@ fn code_name(code: ErrorCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{host_id, joins_within, Double, HOST_A, WAIT};
+    use super::super::testing::{host_id, joins_within, within, Double, HOST_A, WAIT};
     use super::*;
 
     fn handshake_with(double: Double) -> Result<Welcome, HandshakeFailure> {
         let (mut link, _drop, server) = double.pair();
-        let result = run_handshake(&mut *link.reader, &mut *link.writer);
-        drop(link);
+        let result = within("run_handshake", move || {
+            let result = run_handshake(&mut *link.reader, &mut *link.writer);
+            drop(link);
+            result
+        });
         assert!(joins_within(server, WAIT));
         result
     }
