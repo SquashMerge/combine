@@ -16,6 +16,7 @@ use combine_protocol::{
 };
 use combined::core::{LayoutTiming, LAYOUT_FILE, PIN_UNDONE, SCRATCH_TTL_MS};
 use combined::model::Lifetime;
+use combined::rpc::ServeOptions;
 use daemon_support::{wait_until, WireClient};
 use mcp_support::{cwd_caller, wire_options, McpWire};
 use panel_support::{
@@ -54,6 +55,19 @@ fn ready(rig: PanelRig) -> PanelRig {
 
 fn rig() -> PanelRig {
     ready(PanelRig::with_config(config()))
+}
+
+/// A rig that never holds a flush back. The default holds one back when it comes less than 16 ms
+/// after the last, which can move a close's layout push after its panels push and hide a settle
+/// pass that returned without running the layout work.
+fn unthrottled_rig() -> PanelRig {
+    ready(PanelRig::with_config(PanelServerConfig {
+        options: ServeOptions {
+            flush_interval: Duration::ZERO,
+            ..wire_options()
+        },
+        ..config()
+    }))
 }
 
 /// The panel IDs the tiles of `layout` name, in tree order.
@@ -278,7 +292,7 @@ fn closing_a_scratch_panel_deletes_it_and_its_layout_id() {
 /// panels and the reply first and the layout after them.
 #[test]
 fn a_close_flushes_layout_then_panels_then_its_reply() {
-    let rig = rig();
+    let rig = unthrottled_rig();
     rig.create(named("p", markdown("one"))).unwrap();
     wait_stored(&rig, &["p"]);
     let (mut client, _) = watcher(&rig);
@@ -295,7 +309,7 @@ fn a_close_flushes_layout_then_panels_then_its_reply() {
 
 #[test]
 fn one_close_makes_one_layout_push_and_settle_returns() {
-    let rig = rig();
+    let rig = unthrottled_rig();
     rig.create(named("p", markdown("one"))).unwrap();
     wait_stored(&rig, &["p"]);
     let (mut client, before) = watcher(&rig);
