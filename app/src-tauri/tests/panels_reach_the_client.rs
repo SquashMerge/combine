@@ -20,8 +20,8 @@ use combine_app::hosts::panels::PanelReply;
 use combine_app::hosts::service::{HostsService, ServiceDeps, SnapshotSink};
 use combine_app::hosts::spawn::{SpawnReply, SpawnSink};
 use combine_protocol::{
-    ClientMessage, GetPanel, HostId, LayoutNode, PanelState, Panels, RenderStatus, Renderer,
-    ReportRender, WatchLayout,
+    ClientMessage, ClosePanel, ErrorCode, GetPanel, HostId, LayoutNode, PanelState, Panels,
+    PinPanel, RenderStatus, Renderer, ReportRender, WatchLayout,
 };
 use combined::core::{PanelCreate, PANELS_LOADING};
 use combined::model::Lifetime;
@@ -232,6 +232,137 @@ fn a_panel_created_in_core_reaches_the_client() {
                 render.revision == panel.revision && render.status == RenderStatus::Rendered
             })
     });
+
+    service.stop();
+    daemon.stop();
+}
+
+/// The next close, pin or refusal reply of the host, skipping every other event.
+fn next_answer(events: &Receiver<PanelEvent>, what: &str) -> PanelReply {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        if let PanelEvent::PanelReply(
+            _,
+            reply @ (PanelReply::Closed(_) | PanelReply::Pinned(_) | PanelReply::Error { .. }),
+        ) = next_event(events, what)
+        {
+            return reply;
+        }
+    }
+}
+
+fn markdown_create(id: &str, lifetime: Lifetime) -> PanelCreate {
+    PanelCreate {
+        id: Some(id.to_string()),
+        lifetime,
+        renderer: Renderer::Markdown,
+        title: None,
+        idempotency_key: None,
+        created_by: None,
+        placement: None,
+        content: SOURCE.to_string(),
+    }
+}
+
+#[test]
+fn close_and_pin_reach_the_client() {
+    let scratch = ScratchDir::new();
+    let mut daemon = PanelDaemon::new(&scratch, "core", HOST);
+    daemon.seed_layout(LAYOUT);
+    daemon.start();
+    let client_dir = scratch.path.join("client");
+    write_hosts(
+        &client_dir,
+        serde_json::json!([{ "name": "core", "socket": daemon.checked_socket() }]),
+    );
+    let (sink, events) = RecordingPanels::new();
+    let service = start_service(&client_dir, sink);
+    let space = daemon.space();
+    let host = daemon.host_id.clone();
+    wait_until("the host to connect", || {
+        service.snapshot().hosts.iter().any(|view| {
+            view.connection == ConnectionState::Connected && view.host_id.as_ref() == Some(&host)
+        })
+    });
+    let outbound = service.outbound();
+    outbound
+        .send(&host, RequestKind::Layout, |request| {
+            ClientMessage::WatchLayout(WatchLayout {
+                request,
+                space: space.0.clone(),
+            })
+        })
+        .expect("send the watch");
+    wait_until("the space's panels to be read", || {
+        daemon.panels().list(&space).is_ok()
+    });
+    daemon
+        .panels()
+        .create(&space, markdown_create("doc", Lifetime::Persistent))
+        .expect("create doc");
+    daemon
+        .panels()
+        .create(&space, markdown_create("note", Lifetime::Scratch))
+        .expect("create note");
+
+    let closing = outbound
+        .send(&host, RequestKind::Panel, |request| {
+            ClientMessage::ClosePanel(ClosePanel {
+                request,
+                space: space.0.clone(),
+                panel: "doc".to_string(),
+            })
+        })
+        .expect("send the close");
+    match next_answer(&events, "the close") {
+        PanelReply::Closed(closed) => {
+            assert_eq!(closed.request, closing);
+            assert_eq!(
+                (closed.space.as_str(), closed.panel.as_str()),
+                (space.0.as_str(), "doc")
+            );
+        }
+        other => panic!("expected the close, got {other:?}"),
+    }
+
+    let pinning = outbound
+        .send(&host, RequestKind::Panel, |request| {
+            ClientMessage::PinPanel(PinPanel {
+                request,
+                space: space.0.clone(),
+                panel: "note".to_string(),
+            })
+        })
+        .expect("send the pin");
+    match next_answer(&events, "the pin") {
+        PanelReply::Pinned(pinned) => {
+            assert_eq!(pinned.request, pinning);
+            assert_eq!(pinned.panel, "note");
+        }
+        other => panic!("expected the pin, got {other:?}"),
+    }
+
+    let again = outbound
+        .send(&host, RequestKind::Panel, |request| {
+            ClientMessage::PinPanel(PinPanel {
+                request,
+                space: space.0.clone(),
+                panel: "note".to_string(),
+            })
+        })
+        .expect("send the second pin");
+    match next_answer(&events, "the refusal") {
+        PanelReply::Error {
+            request,
+            code,
+            message,
+        } => {
+            assert_eq!((request, code), (again, ErrorCode::InvalidRequest));
+            assert!(!message.is_empty());
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 
     service.stop();
     daemon.stop();

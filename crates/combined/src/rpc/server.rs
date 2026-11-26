@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, DroppedNotice, ErrorCode, ErrorMessage, GetPanel, HostId,
-    JsonRpcMessage, Layout, Mcp, McpOpen, McpOpened, PanelState, Panels, ReportRender, RequestId,
-    TermId,
+    ClientMessage, ClosePanel, DaemonMessage, DroppedNotice, ErrorCode, ErrorMessage, GetPanel,
+    HostId, JsonRpcMessage, Layout, Mcp, McpOpen, McpOpened, PanelClosed, PanelState, Panels,
+    PinPanel, ReportRender, RequestId, TermId,
 };
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
@@ -33,12 +33,12 @@ use super::panel_lane::{LaneOutcome, PanelIo};
 use super::socket::BoundSocket;
 use super::{until_shutdown, ServeOptions, ServerParts, ServerStats};
 use crate::core::{
-    dropped_notice, layout_snapshot, ops_from_wire, panel_folder_refusal, panel_reply,
-    panels_loading, panels_message, resolve_caller, ClientRender, ConnectionId, Driver,
-    LayoutEffect, LayoutOp, LayoutRead, LayoutWritten, Layouts, MutateError, PanelApiError,
-    PanelCreate, PanelEffect, PanelEvent, PanelList, PanelRead, PanelStore, PanelView,
-    RenderStatuses, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError, LAYOUT_FILE,
-    LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
+    dropped_notice, layout_snapshot, ops_from_wire, panel_error_code, panel_folder_refusal,
+    panel_reply, panels_loading, panels_message, pin_answer, resolve_caller, ClientRender,
+    ConnectionId, Driver, LayoutEffect, LayoutOp, LayoutRead, LayoutWritten, Layouts, MutateError,
+    PanelApiError, PanelCreate, PanelEffect, PanelEvent, PanelList, PanelRead, PanelStore,
+    PanelView, RenderStatuses, SpawnEffect, SpawnTicket, Spawns, TerminalList, WatchError,
+    LAYOUT_FILE, LAYOUT_MAX_BYTES, PANELS_DIR, PANEL_FILE, PANEL_LIST_MAX, PANEL_MAX_BYTES,
 };
 use crate::mcp_server::{McpAudit, McpOptions};
 use crate::model::{
@@ -133,6 +133,8 @@ enum PanelOut {
         panel: String,
     },
     Error(ErrorMessage),
+    /// A reply that is already complete.
+    Answer(DaemonMessage),
 }
 
 enum LayoutOut {
@@ -172,6 +174,29 @@ enum Deferred {
     Change(SpaceId, String),
     Check(CheckDone),
     AddSpaces,
+    Client(ClientPanelCall),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientPanelKind {
+    Close,
+    Pin,
+}
+
+/// A `close_panel` or `pin_panel` a client sent.
+struct ClientPanelCall {
+    conn: ConnectionId,
+    request: RequestId,
+    space: SpaceId,
+    panel: String,
+    kind: ClientPanelKind,
+}
+
+/// A client call whose store call has run, answered at the next idle point once its file work is done.
+struct ClientAnswer {
+    call: ClientPanelCall,
+    /// The store's refusal, if it refused the call.
+    refused: Option<PanelApiError>,
 }
 
 /// A reply to a panel call, held until the call's file work has run.
@@ -252,6 +277,8 @@ struct Server {
     /// Panels a close or remove may have deleted: each is taken out of its space's layout at the
     /// next idle point, if the store then holds it removed.
     removals: Vec<(SpaceId, String)>,
+    /// Client close and pin calls the store has taken, answered at the next idle point.
+    client_answers: Vec<ClientAnswer>,
     render: RenderStatuses,
     diagram_check: Arc<dyn DiagramCheck>,
     wall: Arc<dyn WallClock>,
@@ -396,6 +423,7 @@ pub async fn serve_watched(
         panel_deferred: VecDeque::new(),
         parked_create: None,
         removals: Vec::new(),
+        client_answers: Vec::new(),
         render: RenderStatuses::new(),
         diagram_check,
         wall: wall_clock,
@@ -673,6 +701,28 @@ impl Server {
                         );
                     }
                     ClientMessage::GetPanel(get) => self.get_panel(conn, get),
+                    ClientMessage::ClosePanel(ClosePanel {
+                        request,
+                        space,
+                        panel,
+                    }) => self.client_panel_call(ClientPanelCall {
+                        conn,
+                        request,
+                        space: SpaceId(space),
+                        panel,
+                        kind: ClientPanelKind::Close,
+                    }),
+                    ClientMessage::PinPanel(PinPanel {
+                        request,
+                        space,
+                        panel,
+                    }) => self.client_panel_call(ClientPanelCall {
+                        conn,
+                        request,
+                        space: SpaceId(space),
+                        panel,
+                        kind: ClientPanelKind::Pin,
+                    }),
                     ClientMessage::ReportRender(report) => self.report_render(conn, report),
                     ClientMessage::McpOpen(open) => self.mcp_open(conn, open),
                     ClientMessage::Mcp(mcp) => self.mcp_message(conn, mcp.message),
@@ -1015,6 +1065,42 @@ impl Server {
             },
         };
         self.queue_panel_out(conn, item);
+    }
+
+    /// Runs a client's `close_panel` or `pin_panel` now when the panel lane is idle and no create is
+    /// parked, and otherwise once it is, so the store is never changed while lane work runs.
+    fn client_panel_call(&mut self, call: ClientPanelCall) {
+        if let Some(why) = panel_folder_refusal(&call.panel) {
+            let error = ErrorMessage {
+                code: ErrorCode::InvalidRequest,
+                message: format!("the panel ID isn't valid: {why}"),
+                request: Some(call.request),
+                attachment: None,
+            };
+            self.queue_panel_out(call.conn, PanelOut::Error(error));
+            return;
+        }
+        if self.panel_lane_idle() && self.parked_create.is_none() {
+            self.run_client_panel_call(call);
+        } else {
+            self.panel_deferred.push_back(Deferred::Client(call));
+        }
+    }
+
+    fn run_client_panel_call(&mut self, call: ClientPanelCall) {
+        let now = self.clock.now();
+        let result = match call.kind {
+            ClientPanelKind::Close => self.panels.close(&call.space, &call.panel, now),
+            ClientPanelKind::Pin => self.panels.pin(&call.space, &call.panel, now),
+        };
+        if call.kind == ClientPanelKind::Close && result.is_ok() {
+            self.removals.push((call.space.clone(), call.panel.clone()));
+        }
+        self.client_answers.push(ClientAnswer {
+            call,
+            refused: result.err(),
+        });
+        self.pump_panels();
     }
 
     /// Records what the connection drew. It is never answered, not even with an error.
@@ -1405,6 +1491,37 @@ impl Server {
                 self.unplace(&space, &panel);
             }
         }
+        for ClientAnswer { call, refused } in std::mem::take(&mut self.client_answers) {
+            let ClientPanelCall {
+                conn,
+                request,
+                space,
+                panel,
+                kind,
+            } = call;
+            let out = match (refused, kind) {
+                (Some(error), _) => PanelOut::Error(ErrorMessage {
+                    code: panel_error_code(&error),
+                    message: error.to_string(),
+                    request: Some(request),
+                    attachment: None,
+                }),
+                (None, ClientPanelKind::Close) => {
+                    PanelOut::Answer(DaemonMessage::PanelClosed(PanelClosed {
+                        request,
+                        space: space.0,
+                        panel,
+                    }))
+                }
+                (None, ClientPanelKind::Pin) => PanelOut::Answer(pin_answer(
+                    request,
+                    &space,
+                    &panel,
+                    self.panels.get(&space, &panel).map(|(view, _)| view),
+                )),
+            };
+            self.queue_panel_out(conn, out);
+        }
     }
 
     /// Runs the create that was waiting for its space to load. The lane is idle.
@@ -1537,6 +1654,7 @@ impl Server {
             }
             Deferred::Check(done) => self.apply_check(done),
             Deferred::AddSpaces => self.add_terminal_spaces(self.clock.now()),
+            Deferred::Client(call) => self.run_client_panel_call(call),
         }
     }
 
@@ -1762,6 +1880,7 @@ impl Server {
                         }),
                     },
                     PanelOut::Error(error) => DaemonMessage::Error(error),
+                    PanelOut::Answer(message) => message,
                 });
             }
             batch.extend(state.mcp_out.drain(..));
@@ -1825,29 +1944,6 @@ fn panels_body(panels: &PanelStore, space: &SpaceId) -> (Panels, bool) {
             },
             false,
         ),
-    }
-}
-
-/// The error code of a refused `get_panel`. Every variant is named, so a new one is a compile
-/// error here.
-fn panel_error_code(error: &PanelApiError) -> ErrorCode {
-    match error {
-        PanelApiError::UnknownSpace => ErrorCode::UnknownSpace,
-        PanelApiError::UnknownPanel { .. } => ErrorCode::UnknownPanel,
-        PanelApiError::SpaceLoading
-        | PanelApiError::Removed { .. }
-        | PanelApiError::ReadOnly
-        | PanelApiError::InvalidId { .. }
-        | PanelApiError::IdTaken { .. }
-        | PanelApiError::InvalidField { .. }
-        | PanelApiError::PanelLimit { .. }
-        | PanelApiError::TooLarge { .. }
-        | PanelApiError::NotScratch { .. }
-        | PanelApiError::ListingFailed { .. }
-        | PanelApiError::ScratchListingFailed { .. }
-        | PanelApiError::PanelFileInvalid { .. }
-        | PanelApiError::Unreadable { .. }
-        | PanelApiError::Stopped => ErrorCode::InvalidRequest,
     }
 }
 

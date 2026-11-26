@@ -49,8 +49,8 @@ pub use panel_store::{
     SCRATCH_TTL_MS,
 };
 pub use panel_wire::{
-    panel_reply, panel_summary, panels_loading, panels_message, PANELS_LOADING, SKIPPED_TRIMMED,
-    TRIMMED_REASON,
+    panel_error_code, panel_reply, panel_summary, panels_loading, panels_message, pin_answer,
+    PANELS_LOADING, PIN_UNDONE, SKIPPED_TRIMMED, TRIMMED_REASON,
 };
 pub use panels::{
     normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,
