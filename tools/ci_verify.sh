@@ -112,6 +112,24 @@ pause() {
 # CMD sees its bound as CI_VERIFY_LIMIT_S (the tests' stand-ins use it).
 kill_grace_s=5
 dog=''
+
+# watchdog PID SECONDS SIGNAL [SECONDS SIGNAL]: in the background, sends PID the first signal after
+# the first wait, then the second after the second. Killing the watchdog stops it, sleep included.
+watchdog() {
+  target=$1
+  (
+    trap 'kill "$snooze" 2>/dev/null; exit 0' TERM
+    /bin/sleep "$2" &
+    snooze=$!
+    wait "$snooze" || exit 0
+    kill "-$3" "$target" 2>/dev/null || exit 0
+    [ "$#" -ge 5 ] || exit 0
+    /bin/sleep "$4" &
+    snooze=$!
+    wait "$snooze" && kill "-$5" "$target" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 bounded() {
   limit=$(($1 - $(now) - kill_grace_s))
   shift
@@ -119,16 +137,7 @@ bounded() {
   if [ "$call_s" -gt 0 ] && [ "$call_s" -lt "$limit" ]; then limit=$call_s; fi
   CI_VERIFY_LIMIT_S=$limit "$@" </dev/null &
   pid=$!
-  (
-    trap 'kill "$snooze" 2>/dev/null; exit 0' TERM
-    /bin/sleep "$limit" &
-    snooze=$!
-    wait "$snooze" || exit 0
-    kill -TERM "$pid" 2>/dev/null || exit 0
-    /bin/sleep "$kill_grace_s" &
-    snooze=$!
-    wait "$snooze" && kill -KILL "$pid" 2>/dev/null
-  ) </dev/null >/dev/null 2>&1 &
+  watchdog "$pid" "$limit" TERM "$kill_grace_s" KILL
   dog=$!
   wait "$pid"
   rc=$?
@@ -178,13 +187,30 @@ ref="refs/heads/$branch"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ci-verify.XXXXXX") || unavailable "cannot make a scratch directory"
 pushed=0
+# Stops a child still running when the script is cut short (a git or gh call, or a sleep):
+# TERM, KILL kill_grace_s later if it ignores TERM, and waits for it, so none outlives the
+# script. Then stops that call's watchdog.
+stop_child() {
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null
+    watchdog "$pid" "$kill_grace_s" KILL
+    reaper=$!
+    wait "$pid" 2>/dev/null
+    kill "$reaper" 2>/dev/null
+    wait "$reaper" 2>/dev/null
+  fi
+  if [ -n "$dog" ]; then
+    kill "$dog" 2>/dev/null
+    wait "$dog" 2>/dev/null
+  fi
+  pid=''
+  dog=''
+}
+
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
-  [ -z "$pid" ] || kill "$pid" 2>/dev/null
-  [ -z "$dog" ] || kill "$dog" 2>/dev/null
-  pid=''
-  dog=''
+  stop_child
   if bounded "$hard_end" git push --quiet origin --delete "$ref" >/dev/null 2>&1; then
     say "deleted $branch"
   elif [ "$pushed" = 1 ]; then

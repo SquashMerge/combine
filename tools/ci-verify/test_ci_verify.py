@@ -81,6 +81,8 @@ def spend():
 def answer(item):
     sys.stdout.write(item.get("out", ""))
     sys.stderr.write(item.get("err", ""))
+    if item.get("hang"):
+        open(os.path.join(stub, "hang-pid"), "w").write(str(os.getpid()))
     if item.get("hang") == "ignore-term":
         import signal, time
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -563,6 +565,35 @@ class CiVerify(unittest.TestCase):
         result = self.go(
             {"probe": {"hang": "ignore-term"}, "polls": [PASSED]}, 75, {"CI_VERIFY_CALL_TIMEOUT_S": "1"}, fake_time=False
         )
+        self.assertLess(time.monotonic() - started, 30)
+        self.assert_cleaned_up(result)
+
+    def test_sigterm_during_a_call_ignoring_term_leaves_no_child(self):
+        def terminate_once_hanging(proc, stub):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not (stub / "hang-pid").exists():
+                time.sleep(0.05)
+            time.sleep(0.5)
+            proc.send_signal(signal.SIGTERM)
+            hung.append(int((stub / "hang-pid").read_text()))
+
+        hung = []
+        started = time.monotonic()
+        try:
+            result = self.go(
+                {"polls": [NOTHING, {"hang": "ignore-term"}]},
+                75,
+                {"CI_VERIFY_CALL_TIMEOUT_S": "60", "CI_VERIFY_POLL_S": "1"},
+                fake_time=False,
+                on_start=terminate_once_hanging,
+            )
+            self.assertEqual(len(hung), 1)
+            with self.assertRaises(ProcessLookupError, msg="the TERM-ignoring gh outlived the script"):
+                os.kill(hung[0], 0)
+        finally:
+            for child in hung:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(child, signal.SIGKILL)
         self.assertLess(time.monotonic() - started, 30)
         self.assert_cleaned_up(result)
 
