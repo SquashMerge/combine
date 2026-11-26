@@ -1,6 +1,6 @@
-# Combine — Spec (rev 28)
+# Combine — Spec (rev 29)
 
-Updated 2026-11-25
+Updated 2026-11-26
 
 Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 28 (CI):** `./tools/verify` runs on GitHub Actions (`.github/workflows/verify.yml`) for every pull request and every push to `main`, on a macOS arm64 runner with pinned Rust, Node, Python and trellis. On a runner the trellis step retries only trellis's typed cold-start answers (`index_not_ready`, `deadline_exceeded`), at most four attempts; everything else fails at once. The herdr-core run and an x86_64 build stay local. The plan is for CI to become the full check, so local full verifies can stop.
 
 **Changes from rev 27 (#48, M2-S5, panels reach the client):** panels reach the client.
 
