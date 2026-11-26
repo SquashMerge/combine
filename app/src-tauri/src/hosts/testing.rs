@@ -684,7 +684,12 @@ pub fn wait_for_snapshot(
 ) -> HostsSnapshot {
     let deadline = Instant::now() + WAIT;
     loop {
+        // recv_timeout(0) still hands over a queued snapshot, so a stream that never runs dry
+        // would outlive the deadline without this check.
         let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            panic!("no wanted snapshot arrived within {WAIT:?}");
+        }
         let snapshot = rx
             .recv_timeout(left)
             .unwrap_or_else(|_| panic!("no wanted snapshot arrived within {WAIT:?}"));
