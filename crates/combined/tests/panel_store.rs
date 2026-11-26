@@ -1957,6 +1957,31 @@ fn unknown_ids_while_loading_are_space_loading() {
 }
 
 #[test]
+fn close_and_pin_on_a_space_that_failed_to_list_answer_the_listing_text() {
+    let mut rig = Rig::new();
+    let mut store = started_store(rig.timing);
+    store.add_space(&space(), rig.t());
+    store.take_effects();
+    store.apply_listing(
+        &space(),
+        Err(StoreError::Unavailable("boom".to_owned())),
+        rig.t(),
+    );
+    let expected = PanelApiError::ListingFailed {
+        detail: "boom".to_owned(),
+    };
+    let close = store.close(&space(), "zzz", rig.t()).unwrap_err();
+    let pin = store.pin(&space(), "zzz", rig.t()).unwrap_err();
+    assert_eq!(close, expected);
+    assert_eq!(pin, expected);
+    assert_eq!(
+        close.to_string(),
+        "the space's panels couldn't be listed: boom"
+    );
+    let _ = &mut rig;
+}
+
+#[test]
 fn pin_refuses_before_it_does_anything() {
     let mut rig = Rig::new();
     rig.saved("p", "one");
@@ -2515,6 +2540,30 @@ fn pin_writes_into_workspace_then_deletes_scratch() {
     assert_eq!(scratch_deletes(&fx).len(), 1);
     assert_eq!(scratch_deletes(&fx)[0].1, sdir("x"));
     assert_eq!(rig.get("x").0.lifetime, Lifetime::Persistent);
+}
+
+#[test]
+fn pin_is_refused_when_a_symlink_appears_at_the_panel_folder() {
+    let mut rig = Rig::new();
+    rig.ssaved("x", "a", T);
+    rig.store.apply_listing(
+        &space(),
+        Ok(Some(DirListing {
+            entries: vec![entry("x", EntryKind::Symlink)],
+            truncated: false,
+        })),
+        rig.t(),
+    );
+    rig.fx();
+    let error = rig.store.pin(&space(), "x", rig.t()).unwrap_err();
+    assert_eq!(error, PanelApiError::IdTaken { id: "x".to_owned() });
+    assert_eq!(
+        combined::core::panel_error_code(&error),
+        combine_protocol::ErrorCode::InvalidRequest
+    );
+    assert_eq!(error.to_string(), "the space already has a panel folder x");
+    assert!(rig.fx().is_empty(), "a refused pin must start no file work");
+    assert_eq!(rig.get("x").0.lifetime, Lifetime::Scratch);
 }
 
 #[test]
