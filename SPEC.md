@@ -1,6 +1,6 @@
-# Combine — Spec (rev 28)
+# Combine — Spec (rev 29)
 
-Updated 2026-11-25
+Updated 2026-11-26
 
 Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 28 (herdr-core 0.1.22):** re-checked Combine against herdr-core 0.1.22, which replaced 0.1.21 on this machine on 2026-11-26. Sources: `hc schema`, the upstream v0.1.21...v0.1.22 diff and changelog, a fresh fixture capture and the full lane. Nothing Combine relies on changed. The protocol generation is still 1. Frame kinds, the 16 KiB DATA limit, `automatic_input`, `resize_notifications`, heartbeats, `missed` and the event payloads are all the same. The fixtures were recaptured and have the same lines, keys and value types. 0.1.22 still sends no `Resynced`, and it fixes neither first-paint request (herdrdev/herdr-core#354 and #355 are still open). The new things in 0.1.22 are a `docs` filter on `events.subscribe` and chunked `terminal.put_*` uploads between cores. Combine subscribes with no filter and uses neither. When a registry save fails, `terminal.run` now returns an error even if the program started; on a full disk a spawn can therefore report `Failed` while `watch` shows the terminal as `Created`. The statements that named 0.1.21 as the version observed now name 0.1.22. The adapter is unchanged.
 
 **Changes from rev 27 (#48, M2-S5, panels reach the client):** panels reach the client.
 
