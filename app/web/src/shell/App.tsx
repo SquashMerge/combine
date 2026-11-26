@@ -8,17 +8,29 @@ import {
   newestLastSpace,
   restoreSpaceState,
   storedSpaceState,
+  withoutActiveTabs,
 } from '../model/clientState';
-import { dictGet, dictWith } from '../model/dict';
+import { dictGet, dictWith, emptyDict } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
 import { type SpaceKey, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort, OpenUrlPort, PanelPort, SpawnPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import type { HostsSnapshot } from '../model/hosts';
-import { type LayoutSnapshot, firstTileId, layoutTiles } from '../model/layout';
+import {
+  type LayoutNode,
+  type LayoutSnapshot,
+  firstTileId,
+  layoutTiles,
+  newlyActiveTiles,
+  tileHolding,
+} from '../model/layout';
+import { type PanelLifetime, panelEntry, tabLabel } from '../model/panels';
 import { AddTerminalMenu } from './AddTerminalMenu';
 import { CommandPalette } from './CommandPalette';
+import { ConfirmClosePanel } from './ConfirmClosePanel';
+import { heldReason } from './heldLayout';
+import type { PalettePanels } from './paletteEntries';
 import { SpaceRail } from './SpaceRail';
 import { type TerminalMount, TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
@@ -43,6 +55,7 @@ interface AppProps {
 type ClientStates = ReadonlyMap<HostId, ClientState>;
 
 const NO_LAYOUT: LayoutTiles = new Map();
+const NO_TABS = emptyDict<string>();
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -50,6 +63,13 @@ function errorText(cause: unknown): string {
 
 function findHostName(snapshot: HostsSnapshot | null, hostId: HostId): string {
   return (snapshot?.hosts ?? []).find((host) => host.hostId === hostId)?.name ?? hostId;
+}
+
+interface ConfirmClose {
+  space: SpaceKey;
+  panel: string;
+  label: string;
+  lifetime: PanelLifetime | null;
 }
 
 interface PendingSelection {
@@ -76,12 +96,18 @@ export function App({
   const [states, setStates] = useState<ClientStates>(new Map());
   const [unsettled, setUnsettled] = useState<ReadonlyMap<string, TermId>>(new Map());
   const [writeErrors, setWriteErrors] = useState<ReadonlyMap<HostId, string>>(new Map());
+  const [panelActionError, setPanelActionError] = useState<string | null>(null);
+  const [busyActions, setBusyActions] = useState<ReadonlySet<string>>(new Set());
+  const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const statesRef = useRef<ClientStates>(new Map());
   const snapshotRef = useRef<HostsSnapshot | null>(null);
   const requested = useRef(new Set<HostId>());
   const pending = useRef(new Map<HostId, PendingSelection[]>());
   const mounted = useRef(false);
   const restored = useRef(false);
+  const pendingFocus = useRef<{ space: string; panel: string } | null>(null);
+  const previousRoot = useRef<{ space: string; root: LayoutNode } | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
 
   snapshotRef.current = snapshot;
 
@@ -319,6 +345,149 @@ export function App({
     [changeSpaceState, selected],
   );
 
+  const hostConnected =
+    selected !== null &&
+    snapshot?.hosts.some(
+      (host) => host.hostId === selected.hostId && host.connection.kind === 'connected',
+    ) === true;
+  const held =
+    shownLayout !== null && layout.snapshot === null ? heldReason(hostConnected, layout.error) : null;
+  const panelList = layout.panels?.list ?? null;
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+    setPanelActionError(null);
+    setConfirmClose(null);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (held !== null) setConfirmClose(null);
+  }, [held]);
+
+  // A panel the daemon put in front of a tile replaces whatever tab the user had chosen there, and a
+  // panel placed from the palette takes focus once a tile holds it.
+  useEffect(() => {
+    const next = layout.snapshot;
+    if (next === null || selected === null || selectedId === null) return;
+    const before = previousRoot.current;
+    previousRoot.current = { space: selectedId, root: next.root };
+    const named = before !== null && before.space === selectedId ? newlyActiveTiles(before.root, next.root) : [];
+    const wanted = pendingFocus.current;
+    const landed =
+      wanted !== null && wanted.space === selectedId ? tileHolding(next.root, wanted.panel) : null;
+    if (named.length === 0 && landed === null) return;
+    const change = (state: ClientSpaceState): ClientSpaceState => {
+      const cleared = withoutActiveTabs(state, named);
+      return landed === null || cleared.focusedTile === landed ? cleared : { ...cleared, focusedTile: landed };
+    };
+    const current = storedSpaceState(statesRef.current.get(selected.hostId), selected.path);
+    const base = current ?? emptySpaceState(selected.path);
+    if (current !== undefined || landed !== null) {
+      if (change(base) !== base) changeSpaceState(selected, change);
+    }
+    if (landed !== null) pendingFocus.current = null;
+  }, [layout.snapshot, selected, selectedId, changeSpaceState]);
+
+  const sendPanelAction = useCallback(
+    (kind: 'close' | 'pin', space: SpaceKey, panel: string, label: string) => {
+      if (panelPort === undefined) return;
+      const spaceId = spaceKeyId(space);
+      const key = `${spaceId}:${panel}`;
+      setPanelActionError(null);
+      setBusyActions((current) => new Set(current).add(key));
+      const request =
+        kind === 'close'
+          ? panelPort.closePanel(space.hostId, space.path, panel)
+          : panelPort.pinPanel(space.hostId, space.path, panel);
+      request
+        .catch((cause: unknown) => {
+          if (!mounted.current || selectedIdRef.current !== spaceId) return;
+          const verb = kind === 'close' ? 'close' : 'pin';
+          setPanelActionError(`Couldn't ${verb} ${label}: ${errorText(cause)}`);
+        })
+        .finally(() => {
+          if (!mounted.current) return;
+          setBusyActions((current) => {
+            const next = new Set(current);
+            next.delete(key);
+            return next;
+          });
+        });
+    },
+    [panelPort],
+  );
+
+  const closePanel = useCallback(
+    (space: SpaceKey, panel: string) => {
+      const entry = panelEntry(panelList, panel);
+      const label = tabLabel(panelList, panel);
+      if (entry.kind === 'missing' || entry.kind === 'skipped') {
+        layout.removePanel(panel);
+        return;
+      }
+      if (entry.kind === 'loading') return;
+      const { lifetime } = entry.summary;
+      if (lifetime === 'persistent') sendPanelAction('close', space, panel, label);
+      else setConfirmClose({ space, panel, label, lifetime });
+    },
+    [layout, panelList, sendPanelAction],
+  );
+
+  const pinPanel = useCallback(
+    (space: SpaceKey, panel: string) =>
+      sendPanelAction('pin', space, panel, tabLabel(panelList, panel)),
+    [panelList, sendPanelAction],
+  );
+
+  const showPanel = useCallback(
+    (space: SpaceKey, panel: string, tile: string | null) => {
+      if (selectedId === null || spaceKeyId(space) !== selectedId) {
+        selectSpace(space);
+        return;
+      }
+      if (tile === null) {
+        pendingFocus.current = { space: selectedId, panel };
+        layout.addPanel(panel);
+        return;
+      }
+      changeSpaceState(space, (state) => ({
+        ...state,
+        focusedTile: tile,
+        activeTabs: dictWith(state.activeTabs, tile, panel),
+      }));
+    },
+    [changeSpaceState, layout, selectSpace, selectedId],
+  );
+
+  const busyPanels = useMemo(() => {
+    const prefix = `${selectedId}:`;
+    return new Set([...busyActions].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)));
+  }, [busyActions, selectedId]);
+
+  const palettePanels = useMemo<PalettePanels | null>(() => {
+    if (selected === null || shownLayout === null || !hostConnected) return null;
+    if (layout.panels === null || !layout.panels.connected || panelList === null) return null;
+    const tiles = new Map<string, string>();
+    const all = layoutTiles(shownLayout.root);
+    for (const [id, tile] of all) {
+      for (const panel of tile.panels) tiles.set(panel, id);
+    }
+    const focusedId = restoredTiles?.focusedTile ?? null;
+    const focusedTileData = focusedId === null ? undefined : all.get(focusedId);
+    const panel =
+      focusedId === null || focusedTileData === undefined
+        ? null
+        : (dictGet(restoredTiles?.activeTabs ?? NO_TABS, focusedId) ?? focusedTileData.panels[0] ?? null);
+    return {
+      space: selected,
+      hostName: findHostName(snapshot, selected.hostId),
+      panels: panelList.panels,
+      tiles,
+      focused: focusedId === null || panel === null ? null : { tile: focusedId, panel },
+      editable: held === null && layout.snapshot !== null && !layout.snapshot.readOnly,
+    };
+  }, [selected, shownLayout, hostConnected, layout.panels, layout.snapshot, panelList, restoredTiles, snapshot, held]);
+
   const retry = useCallback((name: string) => void port.retryHost(name), [port]);
 
   if (error !== null) return <p role="alert">Cannot reach the Combine backend: {error}</p>;
@@ -377,6 +546,11 @@ export function App({
           terminal={mountedTerminal}
           space={selected}
           panels={layout.panels}
+          held={held}
+          actionError={panelActionError}
+          busyPanels={busyPanels}
+          onCloseTab={(_tile, panel) => selected !== null && closePanel(selected, panel)}
+          onPinPanel={(panel) => selected !== null && pinPanel(selected, panel)}
           {...(panelPort === undefined ? {} : { panelPort })}
           {...(openUrlPort === undefined ? {} : { openUrlPort })}
           {...(createAdapter === undefined ? {} : { createAdapter })}
@@ -387,7 +561,22 @@ export function App({
         onSelectSpace={selectSpace}
         onSelectTerminal={selectTerminal}
         onRetryHost={retry}
+        panels={palettePanels}
+        onShowPanel={showPanel}
+        onClosePanel={closePanel}
+        onPinPanel={pinPanel}
       />
+      {confirmClose !== null && (
+        <ConfirmClosePanel
+          label={confirmClose.label}
+          lifetime={confirmClose.lifetime}
+          onCancel={() => setConfirmClose(null)}
+          onConfirm={() => {
+            sendPanelAction('close', confirmClose.space, confirmClose.panel, confirmClose.label);
+            setConfirmClose(null);
+          }}
+        />
+      )}
       {stateErrors.length > 0 && (
         <div className="client-state-error" role="alert">
           {stateErrors.map((message) => (

@@ -78,6 +78,14 @@ export class LayoutQueue {
     this.enqueue([{ op: 'close_tile', tile }]);
   }
 
+  addPanel(panel: string): void {
+    this.enqueue([{ op: 'add_panel', panel, tile: null }]);
+  }
+
+  removePanel(panel: string): void {
+    this.enqueue([{ op: 'remove_panel', panel }]);
+  }
+
   onSnapshot(request: DecimalU64 | null, snapshot: LayoutSnapshot): void {
     if (this.held === null || compareDecimalU64(snapshot.layoutRevision, this.held.layoutRevision) >= 0) {
       this.held = snapshot;

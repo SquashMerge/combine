@@ -18,6 +18,10 @@ export interface SpaceLayout {
   readOnlySpaces: ReadonlySet<string>;
   split: (tile: string, dir: SplitDirection) => void;
   close: (tile: string) => void;
+  /** Puts the panel in a tile of the daemon's choosing. */
+  addPanel: (panel: string) => void;
+  /** Takes the panel out of every tile. */
+  removePanel: (panel: string) => void;
 }
 
 interface Held {
@@ -175,13 +179,6 @@ export function useSpaceLayout(
         case 'disconnected':
           queue.current?.onDisconnected();
           setHeld(null);
-          setReadOnly((current) => {
-            const id = spaceKeyId(target);
-            if (!current.has(id)) return current;
-            const next = new Set(current);
-            next.delete(id);
-            return next;
-          });
       }
     };
 
@@ -251,6 +248,8 @@ export function useSpaceLayout(
     [],
   );
   const close = useCallback((tile: string) => queue.current?.close(tile), []);
+  const addPanel = useCallback((panel: string) => queue.current?.addPanel(panel), []);
+  const removePanel = useCallback((panel: string) => queue.current?.removePanel(panel), []);
 
   const snapshot =
     held !== null && selected !== null && held.hostId === selected.hostId && held.snapshot.space === selected.path
@@ -267,7 +266,17 @@ export function useSpaceLayout(
   }, [panelPort, selected, panelsHeld, panelsSession]);
 
   return useMemo(
-    () => ({ snapshot, notice, error, panels, readOnlySpaces: readOnly, split, close }),
-    [snapshot, notice, error, panels, readOnly, split, close],
+    () => ({
+      snapshot,
+      notice,
+      error,
+      panels,
+      readOnlySpaces: readOnly,
+      split,
+      close,
+      addPanel,
+      removePanel,
+    }),
+    [snapshot, notice, error, panels, readOnly, split, close, addPanel, removePanel],
   );
 }

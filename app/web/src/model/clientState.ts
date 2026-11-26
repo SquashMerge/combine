@@ -1,4 +1,4 @@
-import { type Dict, dictGet, emptyDict } from './dict';
+import { type Dict, dictGet, dictWithout, emptyDict } from './dict';
 import {
   type DecimalU64,
   ModelError,
@@ -130,6 +130,15 @@ export function pruneActiveTabs(tabs: Readonly<Dict<string>>, layout: LayoutTile
     if (layout.get(tile)?.panels.includes(panel)) kept[tile] = panel;
   }
   return kept;
+}
+
+/** The space state without the stored active tab of each listed tile; the same object when none has one. */
+export function withoutActiveTabs(
+  state: ClientSpaceState,
+  tiles: readonly string[],
+): ClientSpaceState {
+  if (!tiles.some((tile) => dictGet(state.activeTabs, tile) !== undefined)) return state;
+  return { ...state, activeTabs: dictWithout(state.activeTabs, tiles) };
 }
 
 /** The stored state of the space at `path`, if there is one. */
