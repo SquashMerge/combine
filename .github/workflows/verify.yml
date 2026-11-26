@@ -1,6 +1,8 @@
-# The full ./tools/verify for every pull request and every push to main (SPEC.md, "Repository
-# layout and architecture rules"). The herdr-core run (sh tools/verify-herdr-core) needs hc and a
-# real core, so it stays a local run and is not here.
+# The full ./tools/verify for every pull request, every push to main, and every push to a
+# qualify/** branch (SPEC.md, "Repository layout and architecture rules"). Feature-factory runs
+# push the commit they verify to qualify/factory-<sha> and wait on its check runs
+# (tools/ci_verify.sh). The herdr-core run (sh tools/verify-herdr-core) needs hc and a real core,
+# so it stays a local run and is not here.
 #
 # macos-latest is an arm64 runner. The Intel MacBook Pro is also a target; CI doesn't build for
 # x86_64 yet.
@@ -9,12 +11,13 @@ name: verify
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "qualify/**"]
 
 permissions:
   contents: read
 
-# A new push to a pull request cancels its older run. Runs on main are never cancelled.
+# A new push to a pull request cancels its older run. Runs on main and on qualify branches are
+# never cancelled; each qualify branch is named after its commit, so it has a group of its own.
 concurrency:
   group: verify-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -82,8 +85,8 @@ jobs:
           echo "$dir" >>"$GITHUB_PATH"
           "$dir/trellis" --version
 
-      # Caches are saved only from main, so pull requests don't fill the repository's cache quota
-      # with copies of the build directory; a pull request restores main's.
+      # Caches are saved only from main, so pull requests and qualify branches don't fill the
+      # repository's cache quota with copies of the build directory; they restore main's.
       - name: Restore the cargo registry
         id: cargo-registry
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -107,7 +110,7 @@ jobs:
         run: ./tools/verify
 
       - name: Save the cargo registry
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.cargo-registry.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-registry.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -117,7 +120,7 @@ jobs:
           key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
 
       - name: Save the build directory
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.cargo-target.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-target.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.CARGO_TARGET_DIR }}
