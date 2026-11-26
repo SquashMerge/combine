@@ -1425,6 +1425,7 @@ app/
     test/
 spike/                              M0 code: disposable, outside the workspace
 tools/                              developer scripts
+.github/workflows/verify.yml        CI: `./tools/verify` on every pull request and every push to main
 ```
 
 Each rule says what checks it today. `rules.toml` checks layer direction between mapped first-party files, and package use where trellis can prove the package. It can't check everything this table needs (verified with fixtures in review 2026-11-20):
@@ -1457,6 +1458,8 @@ python3 -I tools/arch-guard/check.py
 ```
 
 Review new `unknown` and unassigned references from trellis on these boundaries, not only new deviations.
+
+`./tools/verify` runs both checks, the formatter, whole-workspace clippy, the full test suite, the shipped daemon and app builds and the frontend checks. GitHub Actions runs it on every pull request and every push to `main` (`.github/workflows/verify.yml`): an arm64 `macos-latest` runner, the same Rust, Node and Python versions as the local machine (pinned in the workflow, since the repository has no toolchain file), and the published binary of the trellis release installed locally, checked against its SHA-256. The runner has no heavy-run lease, so `./tools/verify` runs directly. On CI (`CI=true`) the trellis daemon starts cold, so the trellis step retries only its typed `index_not_ready` and `deadline_exceeded` answers, at most four attempts; a deviation or any other failure fails at once, as it does locally. CI doesn't build for `x86_64-apple-darwin`, and the herdr-core run needs `hc` and a real core, so it stays local.
 
 `app/src-tauri/tests/` and `crates/combine/tests/` run in-process daemons from `combined`, a dev-dependency with `test-support`; trellis reports those references as cross-app `unknown`. They are acceptable on the row above because the files are in the hidden `app-tests` and `cli-tests` layers and the dependency is dev-only.
 
