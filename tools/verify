@@ -88,6 +88,10 @@ else
   exit 1
 fi
 
+# The factory's verify on CI (.factory.json); its tests replay GitHub with stand-ins, offline.
+step "tools: ci_verify.sh"
+python3 -I -B tools/ci-verify/test_ci_verify.py
+
 if [ -f app/web/package-lock.json ]; then
   step "frontend: npm ci, typecheck, tests"
   npm ci --prefix app/web --ignore-scripts
