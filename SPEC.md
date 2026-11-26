@@ -1,4 +1,4 @@
-# Combine — Spec (rev 29)
+# Combine — Spec (rev 30)
 
 Updated 2026-11-26
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 29 (factory verify on CI):** feature-factory runs (0.14.3 or later) verify on GitHub Actions instead of a local `./tools/verify`: `.factory.json` sets `verify` to `sh tools/ci_verify.sh`, `verify_unavailable_exit` 75, `verify_scope` `"integration"` and a 90-minute `verify_timeout_ms`. The script pushes the commit to `qualify/factory-<sha>`, counts only the `verify` check from a push run of that exact sha, and exits 0, 1, or 75 when CI gave no answer; the workflow also runs on `qualify/**` pushes and saves the Cargo caches from `main` only. Slice test plans and the test-verifier run targeted tests, and the herdr-core run stays local.
 
 **Changes from rev 28 (CI):** `./tools/verify` runs on GitHub Actions (`.github/workflows/verify.yml`) for every pull request and every push to `main`, on a macOS arm64 runner with pinned Rust, Node, Python and trellis. On a runner the trellis step retries only trellis's typed cold-start answers (`index_not_ready`, `deadline_exceeded`), at most four attempts; everything else fails at once. The herdr-core run and an x86_64 build stay local. The plan is for CI to become the full check, so local full verifies can stop.
 
