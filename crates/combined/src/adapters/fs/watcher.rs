@@ -5,6 +5,12 @@
 //! the folder being created after the watch began. [`classify`] turns a raw notify event into
 //! the changes the daemon cares about; everything else, including the writer's own temp files,
 //! is dropped. The scratch area is the daemon's own and is not watched.
+//!
+//! Whether a `.workspace/` is watched never rests on one event alone. Under load FSEvents can
+//! report a replaced folder as only a creation, without its removal, and can drop or hold back
+//! events, so an event naming the folder, a rescan and a watcher error each make the re-arm
+//! thread compare the watch with the disk, and so does a periodic check. The watch remembers
+//! which folder (device and inode) it armed, so a replaced `.workspace/` is armed again.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +30,10 @@ const WORKSPACE: &str = ".workspace";
 const PANELS_DIR: &str = "panels";
 const PANEL_FILES: [&str; 3] = ["panel.json", "diagram.mmd", "content.md"];
 
-/// How often a `.workspace/` that failed to arm after it appeared is tried again.
+/// How often the watches are compared with the disk: a `.workspace/` that failed to arm is
+/// tried again, one that exists but isn't watched (its creation was never reported) or was
+/// replaced since it was armed is armed, and one that is watched but gone is marked as not
+/// watched.
 const ARM_RETRY: Duration = Duration::from_secs(30);
 
 struct WatchedSpace {
@@ -32,13 +41,29 @@ struct WatchedSpace {
     /// Every spelling of the space's `.workspace/` that an event may carry: the one the space
     /// names, and the canonical one, which is what the platform reports on a symlinked prefix.
     workspaces: Vec<PathBuf>,
-    /// True while `.workspace/` itself is being watched.
-    armed: bool,
+    /// The folder (device and inode) that was armed, while `.workspace/` itself is watched.
+    armed: Option<FolderId>,
     /// Why the last attempt to watch an existing `.workspace/` failed, until one succeeds.
     arm_error: Option<String>,
 }
 
+/// A folder's device and inode, which tell a replaced `.workspace/` from the one that was armed.
+type FolderId = (u64, u64);
+
+/// The identity of the folder at `path`, following a symlink as the watch does. None when
+/// nothing is there.
+fn folder_id(path: &Path) -> Option<FolderId> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
 impl WatchedSpace {
+    fn workspace(&self) -> PathBuf {
+        Path::new(&self.space.0).join(WORKSPACE)
+    }
+
     fn names_workspace(&self, path: &Path) -> bool {
         self.workspaces.iter().any(|workspace| workspace == path)
     }
@@ -71,7 +96,7 @@ impl WatchRoots {
         self.spaces.push(WatchedSpace {
             space: space.clone(),
             workspaces,
-            armed: false,
+            armed: None,
             arm_error: None,
         });
         true
@@ -226,13 +251,30 @@ impl Shared {
         registered.retain(|known| known != path);
     }
 
-    /// The spaces whose existing `.workspace/` could not be watched.
-    fn failed_arms(&self) -> Vec<SpaceId> {
-        self.roots()
+    /// The spaces whose watch doesn't match the disk, each with whether an event about its
+    /// `.workspace/` was missed: one that failed to arm, one that exists but isn't watched or
+    /// was replaced since it was armed (an event missed), and one that is watched but gone.
+    fn unsettled(&self) -> Vec<(SpaceId, bool)> {
+        let spaces: Vec<(SpaceId, PathBuf, Option<FolderId>, bool)> = self
+            .roots()
             .spaces
             .iter()
-            .filter(|watched| watched.arm_error.is_some())
-            .map(|watched| watched.space.clone())
+            .map(|watched| {
+                (
+                    watched.space.clone(),
+                    watched.workspace(),
+                    watched.armed,
+                    watched.arm_error.is_some(),
+                )
+            })
+            .collect();
+        spaces
+            .into_iter()
+            .filter_map(|(space, workspace, armed, refused)| {
+                let found = folder_id(&workspace);
+                let missed = found.is_some() && found != armed && !refused;
+                (refused || found != armed).then_some((space, missed))
+            })
             .collect()
     }
 
@@ -249,10 +291,11 @@ impl Shared {
 /// the thread that serves `watch`, so waiting on a watch from the handler would hang.
 type WatcherCell = Mutex<Option<RecommendedWatcher>>;
 
-/// Watches `space`'s `.workspace/` when it exists and isn't watched yet. True when this call
-/// began watching it. A `.workspace/` that doesn't exist is not a failure: the space's folder
-/// is watched and arms it when it appears. Any other refusal, such as the platform's cap on
-/// watched paths, is returned and kept on the space until a later call succeeds.
+/// Watches `space`'s `.workspace/` when it exists and isn't watched yet, and remembers which
+/// folder it watched. True when this call began watching it. A `.workspace/` that doesn't
+/// exist is not a failure: the space's folder is watched and arms it when it appears. Any
+/// other refusal, such as the platform's cap on watched paths, is returned and kept on the
+/// space until a later call succeeds.
 fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> notify::Result<bool> {
     let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(watcher) = guard.as_mut() else {
@@ -261,10 +304,13 @@ fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> notify::Result<b
     let workspace = {
         let roots = shared.roots();
         match roots.spaces.iter().find(|watched| &watched.space == space) {
-            Some(watched) if !watched.armed => Path::new(&watched.space.0).join(WORKSPACE),
+            Some(watched) if watched.armed.is_none() => watched.workspace(),
             _ => return Ok(false),
         }
     };
+    // Read before the watch is set up: a folder replaced in between then differs from the one
+    // remembered, and the next settle arms it again.
+    let found = folder_id(&workspace);
     let registered = shared.register(watcher, &workspace, RecursiveMode::Recursive);
     let mut roots = shared.roots();
     let Some(watched) = roots
@@ -284,11 +330,41 @@ fn arm(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> notify::Result<b
         watched.arm_error = Some(error.to_string());
         return Err(error);
     }
-    watched.armed = true;
+    let Some(found) = found.or_else(|| folder_id(&workspace)) else {
+        return Ok(false);
+    };
+    watched.armed = Some(found);
     watched.arm_error = None;
     drop(roots);
     shared.arms.fetch_add(1, Ordering::SeqCst);
     Ok(true)
+}
+
+/// Brings `space`'s watch in line with its `.workspace/` on disk: one that is watched but gone
+/// is marked as not watched, one that was replaced since it was armed is armed again, and
+/// [`arm`] watches one that exists and isn't watched. True when this call began watching it.
+fn settle(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> notify::Result<bool> {
+    {
+        let mut roots = shared.roots();
+        let Some(watched) = roots
+            .spaces
+            .iter_mut()
+            .find(|watched| &watched.space == space)
+        else {
+            return Ok(false);
+        };
+        if let Some(armed) = watched.armed {
+            match folder_id(&watched.workspace()) {
+                Some(found) if found == armed => return Ok(false),
+                Some(_) => watched.armed = None,
+                None => {
+                    watched.armed = None;
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    arm(shared, cell, space)
 }
 
 /// One notify watcher for every watched space. Dropping it stops the watching.
@@ -302,8 +378,8 @@ impl SpaceWatcher {
         Self::with_arm_retry(changes, ARM_RETRY)
     }
 
-    /// [`SpaceWatcher::new`] with the interval at which a `.workspace/` that failed to arm is
-    /// tried again named, for tests.
+    /// [`SpaceWatcher::new`] with the interval of its check of the watches against the disk
+    /// (see [`ARM_RETRY`]) named, for tests.
     pub fn with_arm_retry(
         changes: UnboundedSender<FileChange>,
         arm_retry: Duration,
@@ -376,7 +452,7 @@ impl SpaceWatcher {
             .roots()
             .spaces
             .iter()
-            .any(|watched| &watched.space == space && watched.armed)
+            .any(|watched| &watched.space == space && watched.armed.is_some())
     }
 
     /// The number of times a `.workspace/` watch has been set up. A re-arm is counted before
@@ -391,47 +467,66 @@ impl SpaceWatcher {
     }
 }
 
-/// Watches the `.workspace/` folders the handler saw appear, and reports `layout.json` and
-/// `panels` for each, since the files may have been written before the watch began. A folder
-/// the platform refused to watch is tried again every `arm_retry`, on a deadline that requests
-/// for other spaces don't move; the refusal is logged when it starts and when its text changes.
-/// Ends when the watcher that owns the handler's sender is dropped.
+/// Settles the spaces the handler asked about (see [`settle`]), and reports `layout.json` and
+/// `panels` for each one it arms, since the files may have been written before the watch
+/// began. Every `arm_retry` it also settles every space whose watch doesn't match the disk
+/// ([`check`]), on a deadline that requests don't move. A refusal is logged when it starts and
+/// when its text changes. Ends when the watcher that owns the handler's sender is dropped.
 fn rearm_loop(
     shared: &Shared,
     cell: &Weak<WatcherCell>,
     requests: &mpsc::Receiver<SpaceId>,
     arm_retry: Duration,
 ) {
-    let mut next_retry = Instant::now() + arm_retry;
+    let mut next_check = Instant::now() + arm_retry;
     loop {
-        let mut spaces =
-            match requests.recv_timeout(next_retry.saturating_duration_since(Instant::now())) {
-                Ok(space) => vec![space],
-                Err(mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+        let requested =
+            match requests.recv_timeout(next_check.saturating_duration_since(Instant::now())) {
+                Ok(space) => Some(space),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
-        if Instant::now() >= next_retry {
-            next_retry = Instant::now() + arm_retry;
-            for space in shared.failed_arms() {
-                if !spaces.contains(&space) {
-                    spaces.push(space);
-                }
-            }
+        let Some(cell) = cell.upgrade() else {
+            return;
+        };
+        if let Some(space) = requested {
+            settle_and_report(shared, &cell, &space);
         }
-        for space in spaces {
-            let Some(cell) = cell.upgrade() else {
-                return;
-            };
-            let before = shared.arm_error(&space);
-            match arm(shared, &cell, &space) {
-                Ok(true) => send_space_changes(shared, &space),
-                Ok(false) => {}
-                Err(error) => {
-                    if before.as_deref() != Some(error.to_string().as_str()) {
-                        eprintln!("combined: cannot watch {}/{WORKSPACE}: {error}", space.0);
-                    }
-                }
+        if Instant::now() >= next_check {
+            next_check = Instant::now() + arm_retry;
+            check(shared, &cell);
+        }
+    }
+}
+
+/// Settles every space whose watch doesn't match the disk. A `.workspace/` armed here that no
+/// event reported, and that was never refused, is logged: its creation event was lost.
+fn check(shared: &Shared, cell: &WatcherCell) {
+    for (space, missed) in shared.unsettled() {
+        if settle_and_report(shared, cell, &space) && missed {
+            eprintln!(
+                "combined: watching {}/{WORKSPACE}, whose creation was not reported",
+                space.0
+            );
+        }
+    }
+}
+
+/// [`settle`]s `space`, sends its changes when that armed it, and logs a refusal that is new or
+/// whose text changed. True when it armed the space.
+fn settle_and_report(shared: &Shared, cell: &WatcherCell, space: &SpaceId) -> bool {
+    let before = shared.arm_error(space);
+    match settle(shared, cell, space) {
+        Ok(true) => {
+            send_space_changes(shared, space);
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            if before.as_deref() != Some(error.to_string().as_str()) {
+                eprintln!("combined: cannot watch {}/{WORKSPACE}: {error}", space.0);
             }
+            false
         }
     }
 }
@@ -442,34 +537,236 @@ fn send_space_changes(shared: &Shared, space: &SpaceId) {
     }
 }
 
+/// Sends the event's changes, and asks the re-arm thread to settle (see [`settle`]) each space
+/// whose `.workspace/` the event names, whatever its kind: the disk decides, since a folder
+/// replaced under load can arrive as a creation alone, without its removal. A rescan or a
+/// watcher error, after which any `.workspace/` may have come, gone or been replaced
+/// unreported, asks about every space.
 fn handle(shared: &Shared, rearm: &mpsc::Sender<SpaceId>, result: notify::Result<Event>) {
-    let mut wanted = Vec::new();
-    let changes = {
-        let mut roots = shared.roots();
-        let Ok(event) = &result else {
-            let all = all_changes(&roots);
-            drop(roots);
-            for change in all {
-                let _ = shared.changes.send(change);
+    let (changes, wanted) = {
+        let roots = shared.roots();
+        match &result {
+            Ok(event) if !event.need_rescan() => {
+                let wanted: Vec<SpaceId> = roots
+                    .spaces
+                    .iter()
+                    .filter(|watched| event.paths.iter().any(|path| watched.names_workspace(path)))
+                    .map(|watched| watched.space.clone())
+                    .collect();
+                (classify(event, &roots), wanted)
             }
-            return;
-        };
-        for watched in &mut roots.spaces {
-            if !event.paths.iter().any(|path| watched.names_workspace(path)) {
-                continue;
-            }
-            if matches!(event.kind, EventKind::Remove(_)) {
-                watched.armed = false;
-            } else if !watched.armed {
-                wanted.push(watched.space.clone());
+            _ => {
+                let wanted = roots
+                    .spaces
+                    .iter()
+                    .map(|watched| watched.space.clone())
+                    .collect();
+                (all_changes(&roots), wanted)
             }
         }
-        classify(event, &roots)
     };
     for change in changes {
         let _ = shared.changes.send(change);
     }
     for space in wanted {
         let _ = rearm.send(space);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The re-arm decisions, driven without waiting on FSEvents: the events are built here, and
+    //! the notify watcher's own events are ignored, so a `.workspace/` created on disk is one
+    //! whose creation was lost.
+
+    use super::*;
+    use notify::event::{CreateKind, Flag, ModifyKind, RemoveKind};
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    /// A folder under the temp dir, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Scratch {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "combined-watcher-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Rig {
+        shared: Shared,
+        cell: WatcherCell,
+        changes: UnboundedReceiver<FileChange>,
+        space: SpaceId,
+        workspace: PathBuf,
+        _scratch: Scratch,
+    }
+
+    /// One unarmed space with no `.workspace/`, and a notify watcher whose events go nowhere.
+    fn rig() -> Rig {
+        let scratch = Scratch::new();
+        let space = SpaceId(scratch.0.to_str().unwrap().to_string());
+        let (tx, changes) = unbounded_channel();
+        let shared = Shared {
+            roots: Mutex::new(WatchRoots::new()),
+            changes: tx,
+            arms: AtomicU64::new(0),
+            registered: Mutex::new(Vec::new()),
+        };
+        assert!(shared.roots().add(&space));
+        let watcher = notify::recommended_watcher(|_: notify::Result<Event>| {}).unwrap();
+        let cell = Mutex::new(Some(watcher));
+        let workspace = scratch.0.join(WORKSPACE);
+        Rig {
+            shared,
+            cell,
+            changes,
+            space,
+            workspace,
+            _scratch: scratch,
+        }
+    }
+
+    fn armed(rig: &Rig) -> bool {
+        rig.shared
+            .roots()
+            .spaces
+            .iter()
+            .any(|watched| watched.space == rig.space && watched.armed.is_some())
+    }
+
+    fn sent(changes: &mut UnboundedReceiver<FileChange>) -> Vec<String> {
+        let mut paths = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            paths.push(change.path);
+        }
+        paths
+    }
+
+    fn requested(requests: &mpsc::Receiver<SpaceId>) -> Vec<SpaceId> {
+        requests.try_iter().collect()
+    }
+
+    #[test]
+    fn the_check_arms_a_workspace_whose_creation_was_lost() {
+        let mut rig = rig();
+        assert!(!arm(&rig.shared, &rig.cell, &rig.space).unwrap());
+        std::fs::create_dir(&rig.workspace).unwrap();
+        assert!(!armed(&rig));
+        assert_eq!(rig.shared.unsettled(), [(rig.space.clone(), true)]);
+
+        check(&rig.shared, &rig.cell);
+        assert!(armed(&rig));
+        assert_eq!(rig.shared.arms.load(Ordering::SeqCst), 1);
+        assert_eq!(sent(&mut rig.changes), ["layout.json", "panels"]);
+        assert!(rig.shared.unsettled().is_empty());
+
+        check(&rig.shared, &rig.cell);
+        assert_eq!(rig.shared.arms.load(Ordering::SeqCst), 1, "armed twice");
+        assert!(sent(&mut rig.changes).is_empty());
+    }
+
+    #[test]
+    fn the_check_marks_a_gone_workspace_as_not_armed() {
+        let rig = rig();
+        std::fs::create_dir(&rig.workspace).unwrap();
+        assert!(arm(&rig.shared, &rig.cell, &rig.space).unwrap());
+        std::fs::remove_dir(&rig.workspace).unwrap();
+        assert_eq!(rig.shared.unsettled(), [(rig.space.clone(), false)]);
+        check(&rig.shared, &rig.cell);
+        assert!(!armed(&rig));
+        assert!(rig.shared.unsettled().is_empty());
+    }
+
+    #[test]
+    fn a_replaced_workspace_reported_only_as_created_is_armed_again() {
+        let mut rig = rig();
+        std::fs::create_dir(&rig.workspace).unwrap();
+        assert!(arm(&rig.shared, &rig.cell, &rig.space).unwrap());
+        assert!(sent(&mut rig.changes).is_empty());
+        // Replace the folder. The new one exists beside the old first, so its inode differs.
+        let next = rig.workspace.with_file_name(".workspace-next");
+        std::fs::create_dir(&next).unwrap();
+        std::fs::remove_dir(&rig.workspace).unwrap();
+        std::fs::rename(&next, &rig.workspace).unwrap();
+        assert!(armed(&rig), "nothing has told the watcher yet");
+        assert_eq!(rig.shared.unsettled(), [(rig.space.clone(), true)]);
+
+        // Under load FSEvents reported this as a creation alone, with no removal (#81).
+        let (tx, requests) = mpsc::channel();
+        let created =
+            Event::new(EventKind::Create(CreateKind::Folder)).add_path(rig.workspace.clone());
+        handle(&rig.shared, &tx, Ok(created));
+        assert_eq!(requested(&requests), std::slice::from_ref(&rig.space));
+        assert!(settle_and_report(&rig.shared, &rig.cell, &rig.space));
+        assert_eq!(rig.shared.arms.load(Ordering::SeqCst), 2);
+        assert_eq!(sent(&mut rig.changes), ["layout.json", "panels"]);
+        assert!(rig.shared.unsettled().is_empty());
+        assert_eq!(rig.shared.registered().len(), 1, "registered twice");
+    }
+
+    #[test]
+    fn every_event_naming_the_workspace_asks_but_an_unchanged_one_is_left_alone() {
+        let mut rig = rig();
+        std::fs::create_dir(&rig.workspace).unwrap();
+        let (tx, requests) = mpsc::channel();
+        let event = |kind| Event::new(kind).add_path(rig.workspace.clone());
+        handle(
+            &rig.shared,
+            &tx,
+            Ok(event(EventKind::Create(CreateKind::Folder))),
+        );
+        assert_eq!(requested(&requests), std::slice::from_ref(&rig.space));
+        assert!(settle_and_report(&rig.shared, &rig.cell, &rig.space));
+        assert_eq!(sent(&mut rig.changes), ["layout.json", "panels"]);
+
+        for kind in [
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::Folder),
+        ] {
+            handle(&rig.shared, &tx, Ok(event(kind)));
+            assert_eq!(requested(&requests), std::slice::from_ref(&rig.space));
+            assert!(!settle_and_report(&rig.shared, &rig.cell, &rig.space));
+            assert!(armed(&rig), "{kind:?}: the folder is still there");
+        }
+        assert_eq!(rig.shared.arms.load(Ordering::SeqCst), 1);
+        assert!(sent(&mut rig.changes).is_empty());
+
+        let inside = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(rig.workspace.join("layout.json"));
+        handle(&rig.shared, &tx, Ok(inside));
+        assert!(requested(&requests).is_empty());
+    }
+
+    #[test]
+    fn a_rescan_or_an_error_asks_about_every_space() {
+        let mut rig = rig();
+        let (tx, requests) = mpsc::channel();
+        let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        handle(&rig.shared, &tx, Ok(rescan));
+        assert_eq!(requested(&requests), std::slice::from_ref(&rig.space));
+        assert_eq!(sent(&mut rig.changes), ["layout.json", "panels"]);
+        handle(&rig.shared, &tx, Err(notify::Error::generic("lost")));
+        assert_eq!(requested(&requests), std::slice::from_ref(&rig.space));
+        assert_eq!(sent(&mut rig.changes), ["layout.json", "panels"]);
+
+        // The rescan found the folder that no event reported.
+        std::fs::create_dir(&rig.workspace).unwrap();
+        settle_and_report(&rig.shared, &rig.cell, &rig.space);
+        assert!(armed(&rig));
     }
 }
