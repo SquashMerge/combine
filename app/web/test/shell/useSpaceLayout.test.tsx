@@ -136,10 +136,12 @@ describe('useSpaceLayout', () => {
     act(() => port.push(HOST_A, layout('/src/one', '5', true)));
     expect(view.result.current.snapshot?.layoutRevision).toBe('5');
     expect([...view.result.current.readOnlySpaces]).toEqual([`${HOST_A}:/src/one`]);
-    act(() => port.push(HOST_A, layout('/src/one', '4')));
+    act(() => port.push(HOST_A, layout('/src/one', '4', true)));
     expect(view.result.current.snapshot?.layoutRevision).toBe('5');
     act(() => port.emit({ kind: 'disconnected', hostId: HOST_A }));
     expect(view.result.current.snapshot).toBeNull();
+    expect([...view.result.current.readOnlySpaces]).toEqual([`${HOST_A}:/src/one`]);
+    act(() => port.push(HOST_A, layout('/src/one', '6')));
     expect(view.result.current.readOnlySpaces.size).toBe(0);
   });
 
@@ -283,5 +285,24 @@ describe('useSpaceLayout', () => {
     await release();
     expect(port.calls).toEqual([]);
     expect(port.listenerCount()).toBe(0);
+  });
+});
+
+describe('useSpaceLayout panel ops', () => {
+  it('addPanel and removePanel send the exact ops', async () => {
+    const port = new MemoryLayoutPort();
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
+    act(() => port.push(HOST_A, layout('/src/one', '5'), '1' as DecimalU64));
+    act(() => view.result.current.addPanel('notes'));
+    await waitFor(() => expect(port.calls.filter((c) => c.kind === 'mutate')).toHaveLength(1));
+    act(() => port.push(HOST_A, layout('/src/one', '6'), '2' as DecimalU64));
+    act(() => view.result.current.removePanel('notes'));
+    await waitFor(() => expect(port.calls.filter((c) => c.kind === 'mutate')).toHaveLength(2));
+    const ops = port.calls.flatMap((c) => (c.kind === 'mutate' ? [c.ops] : []));
+    expect(ops).toEqual([
+      [{ op: 'add_panel', panel: 'notes', tile: null }],
+      [{ op: 'remove_panel', panel: 'notes' }],
+    ]);
   });
 });

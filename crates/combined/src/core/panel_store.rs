@@ -80,6 +80,14 @@ impl Default for PanelTiming {
     }
 }
 
+/// A created panel, and whether this call made it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateOutcome {
+    pub view: PanelView,
+    /// False when an idempotency key found the panel an earlier call made.
+    pub created: bool,
+}
+
 /// A request to make a panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelCreate {
@@ -241,6 +249,7 @@ pub enum PanelApiError {
     ScratchListingFailed { detail: String },
     PanelFileInvalid { reason: String },
     Unreadable { path: String, detail: String },
+    DeleteFailed { id: String, detail: String },
     Stopped,
 }
 
@@ -285,6 +294,10 @@ impl fmt::Display for PanelApiError {
                 f,
                 "couldn't read {path} ({detail}), so the panel isn't changed until it can be read"
             ),
+            PanelApiError::DeleteFailed { id, detail } => write!(
+                f,
+                "couldn't delete the scratch panel {id} ({detail}), so it is kept"
+            ),
             PanelApiError::Stopped => f.write_str("the server has stopped"),
         }
     }
@@ -325,6 +338,8 @@ struct ScratchGlobal {
     list_failed: Option<String>,
     pending: BTreeSet<ScratchDir>,
     stamped: BTreeMap<ScratchDir, Stamp>,
+    /// Closes whose delete failed, until the server answers them.
+    failures: Vec<DeleteFailure>,
 }
 
 impl ScratchGlobal {
@@ -437,9 +452,24 @@ enum OpKind {
     ScratchGone {
         dir: ScratchDir,
         swept: Option<Stamp>,
+        /// A close or remove keeps what it dropped, to put it back when the delete fails.
+        restore: Option<Box<Restore>>,
     },
     /// The undo of a pin that failed.
     Cleanup,
+}
+
+/// A scratch panel a close dropped: its record and the stamp of its folder.
+struct Restore {
+    record: Record,
+    stamp: Option<Stamp>,
+}
+
+/// A close or remove of a scratch panel whose folder couldn't be deleted.
+pub struct DeleteFailure {
+    pub space: SpaceId,
+    pub panel: String,
+    pub detail: String,
 }
 
 struct SaveOp {
@@ -879,7 +909,7 @@ impl SpaceState {
         create: PanelCreate,
         ids: &mut dyn IdSource,
         wall_ms: u64,
-    ) -> Result<PanelView, PanelApiError> {
+    ) -> Result<(PanelView, bool), PanelApiError> {
         if let Some(detail) = &self.listing_failed {
             return Err(PanelApiError::ListingFailed {
                 detail: detail.clone(),
@@ -921,7 +951,7 @@ impl SpaceState {
                 rec.live() && rec.file.idempotency_key.as_deref() == Some(key.as_str())
             });
             if let Some((id, rec)) = same {
-                return Ok(self.view_of(id, rec));
+                return Ok((self.view_of(id, rec), false));
             }
         }
         let id = match create.id {
@@ -987,7 +1017,7 @@ impl SpaceState {
         self.records.insert(id.clone(), rec);
         self.service(out, &id);
         self.begin_validation(out, &id, core_error);
-        self.view_now(&id)
+        self.view_now(&id).map(|view| (view, true))
     }
 
     fn view_now(&self, id: &str) -> Result<PanelView, PanelApiError> {
@@ -2076,15 +2106,28 @@ impl PanelStore {
         &mut self,
         space: &SpaceId,
         create: PanelCreate,
-        _now: Millis,
+        now: Millis,
         wall_ms: u64,
         ids: &mut dyn IdSource,
     ) -> Result<PanelView, PanelApiError> {
+        self.create_with_outcome(space, create, now, wall_ms, ids)
+            .map(|outcome| outcome.view)
+    }
+
+    /// `create`, also saying whether the call made the panel (false for an idempotent repeat).
+    pub fn create_with_outcome(
+        &mut self,
+        space: &SpaceId,
+        create: PanelCreate,
+        _now: Millis,
+        wall_ms: u64,
+        ids: &mut dyn IdSource,
+    ) -> Result<CreateOutcome, PanelApiError> {
         let result = self
             .in_space(space, |state, out| state.create(out, create, ids, wall_ms))
             .unwrap_or(Err(PanelApiError::UnknownSpace));
         self.finish();
-        result
+        result.map(|(view, created)| CreateOutcome { view, created })
     }
 
     pub fn update(
@@ -2275,7 +2318,11 @@ impl PanelStore {
             return;
         };
         match op.kind {
-            OpKind::ScratchGone { dir, swept } => self.scratch_gone(&op.space, &dir, swept, report),
+            OpKind::ScratchGone {
+                dir,
+                swept,
+                restore,
+            } => self.scratch_gone(&op.space, &dir, swept, restore, report),
             kind => {
                 self.in_space(&op.space, |state, out| {
                     state.apply_report(out, &op.panel, ticket, kind, report, now);
@@ -2330,6 +2377,26 @@ impl PanelStore {
 
     pub fn take_effects(&mut self) -> Vec<PanelEffect> {
         std::mem::take(&mut self.out.effects)
+    }
+
+    /// The closes and removes whose scratch folder couldn't be deleted since the last call.
+    pub fn take_delete_failures(&mut self) -> Vec<DeleteFailure> {
+        std::mem::take(&mut self.out.scratch.failures)
+    }
+
+    /// A close or remove of this scratch panel waits for its folder's delete to end.
+    pub fn close_pending(&self, space: &SpaceId, panel: &str) -> bool {
+        self.out.saves.values().any(|op| {
+            op.space == *space
+                && op.panel == panel
+                && matches!(
+                    &op.kind,
+                    OpKind::ScratchGone {
+                        restore: Some(_),
+                        ..
+                    }
+                )
+        })
     }
 
     pub fn take_events(&mut self) -> Vec<PanelEvent> {

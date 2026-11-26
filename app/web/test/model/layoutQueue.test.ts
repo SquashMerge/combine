@@ -270,6 +270,20 @@ describe('LayoutQueue', () => {
     expect(sent[1]?.ops[0]).toEqual(close);
   });
 
+  it('builds the add_panel and remove_panel ops', async () => {
+    const { queue, sent } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.addPanel('notes');
+    await flush();
+    queue.onSnapshot(rid(1), snap('6'));
+    queue.removePanel('notes');
+    await flush();
+    expect(sent.map((s) => s.ops)).toEqual([
+      [{ op: 'add_panel', panel: 'notes', tile: null }],
+      [{ op: 'remove_panel', panel: 'notes' }],
+    ]);
+  });
+
   it.each(INHERITED)('sends a split of tile %s', async (id) => {
     const { queue, sent, notices } = setup(() => 't-new');
     queue.onSnapshot(null, snap('5', [id, 't2']));

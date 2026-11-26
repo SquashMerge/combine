@@ -249,6 +249,7 @@ pub fn tool_error_code(error: &PanelApiError) -> &'static str {
         PanelApiError::ScratchListingFailed { .. } => "scratch_listing_failed",
         PanelApiError::PanelFileInvalid { .. } => "panel_file_invalid",
         PanelApiError::Unreadable { .. } => "unreadable",
+        PanelApiError::DeleteFailed { .. } => "delete_failed",
         PanelApiError::Stopped => "stopped",
     }
 }

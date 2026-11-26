@@ -2,22 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { HostsSnapshot } from '../model/hosts';
 import { fuzzyFilter } from './fuzzy';
-import { type PaletteHandlers, buildPaletteEntries, runPaletteAction } from './paletteEntries';
+import {
+  type PaletteHandlers,
+  type PalettePanels,
+  buildPaletteEntries,   runPaletteAction,
+} from './paletteEntries';
 import { useGlobalShortcut } from './useGlobalShortcut';
 
 interface CommandPaletteProps extends PaletteHandlers {
   snapshot: HostsSnapshot;
+  panels?: PalettePanels | null;
 }
 
 interface PaletteDialogProps extends CommandPaletteProps {
   onClose: () => void;
 }
 
-function PaletteDialog({ snapshot, onClose, ...handlers }: PaletteDialogProps) {
+function PaletteDialog({ snapshot, panels = null, onClose, ...handlers }: PaletteDialogProps) {
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  const entries = useMemo(() => buildPaletteEntries(snapshot), [snapshot]);
+  const entries = useMemo(() => buildPaletteEntries(snapshot, panels), [snapshot, panels]);
   const results = useMemo(() => fuzzyFilter(entries, query), [entries, query]);
   const active = Math.min(index, Math.max(results.length - 1, 0));
 
@@ -43,6 +48,10 @@ function PaletteDialog({ snapshot, onClose, ...handlers }: PaletteDialogProps) {
         event.preventDefault();
         setIndex(Math.max(active - 1, 0));
         return;
+      case 'Tab':
+        event.preventDefault();
+        input.current?.focus();
+        return;
       case 'Enter': {
         event.preventDefault();
         const entry = results[active];
@@ -58,13 +67,20 @@ function PaletteDialog({ snapshot, onClose, ...handlers }: PaletteDialogProps) {
   const activeEntry = results[active];
 
   return (
-    <div className="palette-backdrop" onKeyDown={onKeyDown}>
+    <div
+      className="palette-backdrop"
+      onKeyDown={onKeyDown}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <div className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
         <input
           ref={input}
           type="text"
           role="combobox"
-          aria-label="Search spaces and terminals"
+          aria-label="Search spaces, terminals and panels"
+          aria-autocomplete="list"
           aria-expanded="true"
           aria-controls="palette-results"
           aria-activedescendant={activeEntry === undefined ? undefined : optionId(activeEntry.id)}

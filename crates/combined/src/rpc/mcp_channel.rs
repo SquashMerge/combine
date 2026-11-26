@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 
-use combine_protocol::JsonRpcMessage;
+use combine_protocol::{DroppedNotice, JsonRpcMessage};
 use tokio::sync::mpsc::Sender;
 
 use super::connection::ConnEvent;
@@ -176,6 +176,10 @@ impl PanelApi for SpacePanels {
 
     fn render_status(&self, id: &str) -> Result<Vec<ClientRender>, PanelApiError> {
         self.handle.render_status(&self.space, id)
+    }
+
+    fn layout_dropped(&self) -> Result<Option<DroppedNotice>, PanelApiError> {
+        self.handle.layout_dropped(&self.space)
     }
 }
 

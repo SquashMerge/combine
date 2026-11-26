@@ -21,9 +21,20 @@ export interface RawSend {
   reject: (error: PanelFetchError) => void;
 }
 
+/** One `close_panel` or `pin_panel` call, left unanswered until the test settles it. */
+export interface PanelAction {
+  kind: 'close' | 'pin';
+  hostId: HostId;
+  space: string;
+  panel: string;
+  resolve: () => void;
+  reject: (error: PanelFetchError) => void;
+}
+
 /** A panel port over a real PanelFetchQueue, with a raw `get_panel` send the test can answer. */
 export class MemoryPanelPort implements PanelPort {
   readonly sends: RawSend[] = [];
+  readonly actions: PanelAction[] = [];
   readonly reports: { hostId: HostId; report: RenderReport }[] = [];
   reportResult = true;
   /** When set, `onPanelsEvent` registers its listener only once this resolves, as Tauri's async `listen` does. */
@@ -59,6 +70,14 @@ export class MemoryPanelPort implements PanelPort {
     return this.queue.fetch(hostId, space, panel, urgent);
   }
 
+  closePanel(hostId: HostId, space: string, panel: string): Promise<void> {
+    return this.act('close', hostId, space, panel);
+  }
+
+  pinPanel(hostId: HostId, space: string, panel: string): Promise<void> {
+    return this.act('pin', hostId, space, panel);
+  }
+
   reportRender(hostId: HostId, report: RenderReport): Promise<boolean> {
     this.reports.push({ hostId, report });
     return Promise.resolve(this.reportResult);
@@ -76,6 +95,12 @@ export class MemoryPanelPort implements PanelPort {
 
   listenerCount(): number {
     return this.listeners.size;
+  }
+
+  private act(kind: PanelAction['kind'], hostId: HostId, space: string, panel: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.actions.push({ kind, hostId, space, panel, resolve, reject });
+    });
   }
 
   private rawSend(hostId: HostId, space: string, panel: string): Promise<PanelContent> {
@@ -112,7 +137,7 @@ export class MemoryPanelPort implements PanelPort {
   }
 }
 
-export type PanelsFixture = Record<'list' | 'push' | 'loading' | 'panel' | 'error' | 'disconnected', Record<string, unknown>>;
+export type PanelsFixture = Record<'list' | 'push' | 'loading' | 'panel' | 'closed' | 'pinned' | 'error' | 'disconnected', Record<string, unknown>>;
 
 export function loadPanelsEventFixture(): PanelsFixture {
   const file = resolve(import.meta.dirname, '..', 'fixtures', 'panels-event.json');

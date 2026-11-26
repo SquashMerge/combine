@@ -6,8 +6,10 @@ import {
   type LayoutOp,
   firstTileId,
   layoutTiles,
+  newlyActiveTiles,
   opTiles,
   parseLayoutEvent,
+  tileHolding,
 } from '../../src/model/layout';
 import { loadLayoutEventFixture } from '../support/memoryLayoutPort';
 
@@ -113,7 +115,35 @@ describe('layout helpers', () => {
 
   it('names the tiles an op refers to', () => {
     const tiles = (fixture.ops as unknown as LayoutOp[]).map(opTiles);
-    expect(tiles).toEqual([['t1'], ['t1', 't2'], ['t2'], ['t1'], ['t3']]);
+    expect(tiles).toEqual([['t1'], ['t1', 't2'], ['t2'], ['t1'], ['t3'], [], []]);
+    expect(fixture.ops.slice(-2)).toEqual([
+      { op: 'add_panel', panel: 'p3', tile: null },
+      { op: 'remove_panel', panel: 'p3' },
+    ]);
+  });
+});
+
+describe('tileHolding and newlyActiveTiles', () => {
+  const tile = (id: string, panels: string[], active: string | null): LayoutNode => ({ type: 'tile', id, panels, active });
+  const split = (a: LayoutNode, b: LayoutNode): LayoutNode => ({ type: 'split', dir: 'h', ratio: 0.5, a, b });
+
+  it('tileHolding names the tile that holds a panel, or null', () => {
+    const root = split(tile('t1', ['p1'], 'p1'), split(tile('t2', ['p2', 'p3'], 'p2'), tile('t3', [], null)));
+    expect(tileHolding(root, 'p1')).toBe('t1');
+    expect(tileHolding(root, 'p3')).toBe('t2');
+    expect(tileHolding(root, 'nope')).toBeNull();
+    expect(tileHolding(tile('t', [], null), 'p1')).toBeNull();
+  });
+
+  it('newlyActiveTiles names only tiles whose active is a new panel', () => {
+    const prev = split(tile('t1', ['p1', 'p2'], 'p1'), split(tile('t2', ['p3'], 'p3'), tile('t4', [], null)));
+    const next = split(
+      tile('t1', ['p1', 'p2'], 'p2'),
+      split(tile('t2', ['p3', 'p5'], 'p5'), split(tile('t4', ['p6'], 'p6'), tile('t7', ['p8'], 'p8'))),
+    );
+    expect(newlyActiveTiles(prev, next)).toEqual(['t2', 't4']);
+    expect(newlyActiveTiles(prev, prev)).toEqual([]);
+    expect(newlyActiveTiles(next, prev)).toEqual([]);
   });
 });
 

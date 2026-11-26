@@ -2,12 +2,12 @@
 //! The `panels` and `panel` messages, and the trim that keeps a list within one frame.
 
 use combine_protocol::{
-    CreatedBy, DaemonMessage, PanelError, PanelState, Panels, Renderer, RequestId, SkippedPanel,
-    WireMessage,
+    CreatedBy, DaemonMessage, ErrorCode, PanelError, PanelLifetime, PanelState, Panels, Renderer,
+    RequestId, SkippedPanel, WireMessage,
 };
 use combined::core::{
-    panel_reply, panel_summary, panels_loading, panels_message, PanelList, PanelView,
-    PANELS_LOADING, SKIPPED_TRIMMED, TRIMMED_REASON,
+    panel_reply, panel_summary, panels_loading, panels_message, pin_answer, PanelApiError,
+    PanelList, PanelView, PANELS_LOADING, PIN_UNDONE, SKIPPED_TRIMMED, TRIMMED_REASON,
 };
 use combined::model::{Lifetime, SpaceId, ViewPanelFile};
 
@@ -249,6 +249,15 @@ fn removed_panels_are_not_listed_and_the_rest_are_sorted() {
 }
 
 #[test]
+fn a_summary_carries_the_views_lifetime() {
+    let space = SpaceId("/work/app".to_owned());
+    let mut v = view(&space, "p", PanelState::Validated);
+    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Persistent));
+    v.lifetime = Lifetime::Scratch;
+    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Scratch));
+}
+
+#[test]
 fn error_is_set_only_while_failed() {
     let space = SpaceId("/work/app".to_owned());
     for state in [
@@ -288,4 +297,72 @@ fn the_loading_message_has_no_panels() {
     assert_eq!(message.error.as_deref(), Some(PANELS_LOADING));
     assert!(message.panels.is_empty() && message.skipped.is_empty());
     assert_eq!(message.request, Some(RequestId(2)));
+}
+
+#[test]
+fn pin_answer_maps_every_outcome() {
+    let space = SpaceId("/work".to_owned());
+    let request = RequestId(7);
+    let error_of = |message: DaemonMessage| match message {
+        DaemonMessage::Error(error) => {
+            assert_eq!(error.request, Some(request));
+            assert_eq!(error.attachment, None);
+            (error.code, error.message)
+        }
+        other => panic!("expected an error, got {other:?}"),
+    };
+
+    let pinned = view(&space, "p", PanelState::Validated);
+    match pin_answer(request, &space, "p", Ok(pinned.clone())) {
+        DaemonMessage::PanelPinned(answer) => {
+            assert_eq!(
+                (answer.request, answer.space.as_str(), answer.panel.as_str()),
+                (request, "/work", "p")
+            );
+        }
+        other => panic!("expected panel_pinned, got {other:?}"),
+    }
+
+    let removed = view(&space, "p", PanelState::Removed);
+    assert_eq!(
+        error_of(pin_answer(request, &space, "p", Ok(removed))),
+        (
+            ErrorCode::InvalidRequest,
+            PanelApiError::Removed { id: "p".to_owned() }.to_string()
+        )
+    );
+
+    let mut undone = pinned.clone();
+    undone.lifetime = Lifetime::Scratch;
+    assert_eq!(
+        error_of(pin_answer(request, &space, "p", Ok(undone.clone()))),
+        (ErrorCode::InvalidRequest, PIN_UNDONE.to_owned())
+    );
+    undone.file_error = Some("Couldn't pin: no room".to_owned());
+    assert_eq!(
+        error_of(pin_answer(request, &space, "p", Ok(undone))),
+        (
+            ErrorCode::InvalidRequest,
+            "Couldn't pin: no room".to_owned()
+        )
+    );
+
+    for (error, code) in [
+        (PanelApiError::UnknownSpace, ErrorCode::UnknownSpace),
+        (
+            PanelApiError::UnknownPanel { id: "p".to_owned() },
+            ErrorCode::UnknownPanel,
+        ),
+        (PanelApiError::ReadOnly, ErrorCode::InvalidRequest),
+        (
+            PanelApiError::NotScratch { id: "p".to_owned() },
+            ErrorCode::InvalidRequest,
+        ),
+    ] {
+        let text = error.to_string();
+        assert_eq!(
+            error_of(pin_answer(request, &space, "p", Err(error))),
+            (code, text)
+        );
+    }
 }

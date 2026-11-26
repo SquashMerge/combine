@@ -28,7 +28,16 @@ export function fuzzyScore(query: string, text: string): number | null {
   let previous: (number | null)[] | null = null;
   for (let j = 0; j < q.length; j += 1) {
     const row: (number | null)[] = new Array<number | null>(t.length).fill(null);
+    // Best previous[k] + k over k <= i - 2: a skip of i - k - 1 costs that many points.
+    let shifted: number | null = null;
     for (let i = 0; i < t.length; i += 1) {
+      if (previous !== null && i >= 2) {
+        const entering = previous[i - 2];
+        if (entering !== undefined && entering !== null) {
+          const value = entering + i - 2;
+          if (shifted === null || value > shifted) shifted = value;
+        }
+      }
       if (t[i] !== q[j]) continue;
       let bonus = 0;
       if (i === 0) bonus = START_BONUS;
@@ -38,11 +47,12 @@ export function fuzzyScore(query: string, text: string): number | null {
         continue;
       }
       let best: number | null = null;
-      for (let k = 0; k < i; k += 1) {
-        const before = previous[k];
-        if (before === undefined || before === null) continue;
-        const gap = i - k - 1;
-        const score = before + bonus + (gap === 0 ? CONSECUTIVE_BONUS : -gap);
+      const adjacent = previous[i - 1];
+      if (adjacent !== undefined && adjacent !== null) {
+        best = adjacent + bonus + CONSECUTIVE_BONUS;
+      }
+      if (shifted !== null) {
+        const score = shifted - i + 1 + bonus;
         if (best === null || score > best) best = score;
       }
       row[i] = best;

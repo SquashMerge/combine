@@ -23,14 +23,14 @@ pub use config::{ConfigError, CoreConfig, EVENT_OVERHEAD};
 pub use driver::{Driver, MAX_QUEUED_COMMANDS};
 pub use effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 pub use layout::{
-    apply_ops, default_layout, diff_fields, encode_layout, identity_origins, parse_layout,
-    touched_with_origins, validate_layout, AppliedOps, FieldPath, LayoutError, LayoutOp, Origins,
-    SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
+    apply_ops, default_layout, diff_fields, encode_layout, first_tile, identity_origins,
+    parse_layout, target_tile, tile_holding, touched_with_origins, validate_layout, AppliedOps,
+    FieldPath, LayoutError, LayoutOp, Origins, SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
 };
 pub use layout_sync::{
-    layout_snapshot, ops_from_wire, DroppedBatch, LayoutEffect, LayoutRead, LayoutReply,
-    LayoutTiming, LayoutWritten, Layouts, MutateError, SpaceLayoutStatus, WatchError, LAYOUT_FILE,
-    MAX_WIRE_OPS,
+    dropped_notice, layout_snapshot, ops_from_wire, DroppedBatch, LayoutEffect, LayoutRead,
+    LayoutReply, LayoutTiming, LayoutWritten, Layouts, MutateError, SpaceLayoutStatus, WatchError,
+    LAYOUT_FILE, MAX_WIRE_OPS,
 };
 pub use log::{AckError, Appended, EventLog, LogEnd, LogLimits, LogStats, ResumeError};
 pub use machine::{Core, OwnershipState};
@@ -43,13 +43,14 @@ pub use panel_file::{
     SCRATCH_FILE_MAX_BYTES, SOURCE_MAX_BYTES, TITLE_MAX_BYTES,
 };
 pub use panel_store::{
-    FileWrite, IdSource, PanelApiError, PanelCreate, PanelEffect, PanelEvent, PanelFolder,
-    PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd, SaveReport, SaveTicket,
-    MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN, SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
+    CreateOutcome, DeleteFailure, FileWrite, IdSource, PanelApiError, PanelCreate, PanelEffect,
+    PanelEvent, PanelFolder, PanelList, PanelStore, PanelTiming, PanelUpdate, PanelView, SaveEnd,
+    SaveReport, SaveTicket, MAX_CHECKS_IN_FLIGHT, REMOVED_IDS_MAX, SCRATCH_ID_OPEN,
+    SCRATCH_LIST_MAX, SCRATCH_TTL_MS,
 };
 pub use panel_wire::{
-    panel_reply, panel_summary, panels_loading, panels_message, PANELS_LOADING, SKIPPED_TRIMMED,
-    TRIMMED_REASON,
+    panel_error_code, panel_reply, panel_summary, panels_loading, panels_message, pin_answer,
+    PANELS_LOADING, PIN_UNDONE, SKIPPED_TRIMMED, TRIMMED_REASON,
 };
 pub use panels::{
     normalize_cwd, panel_folder_refusal, parse_terminal_panel, shell_spec, template_info,

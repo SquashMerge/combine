@@ -529,6 +529,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                         created_by: Some(CreatedBy::Agent {
                             slot: Some(s("claude")),
                         }),
+                        lifetime: Some(PanelLifetime::Persistent),
                     },
                     PanelSummary {
                         id: s("flow"),
@@ -544,13 +545,14 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                             snippet: Some(s("  A -> B")),
                         }),
                         created_by: Some(CreatedBy::User),
+                        lifetime: Some(PanelLifetime::Scratch),
                     },
                 ],
                 skipped: vec![],
                 error: None,
             }),
             control_frame(
-                r#"{"type":"panels","request":5,"space":"/Users/me/src/trellis","panels":[{"id":"classes","title":"Class diagram","renderer":"mermaid","revision":7,"state":"validated","error":null,"created_by":{"type":"agent","slot":"claude"}},{"id":"flow","title":null,"renderer":"mermaid","revision":9,"state":"failed","error":{"code":"parse_error","message":"unexpected token","line":2,"column":11,"snippet":"  A -> B"},"created_by":{"type":"user"}}],"skipped":[],"error":null}"#,
+                r#"{"type":"panels","request":5,"space":"/Users/me/src/trellis","panels":[{"id":"classes","title":"Class diagram","renderer":"mermaid","revision":7,"state":"validated","error":null,"created_by":{"type":"agent","slot":"claude"},"lifetime":"persistent"},{"id":"flow","title":null,"renderer":"mermaid","revision":9,"state":"failed","error":{"code":"parse_error","message":"unexpected token","line":2,"column":11,"snippet":"  A -> B"},"created_by":{"type":"user"},"lifetime":"scratch"}],"skipped":[],"error":null}"#,
             ),
         ),
         (
@@ -566,6 +568,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                     state: PanelState::Validating,
                     error: None,
                     created_by: None,
+                    lifetime: None,
                 }],
                 skipped: vec![SkippedPanel {
                     panel: s("build"),
@@ -574,7 +577,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                 error: None,
             }),
             control_frame(
-                r#"{"type":"panels","request":null,"space":"/Users/me/src/trellis","panels":[{"id":"notes","title":"Notes","renderer":"markdown","revision":3,"state":"validating","error":null,"created_by":null}],"skipped":[{"panel":"build","reason":"not a view panel"}],"error":null}"#,
+                r#"{"type":"panels","request":null,"space":"/Users/me/src/trellis","panels":[{"id":"notes","title":"Notes","renderer":"markdown","revision":3,"state":"validating","error":null,"created_by":null,"lifetime":null}],"skipped":[{"panel":"build","reason":"not a view panel"}],"error":null}"#,
             ),
         ),
         (

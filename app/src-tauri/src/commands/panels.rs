@@ -1,5 +1,5 @@
 //! Tauri commands and the event for a space's panels: the list that rides the layout watch,
-//! fetched panel sources, and the render status the webview reports back. Request IDs and
+//! fetched panel sources, closing and pinning a panel, and the render status the webview reports back. Request IDs and
 //! revisions cross as `DecimalU64`.
 //!
 //! Panel IDs, space IDs and panel sources cross unchanged, because the webview names them back
@@ -7,8 +7,9 @@
 //! so it keeps its indentation too. Every other text from a daemon is trimmed.
 
 use combine_protocol::{
-    ClientMessage, CreatedBy, ErrorCode, GetPanel, HostId, Panel, PanelError, PanelState,
-    PanelSummary, Panels, RenderStatus, Renderer, ReportRender, SkippedPanel,
+    ClientMessage, ClosePanel, CreatedBy, ErrorCode, GetPanel, HostId, Panel, PanelError,
+    PanelLifetime, PanelState, PanelSummary, Panels, PinPanel, RenderStatus, Renderer,
+    ReportRender, SkippedPanel,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -78,6 +79,7 @@ pub struct IpcPanelSummary {
     pub state: PanelState,
     pub error: Option<IpcPanelError>,
     pub created_by: Option<IpcCreatedBy>,
+    pub lifetime: Option<PanelLifetime>,
 }
 
 impl From<PanelSummary> for IpcPanelSummary {
@@ -93,6 +95,7 @@ impl From<PanelSummary> for IpcPanelSummary {
             state: summary.state,
             error: summary.error.map(Into::into),
             created_by: summary.created_by.map(Into::into),
+            lifetime: summary.lifetime,
         }
     }
 }
@@ -169,6 +172,18 @@ pub enum IpcPanelsEvent {
         request: DecimalU64,
         panel: IpcPanelContent,
     },
+    Closed {
+        host_id: String,
+        request: DecimalU64,
+        space: String,
+        panel: String,
+    },
+    Pinned {
+        host_id: String,
+        request: DecimalU64,
+        space: String,
+        panel: String,
+    },
     Error {
         host_id: String,
         request: DecimalU64,
@@ -195,6 +210,18 @@ pub fn reply_event(host_id: &HostId, reply: PanelReply) -> IpcPanelsEvent {
             host_id,
             request: panel.request.into(),
             panel: panel.into(),
+        },
+        PanelReply::Closed(closed) => IpcPanelsEvent::Closed {
+            host_id,
+            request: closed.request.into(),
+            space: closed.space,
+            panel: closed.panel,
+        },
+        PanelReply::Pinned(pinned) => IpcPanelsEvent::Pinned {
+            host_id,
+            request: pinned.request.into(),
+            space: pinned.space,
+            panel: pinned.panel,
         },
         PanelReply::Error {
             request,
@@ -270,6 +297,42 @@ fn get(
         .map_err(|err| err.to_string())
 }
 
+fn close(
+    outbound: &Outbound,
+    host_id: String,
+    space: String,
+    panel: String,
+) -> Result<DecimalU64, String> {
+    outbound
+        .send(&HostId(host_id), RequestKind::Panel, |request| {
+            ClientMessage::ClosePanel(ClosePanel {
+                request,
+                space,
+                panel,
+            })
+        })
+        .map(Into::into)
+        .map_err(|err| err.to_string())
+}
+
+fn pin(
+    outbound: &Outbound,
+    host_id: String,
+    space: String,
+    panel: String,
+) -> Result<DecimalU64, String> {
+    outbound
+        .send(&HostId(host_id), RequestKind::Panel, |request| {
+            ClientMessage::PinPanel(PinPanel {
+                request,
+                space,
+                panel,
+            })
+        })
+        .map(Into::into)
+        .map_err(|err| err.to_string())
+}
+
 fn report(outbound: &Outbound, host_id: String, report: IpcRenderReport) -> Result<(), String> {
     let error = match report.status {
         RenderStatus::Rendered => None,
@@ -301,6 +364,30 @@ pub fn get_panel(
     get(&service.outbound(), host_id, space, panel)
 }
 
+/// Asks a host to close a panel. The answer arrives as a `panels-changed` event; the result is
+/// the request ID it carries.
+#[tauri::command]
+pub fn close_panel(
+    service: State<'_, HostsService>,
+    host_id: String,
+    space: String,
+    panel: String,
+) -> Result<DecimalU64, String> {
+    close(&service.outbound(), host_id, space, panel)
+}
+
+/// Asks a host to keep a scratch panel in the project. The answer arrives as a `panels-changed`
+/// event; the result is the request ID it carries.
+#[tauri::command]
+pub fn pin_panel(
+    service: State<'_, HostsService>,
+    host_id: String,
+    space: String,
+    panel: String,
+) -> Result<DecimalU64, String> {
+    pin(&service.outbound(), host_id, space, panel)
+}
+
 /// Tells the host whether this client drew a panel's revision. The daemon doesn't answer.
 #[tauri::command]
 pub fn report_render(
@@ -316,7 +403,7 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
 
-    use combine_protocol::RequestId;
+    use combine_protocol::{PanelClosed, PanelPinned, RequestId};
     use serde_json::{json, Value};
 
     use super::*;
@@ -346,6 +433,7 @@ mod tests {
                 created_by: Some(CreatedBy::Agent {
                     slot: Some("claude".to_string()),
                 }),
+                lifetime: Some(PanelLifetime::Persistent),
             },
             PanelSummary {
                 id: "notes".to_string(),
@@ -355,6 +443,7 @@ mod tests {
                 state: PanelState::Validated,
                 error: None,
                 created_by: Some(CreatedBy::User),
+                lifetime: Some(PanelLifetime::Scratch),
             },
         ]
     }
@@ -394,6 +483,8 @@ mod tests {
             contract["commands"]["reportRender"],
             stringify!(report_render)
         );
+        assert_eq!(contract["commands"]["closePanel"], stringify!(close_panel));
+        assert_eq!(contract["commands"]["pinPanel"], stringify!(pin_panel));
     }
 
     #[test]
@@ -423,6 +514,28 @@ mod tests {
                     },
                 ),
             ),
+            (
+                "closed",
+                reply_event(
+                    &host,
+                    PanelReply::Closed(PanelClosed {
+                        request: RequestId(11),
+                        space: "/work".to_string(),
+                        panel: "notes".to_string(),
+                    }),
+                ),
+            ),
+            (
+                "pinned",
+                reply_event(
+                    &host,
+                    PanelReply::Pinned(PanelPinned {
+                        request: RequestId(12),
+                        space: "/work".to_string(),
+                        panel: "notes".to_string(),
+                    }),
+                ),
+            ),
             ("disconnected", reply_event(&host, PanelReply::Disconnected)),
         ];
         for (name, event) in events {
@@ -436,7 +549,16 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["disconnected", "error", "list", "loading", "panel", "push"]
+            [
+                "closed",
+                "disconnected",
+                "error",
+                "list",
+                "loading",
+                "panel",
+                "pinned",
+                "push"
+            ]
         );
     }
 
@@ -459,6 +581,7 @@ mod tests {
             created_by: Some(CreatedBy::Agent {
                 slot: Some("sl\not".to_string()),
             }),
+            lifetime: None,
         };
         let panels: IpcPanelList = Panels {
             request: None,
@@ -572,6 +695,49 @@ mod tests {
             outbound.kind_of(&HostId("h".to_string()), RequestId(1)),
             Some(RequestKind::Panel)
         );
+    }
+
+    #[test]
+    fn close_and_pin_send_their_requests() {
+        let outbound = Arc::new(Outbound::default());
+        let (rx, _registration) = registered(&outbound);
+        let closed = close(
+            &outbound,
+            "h".to_string(),
+            "/work".to_string(),
+            "notes".to_string(),
+        )
+        .expect("sent");
+        let pinned = pin(
+            &outbound,
+            "h".to_string(),
+            "/work".to_string(),
+            "notes".to_string(),
+        )
+        .expect("sent");
+        assert_eq!((closed, pinned), (DecimalU64(1), DecimalU64(2)));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Outgoing::Message(ClientMessage::ClosePanel(ClosePanel {
+                request: RequestId(1),
+                space: "/work".to_string(),
+                panel: "notes".to_string(),
+            })))
+        );
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Outgoing::Message(ClientMessage::PinPanel(PinPanel {
+                request: RequestId(2),
+                space: "/work".to_string(),
+                panel: "notes".to_string(),
+            })))
+        );
+        for request in [RequestId(1), RequestId(2)] {
+            assert_eq!(
+                outbound.kind_of(&HostId("h".to_string()), request),
+                Some(RequestKind::Panel)
+            );
+        }
     }
 
     fn failed(error: IpcPanelError) -> IpcRenderReport {

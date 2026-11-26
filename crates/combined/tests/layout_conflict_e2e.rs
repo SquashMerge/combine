@@ -3,7 +3,9 @@
 //! (`FsFileStore`, the real watcher, a real outside edit by temp file and rename). The core
 //! policy is unit-tested in `layout_sync.rs`; this proves the wiring around it.
 
+mod common;
 mod daemon_support;
+mod panel_support;
 
 use std::fs;
 use std::path::Path;
@@ -15,7 +17,7 @@ use combine_protocol::{
 };
 use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{parse_layout, LayoutTiming, LAYOUT_FILE};
-use combined::model::SplitNode;
+use combined::model::{SpaceId, SplitNode};
 use daemon_support::{
     layout_server, refuse_default_herdr_core, seed_project_terminal, wait_until, ShortTempDir,
     WireClient,
@@ -496,4 +498,120 @@ fn oversized_layout_file_is_invalid_and_never_replaced() {
     let head = &fs::read(&file).unwrap()[..64];
     assert!(head.iter().all(|byte| *byte == 0), "the file was replaced");
     assert!(!fallback.exists());
+}
+
+fn placed(name: &str) -> combined::core::PanelCreate {
+    let mut create = panel_support::named(name, panel_support::markdown("x"));
+    create.placement = Some("main".to_string());
+    create
+}
+
+/// AC7, over real files: a placement waits for a layout file the daemon can't read and is never
+/// written over it, whether it would go out on the debounce, an unwatch or shutdown.
+#[test]
+fn a_placement_never_replaces_an_unreadable_layout_file() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let mut server = layout_server(&scratch, "p", store, QUICK, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let dir = server.work.join(".workspace");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(LAYOUT_FILE);
+    let original = b"{ \"version\": 1, \"root\": unread and invalid".to_vec();
+    fs::write(&file, &original).unwrap();
+    if !lock_file(&file) {
+        unlock_file(&file);
+        eprintln!("skipped: this user can read a mode 000 file");
+        return;
+    }
+
+    let mut client = WireClient::open(&server.socket).0;
+    assert!(watch(&mut client, &space, 1).error.is_some());
+    server
+        .server
+        .panels()
+        .create(&SpaceId(space.clone()), placed("p9"))
+        .unwrap();
+    // Well past the debounce and the max wait.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    client.send(&ClientMessage::UnwatchLayout(UnwatchLayout {}));
+    client.send(&ClientMessage::WatchLayout(WatchLayout {
+        request: RequestId(3),
+        space,
+    }));
+    answer(&client, 3);
+    assert!(server.server.shutdown().is_none());
+
+    unlock_file(&file);
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        original,
+        "the unread file was replaced"
+    );
+    assert!(!fallback.exists(), "the placement went to the fallback");
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != LAYOUT_FILE && name != "panels")
+        .collect();
+    assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+}
+
+/// AC17, over real files: an outside edit to the placed tile's `panels` wins and the placement
+/// is reported dropped. The panel is then placed again, without taking the tile's focus.
+#[test]
+fn a_placement_and_an_overlapping_outside_edit() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let mut server = layout_server(&scratch, "o", store, HOUR, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    fs::create_dir_all(server.work.join(".workspace")).unwrap();
+    outside_write(&server.work, &outside_json(0.5, &["p1"]));
+
+    let mut client = WireClient::open(&server.socket).0;
+    assert_eq!(main_panels(&watch(&mut client, &space, 1).root), ["p1"]);
+    server
+        .server
+        .panels()
+        .create(&SpaceId(space.clone()), placed("p9"))
+        .unwrap();
+    let push = layout_reply(&client, None);
+    assert_eq!(main_panels(&push.root), ["p1", "p9"]);
+    assert_eq!(push.dropped, None);
+
+    outside_write(&server.work, &outside_json(0.5, &["p1", "p2"]));
+    let push = loop {
+        let push = layout_reply(&client, None);
+        if push.dropped.is_some() {
+            break push;
+        }
+    };
+    assert_eq!(push.dropped.unwrap().op_count, 1);
+    assert_eq!(main_panels(&push.root), ["p1", "p2", "p9"]);
+    match &push.root {
+        LayoutNode::Split { a, .. } => match &**a {
+            LayoutNode::Tile { active, .. } => assert_eq!(active.as_deref(), Some("p1")),
+            LayoutNode::Split { .. } => panic!("not a tile"),
+        },
+        LayoutNode::Tile { .. } => panic!("the root is a tile"),
+    }
+
+    assert!(server.server.shutdown().is_none());
+    let file = stored(&server.work);
+    let SplitNode::Split(split) = file.root else {
+        panic!("the root is a tile");
+    };
+    let SplitNode::Tile(main) = *split.a else {
+        panic!("not a tile");
+    };
+    let held: Vec<&str> = main.panels.iter().map(|panel| panel.as_str()).collect();
+    assert_eq!(held, ["p1", "p2", "p9"]);
 }

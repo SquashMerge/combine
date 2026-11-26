@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use combine_protocol::{
-    CreatedBy, DaemonMessage, Mcp, PanelError, PanelState, RenderStatus, Renderer, SkippedPanel,
-    WireMessage,
+    CreatedBy, DaemonMessage, DroppedNotice, Mcp, PanelError, PanelState, RenderStatus, Renderer,
+    SkippedPanel, WireMessage,
 };
 use combined::core::{
     CallerMatch, ClientRender, PanelApiError, PanelCreate, PanelList, PanelUpdate, PanelView,
@@ -33,6 +33,7 @@ struct Fake {
     status: Status,
     list: Result<PanelList, PanelApiError>,
     renders: Vec<ClientRender>,
+    dropped: Option<DroppedNotice>,
     calls: Mutex<Vec<&'static str>>,
     created: Mutex<Vec<PanelCreate>>,
 }
@@ -50,6 +51,7 @@ impl Fake {
                 error: None,
             }),
             renders: Vec::new(),
+            dropped: None,
             calls: Mutex::new(Vec::new()),
             created: Mutex::new(Vec::new()),
         }
@@ -89,6 +91,10 @@ impl PanelApi for Fake {
     fn render_status(&self, _: &str) -> Result<Vec<ClientRender>, PanelApiError> {
         self.note("render_status");
         Ok(self.renders.clone())
+    }
+    fn layout_dropped(&self) -> Result<Option<DroppedNotice>, PanelApiError> {
+        self.note("layout_dropped");
+        Ok(self.dropped.clone())
     }
 }
 
@@ -529,6 +535,7 @@ fn list_panels_sorts_by_id_and_counts() {
     assert_eq!(result["count"], 2);
     assert_eq!(result["truncated"], false);
     assert_eq!(result["skipped"][0]["reason"], "empty");
+    assert_eq!(result["dropped"], Value::Null);
 }
 
 #[test]
@@ -761,6 +768,53 @@ fn list_panels_truncates_to_fit_one_frame() {
     let kept = list["panels"].as_array().unwrap().len();
     assert!(kept > 0 && kept < 100);
     assert_eq!(list["panels"][0]["panel"], "p000");
+    assert_eq!(list["dropped"], Value::Null);
+}
+
+#[test]
+fn list_panels_keeps_dropped_when_it_trims_to_one_frame() {
+    let (server, _) = server();
+    let mut api = Fake::new();
+    api.dropped = Some(DroppedNotice {
+        op_count: 3,
+        message: "3 pending change(s) were dropped".to_owned(),
+    });
+    let noise = "\u{1}".repeat(1_024);
+    api.list = Ok(PanelList {
+        panels: (0..100)
+            .map(|n| {
+                let mut panel = view(
+                    &format!("p{n:03}"),
+                    1,
+                    PanelState::Failed,
+                    Lifetime::Persistent,
+                );
+                panel.error = Some(PanelError {
+                    code: "syntax".to_owned(),
+                    message: noise.clone(),
+                    line: Some(1),
+                    column: Some(1),
+                    snippet: Some(noise.clone()),
+                });
+                panel
+            })
+            .collect(),
+        skipped: Vec::new(),
+        error: None,
+    });
+    let reply = send(&server, &api, &call_message("list_panels", "{}")).unwrap();
+    assert!(fits_one_frame(&reply));
+    let text = json(&reply)["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let list = json(&text);
+    assert_eq!(list["truncated"], true);
+    assert_eq!(list["dropped"]["op_count"], 3);
+    assert_eq!(
+        list["dropped"]["message"],
+        "3 pending change(s) were dropped"
+    );
 }
 
 fn scan(dir: &Path, found: &mut Vec<String>) {

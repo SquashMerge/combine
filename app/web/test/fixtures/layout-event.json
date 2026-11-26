@@ -111,6 +111,15 @@
     {
       "op": "close_tile",
       "tile": "t3"
+    },
+    {
+      "op": "add_panel",
+      "panel": "p3",
+      "tile": null
+    },
+    {
+      "op": "remove_panel",
+      "panel": "p3"
     }
   ]
 }

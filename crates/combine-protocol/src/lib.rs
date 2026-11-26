@@ -59,7 +59,9 @@ pub use ids::{
 };
 pub use layout::{DroppedNotice, LayoutNode, LayoutOp, LayoutSnapshot, Ratio, SplitDirection};
 pub use mcp::{JsonRpcMessage, Mcp, McpCaller};
-pub use panels::{CreatedBy, PanelError, PanelState, PanelSummary, RenderStatus, Renderer};
+pub use panels::{
+    CreatedBy, PanelError, PanelLifetime, PanelState, PanelSummary, RenderStatus, Renderer,
+};
 pub use spawn::{SkippedPanel, SpawnSource, TemplateInfo};
 pub use stream::{read_message, write_message};
 pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};

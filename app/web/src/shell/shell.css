@@ -151,6 +151,8 @@
 .tile {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid GrayText;
 }
 
@@ -160,6 +162,7 @@
 
 .tile-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
 }
@@ -168,6 +171,14 @@
   display: flex;
   flex: 1 1 auto;
   gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tile-bar > button,
+.tile-bar .tab-wrap {
+  flex: none;
+  white-space: nowrap;
 }
 
 .tile-bar [role="tab"][aria-selected="true"] {
@@ -199,4 +210,77 @@
 .terminal-entry .state {
   font-size: 0.8em;
   opacity: 0.7;
+}
+
+.tab-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tab-close,
+.tab-pin {
+  padding: 0 0.4em;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab-pin {
+  font-size: 0.8em;
+}
+
+.tab-close:disabled,
+.tab-pin:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.layout-held,
+.panel-action-error {
+  margin: 0;
+  padding: 0.5em 1em;
+}
+
+.layout-held {
+  border-bottom: 1px solid GrayText;
+}
+
+.layout[data-held] .tile {
+  opacity: 0.85;
+}
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 15vh;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.confirm-close {
+  width: 420px;
+  padding: 16px;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid GrayText;
+  border-radius: 8px;
+}
+
+.confirm-close h2 {
+  margin: 0 0 0.5em;
+  font-size: 1.1em;
+}
+
+.confirm-close p {
+  margin: 0 0 1em;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

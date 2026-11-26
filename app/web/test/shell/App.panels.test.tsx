@@ -1,9 +1,9 @@
-import { act, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { type ClientState, defaultClientState } from '../../src/model/clientState';
 import type { DecimalU64, HostId } from '../../src/model/ids';
 import type { LayoutNode, LayoutSnapshot } from '../../src/model/layout';
-import { type PanelContent, type PanelSummary, parsePanelsChanged } from '../../src/model/panels';
+import { type PanelContent, PanelFetchError, type PanelSummary, parsePanelsChanged } from '../../src/model/panels';
 import { App } from '../../src/shell/App';
 import { MemoryClientStatePort } from '../support/memoryClientStatePort';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
@@ -24,7 +24,7 @@ function saved(): ClientState {
 }
 
 function summary(id: string, title: string | null = null): PanelSummary {
-  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null };
+  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null, lifetime: null };
 }
 
 function content(id: string): PanelContent {
@@ -138,5 +138,238 @@ describe('App with panels', () => {
     act(() => panelPort.emit(list));
     await waitFor(() => expect(panelPort.reports).toHaveLength(2));
     expect(panelPort.sends).toHaveLength(1);
+  });
+});
+
+describe('App panel placement and close', () => {
+  const lived = (id: string, lifetime: PanelSummary['lifetime']): PanelSummary => ({ ...summary(id), lifetime });
+
+  async function setup(root?: LayoutNode) {
+    const panelPort = new MemoryPanelPort();
+    panelPort.autoAnswer((panel) => content(panel));
+    const layoutPort = await mount(panelPort);
+    act(() =>
+      layoutPort.push(
+        HOST_A,
+        layoutOf(
+          root ?? {
+            type: 'split',
+            dir: 'h',
+            ratio: 0.5,
+            a: { type: 'tile', id: 't1', panels: ['p1', 'p2', 'ghost'], active: 'p1' },
+            b: { type: 'tile', id: 't2', panels: ['p4'], active: 'p4' },
+          },
+        ),
+      ),
+    );
+    act(() =>
+      panelPort.emit({
+        kind: 'list',
+        hostId: HOST_A,
+        request: null,
+        list: {
+          space: PATH,
+          panels: [
+            lived('p1', 'scratch'),
+            lived('p2', 'persistent'),
+            lived('p3', 'persistent'),
+            lived('p4', 'persistent'),
+            lived('p5', 'scratch'),
+            lived('p6', null),
+          ],
+          skipped: [],
+          error: null,
+        },
+      }),
+    );
+    await waitFor(() => expect(document.querySelector('[data-panel-id="p1"]')?.getAttribute('data-panel-entry')).toBe('listed'));
+    return { panelPort, layoutPort };
+  }
+
+  const mutates = (layoutPort: MemoryLayoutPort) => layoutPort.calls.filter((call) => call.kind === 'mutate');
+  const button = (name: string) => screen.getByRole('button', { name });
+  const openPalette = () => fireEvent.keyDown(window, { key: 'k', metaKey: true });
+  const choose = (label: string | RegExp, detail?: string) => {
+    const option = screen
+      .getAllByRole('option')
+      .find((o) => (typeof label === 'string' ? o.querySelector('.label')?.textContent === label : label.test(o.textContent ?? '')) && (detail === undefined || (o.querySelector('.detail')?.textContent ?? '').includes(detail)));
+    if (option === undefined) throw new Error(`no option ${String(label)}`);
+    fireEvent.click(option);
+  };
+  const focused = () => document.querySelector('[data-tile-id][aria-current="true"]')?.getAttribute('data-tile-id');
+  const selectedTab = (tile: string) =>
+    document.querySelector(`[data-tile-id="${tile}"] [role="tab"][aria-selected="true"]`)?.getAttribute('data-panel-id');
+
+  it('closing a persistent tab sends close_panel without asking and leaves the layout to the daemon', async () => {
+    const { panelPort, layoutPort } = await setup();
+    fireEvent.click(button('Close panel p2'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(panelPort.actions.map((a) => [a.kind, a.hostId, a.space, a.panel])).toEqual([['close', HOST_A, PATH, 'p2']]);
+    expect((button('Close panel p2') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => panelPort.actions[0]?.resolve());
+    expect(mutates(layoutPort)).toEqual([]);
+    expect(document.querySelector('[data-panel-id="p2"]')).not.toBeNull();
+    expect((button('Close panel p2') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('closing a scratch tab asks first; Cancel sends nothing', async () => {
+    const { panelPort } = await setup();
+    fireEvent.click(button('Close panel p1'));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog.textContent).toContain('Close scratch panel?');
+    expect(dialog.textContent).toContain("Closing p1 deletes its content, and it can't be restored. Pin it first to keep it in the project.");
+    expect(document.activeElement).toBe(button('Cancel'));
+    fireEvent.click(button('Cancel'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(panelPort.actions).toEqual([]);
+    fireEvent.click(button('Close panel p1'));
+    fireEvent.keyDown(screen.getByRole('alertdialog'), { key: 'Escape' });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(panelPort.actions).toEqual([]);
+    fireEvent.click(button('Close panel p1'));
+    fireEvent.click(button('Close and delete'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['close', 'p1']]);
+  });
+
+  it('a failed close shows its error text', async () => {
+    const { panelPort } = await setup();
+    fireEvent.click(button('Close panel p2'));
+    await act(async () => panelPort.actions[0]?.reject(new PanelFetchError('panel_busy', 'it is busy')));
+    expect((await screen.findByText("Couldn't close p2: it is busy")).getAttribute('role')).toBe('alert');
+  });
+
+  it('a failed pin shows its error text', async () => {
+    const { panelPort } = await setup();
+    fireEvent.click(button('Pin panel p1'));
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['pin', 'p1']]);
+    await act(async () => panelPort.actions[0]?.reject(new PanelFetchError(null, 'no room')));
+    expect(await screen.findByText("Couldn't pin p1: no room")).not.toBeNull();
+  });
+
+  it("a missing tab's close sends remove_panel", async () => {
+    const { panelPort, layoutPort } = await setup();
+    fireEvent.click(button('Close panel ghost'));
+    await waitFor(() => expect(mutates(layoutPort)).toHaveLength(1));
+    expect(mutates(layoutPort)[0]).toMatchObject({ ops: [{ op: 'remove_panel', panel: 'ghost' }] });
+    expect(panelPort.actions).toEqual([]);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('palette Close panel and Pin panel act on the focused tab', async () => {
+    const { panelPort } = await setup({
+      type: 'split',
+      dir: 'h',
+      ratio: 0.5,
+      a: { type: 'tile', id: 't1', panels: ['p1', 'p2'], active: 'p1' },
+      b: { type: 'tile', id: 't2', panels: ['p4', 'p5'], active: 'p5' },
+    });
+    fireEvent.click(document.querySelector('[data-tile-id="t2"] .tile-body') as HTMLElement);
+    expect(focused()).toBe('t2');
+    openPalette();
+    choose('Pin panel');
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['pin', 'p5']]);
+    openPalette();
+    choose('Close panel');
+    expect(screen.getByRole('alertdialog').textContent).toContain('Closing p5');
+    fireEvent.click(button('Close and delete'));
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['pin', 'p5'], ['close', 'p5']]);
+  });
+
+  it('a stored tab choice decides which panel the palette actions act on', async () => {
+    const { panelPort } = await setup({
+      type: 'split',
+      dir: 'h',
+      ratio: 0.5,
+      a: { type: 'tile', id: 't1', panels: ['p1', 'p2'], active: 'p1' },
+      b: { type: 'tile', id: 't2', panels: ['p4', 'p5'], active: 'p4' },
+    });
+    fireEvent.click(document.querySelector('[data-tile-id="t2"] [data-panel-id="p5"]') as HTMLElement);
+    openPalette();
+    choose('Pin panel');
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['pin', 'p5']]);
+  });
+
+  const twoTiles: LayoutNode = {
+    type: 'split',
+    dir: 'h',
+    ratio: 0.5,
+    a: { type: 'tile', id: 't1', panels: ['p1', 'p6'], active: 'p1' },
+    b: { type: 'tile', id: 't2', panels: ['p4'], active: 'p4' },
+  };
+
+  it('the confirm dialog closes as a Cancel when the tree becomes held', async () => {
+    const { panelPort, layoutPort } = await setup(twoTiles);
+    fireEvent.click(button('Close panel p1'));
+    expect(screen.getByRole('alertdialog')).not.toBeNull();
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(panelPort.actions).toEqual([]);
+  });
+
+  it('closing a panel with no recorded lifetime asks with the may-delete copy', async () => {
+    const { panelPort } = await setup(twoTiles);
+    fireEvent.click(button('Close panel p6'));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog.querySelector('h2')?.textContent).toBe('Close panel?');
+    expect(dialog.querySelector('p')?.textContent).toBe("Closing p6 may delete its content, and it can't be restored.");
+    expect(screen.queryByRole('button', { name: 'Close and delete' })).toBeNull();
+    expect(panelPort.actions).toEqual([]);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['close', 'p6']]);
+  });
+
+  it('Tab cycles between the two buttons of the confirm dialog', async () => {
+    await setup(twoTiles);
+    fireEvent.click(button('Close panel p1'));
+    const dialog = screen.getByRole('alertdialog');
+    expect(document.activeElement).toBe(button('Cancel'));
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(button('Close and delete'));
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(button('Cancel'));
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(button('Cancel'));
+  });
+
+  it('choosing a placed panel makes its tab active and focuses its tile', async () => {
+    await setup();
+    expect(focused()).toBe('t1');
+    openPalette();
+    choose(/^p4/);
+    await waitFor(() => expect(focused()).toBe('t2'));
+    openPalette();
+    choose(/^p2/);
+    await waitFor(() => expect(focused()).toBe('t1'));
+    expect(selectedTab('t1')).toBe('p2');
+  });
+
+  it('choosing a panel in no tile sends add_panel with no tile and focuses where it lands', async () => {
+    const { layoutPort } = await setup();
+    fireEvent.click(document.querySelector('[data-tile-id="t1"] [role="tab"]') as HTMLElement);
+    openPalette();
+    choose(/^p3/, 'not in a tile');
+    await waitFor(() => expect(mutates(layoutPort)).toHaveLength(1));
+    expect(mutates(layoutPort)[0]).toMatchObject({ ops: [{ op: 'add_panel', panel: 'p3', tile: null }] });
+    expect(focused()).toBe('t1');
+    act(() =>
+      layoutPort.push(
+        HOST_A,
+        {
+          ...layoutOf({
+            type: 'split',
+            dir: 'h',
+            ratio: 0.5,
+            a: { type: 'tile', id: 't1', panels: ['p1', 'p2', 'ghost'], active: 'p1' },
+            b: { type: 'tile', id: 't2', panels: ['p4', 'p3'], active: 'p3' },
+          }),
+          layoutRevision: '2' as DecimalU64,
+        },
+        '2' as DecimalU64,
+      ),
+    );
+    await waitFor(() => expect(focused()).toBe('t2'));
+    expect(selectedTab('t2')).toBe('p3');
   });
 });

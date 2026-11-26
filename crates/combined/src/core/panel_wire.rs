@@ -2,11 +2,12 @@
 //! whether a list fits one frame.
 
 use combine_protocol::{
-    DaemonMessage, Panel, PanelState, PanelSummary, Panels, RequestId, SkippedPanel, WireMessage,
+    DaemonMessage, ErrorCode, ErrorMessage, Panel, PanelLifetime, PanelPinned, PanelState,
+    PanelSummary, Panels, RequestId, SkippedPanel, WireMessage,
 };
 
-use crate::core::panel_store::{PanelList, PanelView};
-use crate::model::SpaceId;
+use crate::core::panel_store::{PanelApiError, PanelList, PanelView};
+use crate::model::{Lifetime, SpaceId};
 
 /// The `error` of a `panels` message for a space whose panels aren't read yet.
 pub const PANELS_LOADING: &str = "the space's panels are loading";
@@ -16,7 +17,8 @@ pub const TRIMMED_REASON: &str = "the panel list is larger than one frame; this 
 pub const SKIPPED_TRIMMED: &str =
     "the panel list is larger than one frame; some skipped folders aren't listed";
 
-/// The entry `panels` lists for `view`; `error` is set only while the panel is `failed`.
+/// The entry `panels` lists for `view`; `error` is set only while the panel is `failed`, and `lifetime` is
+/// always the view's.
 pub fn panel_summary(view: &PanelView) -> PanelSummary {
     PanelSummary {
         id: view.id.clone(),
@@ -26,6 +28,10 @@ pub fn panel_summary(view: &PanelView) -> PanelSummary {
         state: view.state,
         error: failed_error(view),
         created_by: view.file.created_by.clone(),
+        lifetime: Some(match view.lifetime {
+            Lifetime::Persistent => PanelLifetime::Persistent,
+            Lifetime::Scratch => PanelLifetime::Scratch,
+        }),
     }
 }
 
@@ -105,6 +111,71 @@ pub fn panel_reply(request: RequestId, view: &PanelView, source: &str) -> Panel 
         source: source.to_owned(),
         state: view.state,
         error: failed_error(view),
+    }
+}
+
+/// The error code of a refused panel request. Every variant is named, so a new one is a compile
+/// error here.
+pub fn panel_error_code(error: &PanelApiError) -> ErrorCode {
+    match error {
+        PanelApiError::UnknownSpace => ErrorCode::UnknownSpace,
+        PanelApiError::UnknownPanel { .. } => ErrorCode::UnknownPanel,
+        PanelApiError::SpaceLoading
+        | PanelApiError::Removed { .. }
+        | PanelApiError::ReadOnly
+        | PanelApiError::InvalidId { .. }
+        | PanelApiError::IdTaken { .. }
+        | PanelApiError::InvalidField { .. }
+        | PanelApiError::PanelLimit { .. }
+        | PanelApiError::TooLarge { .. }
+        | PanelApiError::NotScratch { .. }
+        | PanelApiError::ListingFailed { .. }
+        | PanelApiError::ScratchListingFailed { .. }
+        | PanelApiError::PanelFileInvalid { .. }
+        | PanelApiError::Unreadable { .. }
+        | PanelApiError::DeleteFailed { .. }
+        | PanelApiError::Stopped => ErrorCode::InvalidRequest,
+    }
+}
+
+/// What a `pin_panel` answer says when the pin finished with the panel still a scratch panel and no
+/// reason recorded.
+pub const PIN_UNDONE: &str = "the pin was undone; the panel is still a scratch panel";
+
+/// The answer to a `pin_panel`, from the panel as the store holds it once the pin's file work has run.
+/// A panel that is persistent now was pinned; one that is still scratch had its pin undone, and
+/// says why when the store recorded a reason.
+pub fn pin_answer(
+    request: RequestId,
+    space: &SpaceId,
+    panel: &str,
+    found: Result<PanelView, PanelApiError>,
+) -> DaemonMessage {
+    let refused = |code, message| {
+        DaemonMessage::Error(ErrorMessage {
+            code,
+            message,
+            request: Some(request),
+            attachment: None,
+        })
+    };
+    match found {
+        Ok(view) if view.state == PanelState::Removed => refused(
+            ErrorCode::InvalidRequest,
+            PanelApiError::Removed { id: view.id }.to_string(),
+        ),
+        Ok(view) if view.lifetime == Lifetime::Persistent => {
+            DaemonMessage::PanelPinned(PanelPinned {
+                request,
+                space: space.0.clone(),
+                panel: panel.to_owned(),
+            })
+        }
+        Ok(view) => refused(
+            ErrorCode::InvalidRequest,
+            view.file_error.unwrap_or_else(|| PIN_UNDONE.to_owned()),
+        ),
+        Err(error) => refused(panel_error_code(&error), error.to_string()),
     }
 }
 

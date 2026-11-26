@@ -5,6 +5,7 @@ import type { OpenUrlPort, PanelPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import { type SpaceKey } from '../model/space';
 import { type SpacePanelsView, panelEntry, tabLabel } from '../model/panels';
+import { HELD_NOTICE, HELD_TITLE, type HeldReason } from './heldLayout';
 import { TerminalPanel } from '../panels/TerminalPanel';
 import { ViewPanel } from '../panels/ViewPanel';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
@@ -32,9 +33,16 @@ interface TileTreeProps {
   panels?: SpacePanelsView | null;
   panelPort?: PanelPort;
   openUrlPort?: OpenUrlPort;
+  onCloseTab?: (tile: string, panel: string) => void;
+  onPinPanel?: (panel: string) => void;
+  /** Panels with a close or pin in flight. */
+  busyPanels?: ReadonlySet<string>;
+  /** Why the tree is the last layout seen, if it is; its edit controls are disabled. */
+  held?: HeldReason | null;
+  actionError?: string | null;
 }
 
-type NodeProps = Omit<TileTreeProps, 'layout' | 'notice' | 'error'> & {
+type NodeProps = Omit<TileTreeProps, 'layout' | 'notice' | 'error' | 'actionError'> & {
   node: LayoutNode;
   closable: boolean;
 };
@@ -66,7 +74,12 @@ function Node({ node, closable, ...rest }: NodeProps) {
     panels = null,
     panelPort,
     openUrlPort,
+    onCloseTab,
+    onPinPanel,
+    busyPanels,
+    held = null,
   } = rest;
+  const heldTitle = held === null ? undefined : HELD_TITLE[held];
   const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
   const focused = focusedTile === node.id;
   const list = panels?.list ?? null;
@@ -84,27 +97,68 @@ function Node({ node, closable, ...rest }: NodeProps) {
     >
       <div className="tile-bar">
         <div role="tablist" aria-label={`Panels of ${node.id}`}>
-          {node.panels.map((panel) => (
-            <button
-              key={panel}
-              type="button"
-              role="tab"
-              data-panel-id={panel}
-              data-panel-entry={panelPort === undefined ? undefined : panelEntry(list, panel).kind}
-              aria-selected={panel === active}
-              onClick={() => onSelectTab(node.id, panel)}
-            >
-              {panelPort === undefined ? panel : tabLabel(list, panel)}
-            </button>
-          ))}
+          {node.panels.map((panel) => {
+            const tabEntry = panelEntry(list, panel);
+            const label = panelPort === undefined ? panel : tabLabel(list, panel);
+            const busy = busyPanels?.has(panel) ?? false;
+            const loading = tabEntry.kind === 'loading';
+            const blocked = held !== null || busy || loading;
+            const controlTitle = heldTitle ?? (busy ? 'Working…' : loading ? 'Loading…' : undefined);
+            return (
+              <span key={panel} role="presentation" className="tab-wrap">
+                <button
+                  type="button"
+                  role="tab"
+                  data-panel-id={panel}
+                  data-panel-entry={panelPort === undefined ? undefined : tabEntry.kind}
+                  aria-selected={panel === active}
+                  onClick={() => onSelectTab(node.id, panel)}
+                >
+                  {label}
+                </button>
+                {panelPort !== undefined && onCloseTab !== undefined && (
+                  <button
+                    type="button"
+                    className="tab-close"
+                    aria-label={`Close panel ${label}`}
+                    title={controlTitle ?? 'Close panel'}
+                    disabled={blocked}
+                    onClick={() => onCloseTab(node.id, panel)}
+                  >
+                    ×
+                  </button>
+                )}
+                {panelPort !== undefined &&
+                  onPinPanel !== undefined &&
+                  tabEntry.kind === 'listed' &&
+                  tabEntry.summary.lifetime === 'scratch' && (
+                    <button
+                      type="button"
+                      className="tab-pin"
+                      aria-label={`Pin panel ${label}`}
+                      title={controlTitle ?? 'Keep it in the project'}
+                      disabled={blocked}
+                      onClick={() => onPinPanel(panel)}
+                    >
+                      Pin
+                    </button>
+                  )}
+              </span>
+            );
+          })}
         </div>
-        <button type="button" onClick={() => onSplit(node.id, 'h')}>
+        <button type="button" disabled={held !== null} title={heldTitle} onClick={() => onSplit(node.id, 'h')}>
           Split right
         </button>
-        <button type="button" onClick={() => onSplit(node.id, 'v')}>
+        <button type="button" disabled={held !== null} title={heldTitle} onClick={() => onSplit(node.id, 'v')}>
           Split down
         </button>
-        <button type="button" disabled={!closable} onClick={() => onClose(node.id)}>
+        <button
+          type="button"
+          disabled={!closable || held !== null}
+          title={heldTitle}
+          onClick={() => onClose(node.id)}
+        >
           Close tile
         </button>
       </div>
@@ -145,10 +199,16 @@ function Node({ node, closable, ...rest }: NodeProps) {
   );
 }
 
-export function TileTree({ layout, notice, error, ...rest }: TileTreeProps) {
+export function TileTree({ layout, notice, error, actionError = null, ...rest }: TileTreeProps) {
   const dropped = layout.dropped?.message ?? null;
+  const held = rest.held ?? null;
   return (
-    <main className="layout" aria-label="Layout" data-read-only={layout.readOnly ? 'true' : undefined}>
+    <main
+      className="layout"
+      aria-label="Layout"
+      data-read-only={layout.readOnly ? 'true' : undefined}
+      data-held={held ?? undefined}
+    >
       {layout.error !== null && (
         <p className="layout-error" role="alert">
           {layout.error}
@@ -158,6 +218,16 @@ export function TileTree({ layout, notice, error, ...rest }: TileTreeProps) {
       {rest.panels?.list?.error != null && (
         <p className="panels-error" role="alert">
           {rest.panels.list.error}
+        </p>
+      )}
+      {held !== null && (
+        <p className="layout-held" role="status">
+          {HELD_NOTICE[held]}
+        </p>
+      )}
+      {actionError !== null && (
+        <p className="panel-action-error" role="alert">
+          {actionError}
         </p>
       )}
       {dropped !== null && (
