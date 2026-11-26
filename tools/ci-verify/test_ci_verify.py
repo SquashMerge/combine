@@ -5,7 +5,9 @@
 Each case runs the real ci_verify.sh with stand-in `git` and `gh` first on PATH. They replay a
 scripted scenario and log every call; nothing reaches GitHub. `sleep` and `date` are stand-ins
 too: sleeping advances a fake clock that `date +%s` reads, so the deadline and start-window
-cases run at once and check the time the script believed had passed.
+cases run at once and check the time the script believed had passed. A scenario's `cost` makes
+each push and gh call take that many fake seconds, or the bound the script gave it
+(CI_VERIFY_LIMIT_S) if that is less, when it is "killed" with status 143.
 """
 
 from __future__ import annotations
@@ -35,6 +37,21 @@ REF = f"refs/heads/qualify/factory-{SHA}"
 REMOTE = "git@github.com:SquashMerge/combine.git"
 REPO = "SquashMerge/combine"
 CLOCK_START = 1_000_000
+SECRET = "s3cr3t-dummy-credential"
+SECRET_REMOTE = f"https://x-access-token:{SECRET}@github.com/SquashMerge/combine.git"
+# Check suites: a push of SHA started one; a pull_request run on SHA's PR started the other.
+PUSH_SUITE, PR_SUITE = 7001, 7002
+WORKFLOWS = {
+    "pages": [
+        {
+            "total_count": 3,
+            "workflow_runs": [
+                {"id": 1, "event": "push", "head_sha": SHA, "check_suite_id": PUSH_SUITE},
+                {"id": 2, "event": "pull_request", "head_sha": SHA, "check_suite_id": PR_SUITE},
+            ],
+        }
+    ]
+}
 
 # The stand-ins. Each reads $STUB/scenario.json and appends its argv to $STUB/calls.jsonl.
 STUB_COMMON = r"""
@@ -51,9 +68,23 @@ def bump(name):
     n = int(open(path).read()) if os.path.exists(path) else 0
     open(path, "w").write(str(n + 1))
     return n
+def spend():
+    cost = scenario.get("cost", 0)
+    if not cost:
+        return
+    limit = int(os.environ.get("CI_VERIFY_LIMIT_S") or 0)
+    took = min(cost, limit) if limit else cost
+    later = clock() + took
+    open(os.path.join(stub, "clock"), "w").write(str(later))
+    if limit and cost > limit:
+        sys.exit(143)
 def answer(item):
     sys.stdout.write(item.get("out", ""))
     sys.stderr.write(item.get("err", ""))
+    if item.get("hang") == "ignore-term":
+        import signal, time
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        time.sleep(60)
     if item.get("hang"):
         os.execv("/bin/sleep", ["sleep", "30"])
     sys.exit(item.get("code", 0))
@@ -68,12 +99,15 @@ if args[:4] == ["remote", "get-url", "--push", "origin"]:
     remote = scenario.get("remote")
     answer({"out": remote + "\n"} if remote is not None else {"code": 2, "err": "error: No such remote\n"})
 if args[:1] == ["push"]:
+    spend()
+    refusal = f"fatal: unable to access '{scenario.get('remote')}/': The requested URL returned error: 403\n"
     if "--delete" in args:
-        answer({"code": scenario.get("delete_code", 0)})
+        code = scenario.get("delete_code", 0)
+        answer({"code": code, "err": refusal if code else ""})
     codes = scenario.get("push_codes", [0])
     n = bump("push")
     code = codes[min(n, len(codes) - 1)]
-    answer({"code": code, "err": "fatal: could not read from remote repository\n" if code else ""})
+    answer({"code": code, "err": refusal if code else ""})
 answer({"code": 99, "err": "stub git: unexpected call\n"})
 """
 
@@ -83,19 +117,19 @@ args = sys.argv[1:]
 path = next((a for a in args[1:] if not a.startswith("-")), "")
 if args[:1] != ["api"]:
     answer({"code": 99, "err": "stub gh: unexpected call\n"})
-if "/check-runs/" in path and path.split("?")[0].endswith("/annotations"):
-    run_id = path.split("/check-runs/")[1].split("/")[0]
-    notes = scenario.get("annotations", {}).get(run_id, [])
-    if isinstance(notes, dict):
-        answer(notes)
-    answer({"out": json.dumps(notes)})
-if "/check-runs" in path:
-    polls = scenario["polls"]
-    n = bump("poll")
-    item = polls[min(n, len(polls) - 1)]
+spend()
+if "/annotations" in path:
+    answer({"code": 98, "err": "stub gh: annotations are never read\n"})
+def pages(item):
     if "pages" in item:
         answer({"out": "".join(json.dumps(p) for p in item["pages"])})
     answer(item)
+if "/actions/runs?" in path:
+    pages(scenario["workflows"])
+if "/check-runs" in path:
+    polls = scenario["polls"]
+    n = bump("poll")
+    pages(polls[min(n, len(polls) - 1)])
 answer(scenario.get("probe", {"out": "{}"}))
 """
 
@@ -103,13 +137,14 @@ STUB_SLEEP = '#!/bin/sh\nn=$(cat "$STUB/clock"); echo $((n + $1)) >"$STUB/clock"
 STUB_DATE = '#!/bin/sh\ncat "$STUB/clock"\n'
 
 
-def check(run_id, conclusion="success", status="completed", name="verify", app="github-actions"):
+def check(run_id, conclusion="success", status="completed", name="verify", app="github-actions", suite=PUSH_SUITE):
     return {
         "id": run_id,
         "name": name,
         "status": status,
         "conclusion": conclusion if status == "completed" else None,
         "app": {"slug": app},
+        "check_suite": {"id": suite},
         "html_url": f"https://github.com/{REPO}/runs/{run_id}",
         "details_url": f"https://github.com/{REPO}/actions/runs/9{run_id}/job/{run_id}",
     }
@@ -130,6 +165,7 @@ PENDING = poll(check(100, status="in_progress"))
 QUEUED = poll(check(100, status="queued"))
 PASSED = poll(check(100))
 FAILED = poll(check(100, "failure"))
+CANCELLED = poll(check(100, "cancelled"))
 UNREACHABLE = {"code": 1, "err": "error connecting to api.github.com\n"}
 
 
@@ -154,7 +190,7 @@ class Result:
 
 
 def run_script(scenario, env=None, fake_time=True, on_start=None):
-    scenario = dict({"sha": SHA, "remote": REMOTE}, **scenario)
+    scenario = dict({"sha": SHA, "remote": REMOTE, "workflows": WORKFLOWS}, **scenario)
     with tempfile.TemporaryDirectory() as scratch:
         stub = Path(scratch) / "stub"
         bin_dir = Path(scratch) / "bin"
@@ -191,15 +227,16 @@ def run_script(scenario, env=None, fake_time=True, on_start=None):
         if on_start:
             on_start(proc, stub)
         try:
-            _, stderr = proc.communicate(timeout=60)
+            stdout, stderr = proc.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             proc.kill()
             raise
         calls = [json.loads(line) for line in (stub / "calls.jsonl").read_text().splitlines()]
+        output = stdout.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
         leftovers = [p.name for p in Path(scratch).iterdir() if p.name.startswith("ci-verify.")]
-        assert not leftovers, f"ci_verify.sh left {leftovers}"
+        assert not leftovers, f"ci_verify.sh left {leftovers}:\n{output}"
         clock = int((stub / "clock").read_text()) - CLOCK_START
-        return Result(proc.returncode, stderr.decode("utf-8", "replace"), calls, clock)
+        return Result(proc.returncode, output, calls, clock)
 
 
 class CiVerify(unittest.TestCase):
@@ -239,6 +276,11 @@ class CiVerify(unittest.TestCase):
         result = self.go({"polls": [NOTHING, mixed]}, 1, {"CI_VERIFY_REQUIRED": "verify lint"})
         self.assert_cleaned_up(result)
 
+    def test_a_failure_beside_a_platform_stop_gives_1(self):
+        mixed = poll(check(100, "failure"), check(101, "cancelled", name="lint"))
+        result = self.go({"polls": [NOTHING, mixed]}, 1, {"CI_VERIFY_REQUIRED": "verify lint"})
+        self.assertEqual(len(result.pushes()), 1, "no fresh run for a real failure")
+
     def test_timed_out_and_skipped_are_failures(self):
         for conclusion in ("timed_out", "skipped", "neutral"):
             with self.subTest(conclusion=conclusion):
@@ -255,7 +297,7 @@ class CiVerify(unittest.TestCase):
         )
         self.assertIn("lint: missing", result.stderr)
         self.assertIn("no answer for", result.stderr)
-        self.assertEqual(result.clock, 600)
+        self.assertEqual(result.clock, 300, "no work starts in the last CI_VERIFY_RESERVE_S")
         self.assert_cleaned_up(result)
 
     def test_nothing_started_after_the_push_gives_75(self):
@@ -269,14 +311,14 @@ class CiVerify(unittest.TestCase):
         result = self.go(
             {"polls": [NOTHING, QUEUED, PENDING]}, 75, {"CI_VERIFY_DEADLINE_S": "4800", "CI_VERIFY_POLL_S": "700"}
         )
-        self.assertEqual(result.clock, 4800, "the script never sleeps past its deadline")
+        self.assertEqual(result.clock, 4500, "the script never sleeps into the cleanup reserve")
         self.assert_cleaned_up(result)
 
     def test_the_default_deadline_is_80_minutes(self):
         # An empty setting falls back to the default.
         result = self.go({"polls": [NOTHING, PENDING]}, 75, {"CI_VERIFY_DEADLINE_S": "", "CI_VERIFY_POLL_S": "1000"})
-        self.assertEqual(result.clock, 4800)
-        self.assertIn("gives up after 80m00s", result.stderr)
+        self.assertEqual(result.clock, 4500)
+        self.assertIn("gives up by 80m00s, cleanup included", result.stderr)
 
     def test_a_check_from_another_app_does_not_count(self):
         impostor = poll(check(100, app="some-other-app"))
@@ -339,18 +381,39 @@ class CiVerify(unittest.TestCase):
         result = self.go({"polls": [NOTHING, poll(check(100, "startup_failure"))]}, 75, {"CI_VERIFY_MAX_RERUNS": "0"})
         self.assertEqual(len(result.pushes()), 1)
 
-    def test_a_runner_failure_is_not_a_failure(self):
-        note = {"message": "The job was not acquired by Runner of type hosted even after multiple attempts"}
-        result = self.go(
-            {"polls": [NOTHING, FAILED, poll(check(100, "failure"), check(300))], "annotations": {"100": [note]}},
-            0,
-        )
-        self.assertEqual(len(result.pushes()), 2)
-        self.assertTrue(any("check-runs/100/annotations" in " ".join(a) for a in result.gh()))
+    def test_failure_text_never_makes_a_platform_stop(self):
+        # A failing test can print any text, GitHub's runner messages included.
+        failed = check(100, "failure")
+        failed["output"] = {"title": "lost communication with the server", "summary": "not acquired by Runner"}
+        result = self.go({"polls": [NOTHING, poll(failed), poll(failed, check(300))]}, 1)
+        self.assertEqual(len(result.pushes()), 1)
+        self.assertFalse(any("annotations" in " ".join(a) for a in result.gh()))
 
-    def test_a_failure_with_ordinary_annotations_is_a_failure(self):
-        note = {"message": "Process completed with exit code 101."}
-        self.go({"polls": [NOTHING, FAILED], "annotations": {"100": [note]}}, 1)
+    # -- only push runs of this sha count
+
+    def test_a_pull_request_pass_on_this_sha_does_not_count(self):
+        pr_pass = check(100, suite=PR_SUITE)
+        result = self.go({"polls": [poll(pr_pass), poll(pr_pass), poll(pr_pass, check(200))]}, 0)
+        self.assertEqual(len(result.pushes()), 1, "a pull_request run never stands in for a push run")
+        self.assertIn("verify: missing", result.stderr)
+        self.assertIn("job/200", result.stderr)
+
+    def test_a_pull_request_failure_on_this_sha_does_not_count(self):
+        pr_fail = check(300, "failure", suite=PR_SUITE)
+        result = self.go({"polls": [poll(pr_fail), poll(pr_fail, check(200))]}, 0)
+        self.assertEqual(len(result.pushes()), 1)
+
+    def test_a_push_pass_on_this_sha_counts_without_a_push(self):
+        # A push run's answer stands, whatever a newer pull_request run on the same sha says.
+        result = self.go({"polls": [poll(check(100, "failure", suite=PR_SUITE), check(90))]}, 0)
+        self.assertEqual(result.pushes(), [])
+        result = self.go({"polls": [poll(check(100, suite=PR_SUITE), check(90, "failure"))]}, 1)
+        self.assertEqual(result.pushes(), [])
+        self.assertTrue(any(f"actions/runs?head_sha={SHA}&event=push" in " ".join(a) for a in result.gh()))
+
+    def test_workflow_runs_unreachable_is_a_failed_poll(self):
+        result = self.go({"polls": [PASSED], "workflows": UNREACHABLE}, 75)
+        self.assertIn("did not answer 5 polls in a row", result.stderr)
 
     # -- GitHub, the push and the remote
 
@@ -382,14 +445,11 @@ class CiVerify(unittest.TestCase):
         self.assertIn("did not answer 5 polls in a row", result.stderr)
         self.assert_cleaned_up(result)
 
-    def test_annotations_unreachable_is_a_failed_poll(self):
-        result = self.go({"polls": [NOTHING, FAILED], "annotations": {"100": UNREACHABLE}}, 75)
-        self.assertIn("did not answer 5 polls in a row", result.stderr)
-
     def test_the_push_failing_gives_75(self):
         result = self.go({"push_codes": [128], "polls": [NOTHING, PASSED]}, 75)
         self.assertEqual(len(result.pushes()), 3, "three attempts")
         self.assertIn("cannot push", result.stderr)
+        self.assertIn("git push exited 128 (attempt 3 of 3)", result.stderr)
         self.assert_cleaned_up(result)
 
     def test_the_push_failing_once_is_retried(self):
@@ -404,12 +464,12 @@ class CiVerify(unittest.TestCase):
             "ssh://git@github.com:22/SquashMerge/combine.git",
             "https://github.com/SquashMerge/combine.git",
             "https://github.com/SquashMerge/combine/",
-            "https://x-access-token:s3cr3t@github.com/SquashMerge/combine.git",
+            SECRET_REMOTE,
         ):
             with self.subTest(remote=remote):
                 result = self.go({"remote": remote, "polls": [PASSED]}, 0)
                 self.assertEqual(result.gh()[0], ["api", f"repos/{REPO}"])
-                self.assertNotIn("s3cr3t", result.stderr)
+                self.assertNotIn(SECRET, result.stderr)
 
     def test_an_unparseable_remote_gives_75(self):
         for remote in (
@@ -422,14 +482,14 @@ class CiVerify(unittest.TestCase):
             "https://github.com/SquashMerge",
             "https://github.com/SquashMerge/combine/tree/main",
             "git@github.com:SquashMerge/com bine.git",
-            "https://x-access-token:s3cr3t@gitlab.com/o/r.git",
+            f"https://x-access-token:{SECRET}@gitlab.com/o/r.git",
         ):
             with self.subTest(remote=remote):
                 result = self.go({"remote": remote, "polls": [PASSED]}, 75)
                 self.assertIn("does not name a github.com repository", result.stderr)
                 self.assertEqual(result.gh(), [])
                 self.assertEqual(result.pushes() + result.deletes(), [])
-                self.assertNotIn("s3cr3t", result.stderr)
+                self.assertNotIn(SECRET, result.stderr)
 
     def test_no_push_url_gives_75(self):
         result = self.go({"remote": None, "polls": [PASSED]}, 75)
@@ -439,12 +499,71 @@ class CiVerify(unittest.TestCase):
         result = self.go({"polls": [PASSED]}, 75, {"CI_VERIFY_POLL_S": "ten"})
         self.assertEqual(result.calls, [])
 
+    # -- credentials
+
+    def test_a_credential_in_the_remote_never_appears(self):
+        leaky = {"code": 1, "err": f"error: {SECRET_REMOTE} ghp_abcdefghijklmnopqrstuvwxyz0123 github_pat_11AAAA{SECRET}\n"}
+        scenarios = [
+            ({"polls": [NOTHING, PASSED]}, 0),
+            ({"polls": [NOTHING, FAILED]}, 1),
+            ({"push_codes": [128], "polls": [NOTHING]}, 75),
+            ({"push_codes": [128], "delete_code": 1, "polls": [NOTHING]}, 75),
+            ({"polls": [NOTHING, CANCELLED], "push_codes": [0, 128]}, 75),
+            ({"probe": leaky, "polls": [PASSED]}, 75),
+            ({"polls": [leaky]}, 75),
+            ({"polls": [NOTHING, PASSED], "workflows": leaky}, 75),
+        ]
+        for scenario, status in scenarios:
+            with self.subTest(scenario=scenario):
+                result = self.go(dict(scenario, remote=SECRET_REMOTE), status)
+                for secret in (SECRET, "ghp_abcdef", "github_pat_11"):
+                    self.assertNotIn(secret, result.stderr)
+
+    # -- the time budget (fake clock)
+
+    def test_the_worst_case_finishes_inside_the_factory_timeout(self):
+        # Defaults throughout. Every push and gh call takes 119 s, just under its 120 s bound; the
+        # platform cancels the run late, and every push after the first fails.
+        worst = 0
+        for late in range(12, 17):
+            with self.subTest(late=late):
+                polls = [NOTHING] + [PENDING] * late + [CANCELLED]
+                result = run_script(
+                    {"polls": polls, "push_codes": [0, 128], "cost": 119},
+                    {k: "" for k in ("CI_VERIFY_CALL_TIMEOUT_S", "CI_VERIFY_DEADLINE_S", "CI_VERIFY_START_S", "CI_VERIFY_POLL_S")},
+                )
+                self.assertEqual(result.status, 75, result.stderr)
+                self.assertLessEqual(result.clock, 4800, result.stderr)
+                worst = max(worst, result.clock)
+        self.assertLess(worst, 5400 - 300, "at least five minutes inside verify_timeout_ms")
+
+    def test_slow_calls_are_cut_at_the_time_left(self):
+        # No per-call bound: a call that would take 10000 s gets only what is left of the budget,
+        # and the branch delete still runs inside the reserve.
+        result = self.go({"polls": [PASSED], "cost": 10000}, 75, {"CI_VERIFY_CALL_TIMEOUT_S": "0"})
+        self.assertEqual(result.clock, 4800 - 5, "each call's 5 s TERM-to-KILL grace stays inside the budget")
+        self.assertEqual(result.git()[-1], ["push", "--quiet", "origin", "--delete", REF])
+        result = self.go({"polls": [PASSED], "cost": 10000}, 75, {"CI_VERIFY_CALL_TIMEOUT_S": "120"})
+        self.assertLessEqual(result.clock, 4800)
+
+    def test_a_reserve_as_large_as_the_budget_does_no_work(self):
+        result = self.go({"polls": [PASSED]}, 75, {"CI_VERIFY_RESERVE_S": "4800"})
+        self.assertEqual(result.gh(), [])
+
     # -- bounds on calls and signals (real time)
 
     def test_a_hung_gh_call_is_cut_off(self):
         started = time.monotonic()
         result = self.go({"probe": {"hang": True}, "polls": [PASSED]}, 75, {"CI_VERIFY_CALL_TIMEOUT_S": "1"}, fake_time=False)
         self.assertLess(time.monotonic() - started, 20)
+        self.assert_cleaned_up(result)
+
+    def test_a_call_ignoring_term_is_killed(self):
+        started = time.monotonic()
+        result = self.go(
+            {"probe": {"hang": "ignore-term"}, "polls": [PASSED]}, 75, {"CI_VERIFY_CALL_TIMEOUT_S": "1"}, fake_time=False
+        )
+        self.assertLess(time.monotonic() - started, 30)
         self.assert_cleaned_up(result)
 
     def test_sigterm_deletes_the_branch(self):
@@ -469,7 +588,6 @@ class CiVerify(unittest.TestCase):
         self.assertEqual(len(result.pushes()), 1)
         self.assert_cleaned_up(result)
 
-
     def test_sigterm_while_sleeping_between_polls_exits_at_once(self):
         def terminate_once_pushed(proc, stub):
             deadline = time.monotonic() + 30
@@ -490,11 +608,8 @@ class CiVerify(unittest.TestCase):
         self.assert_cleaned_up(result)
 
 class Evaluate(unittest.TestCase):
-    def verdict(self, pages, names=("verify",), floor=0):
-        with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "pages"
-            path.write_text("\n".join(json.dumps(p) for p in pages))
-            return evaluate.evaluate(evaluate.read_pages(str(path)), floor, list(names))
+    def verdict(self, pages, names=("verify",), floor=0, workflows=WORKFLOWS["pages"], sha=SHA):
+        return evaluate.evaluate(pages, workflows, sha, floor, list(names))
 
     def test_newest_by_id_not_by_order(self):
         lines = self.verdict([page(check(300, "failure"), check(200), check(100, "cancelled"))])
@@ -514,6 +629,20 @@ class Evaluate(unittest.TestCase):
             self.verdict([page(check(1, status="queued", name="a"), check(2, name="b"))], names)[0], "pending"
         )
 
+    def test_only_push_suites_of_this_sha_count(self):
+        self.assertEqual(self.verdict([page(check(5, suite=PR_SUITE))])[0], "missing")
+        self.assertEqual(self.verdict([page(check(5, suite=9999))])[0], "missing")
+        self.assertEqual(self.verdict([page(check(5))], sha="f" * 40)[0], "missing", "a push of another sha")
+        self.assertEqual(self.verdict([page(check(5))], workflows=[{"workflow_runs": []}])[0], "missing")
+        self.assertEqual(self.verdict([page(check(5, suite=PR_SUITE, conclusion="failure"), check(4))])[:2], ["pass", "4"])
+
+    def test_platform_stops_are_conclusions_only(self):
+        failed = check(5, "failure")
+        failed["output"] = {"title": "The job was not acquired by Runner of type hosted"}
+        self.assertEqual(self.verdict([page(failed)])[0], "fail")
+        for conclusion in sorted(evaluate.INFRA_CONCLUSIONS):
+            self.assertEqual(self.verdict([page(check(5, conclusion))])[0], "infra", conclusion)
+
     def test_an_empty_listing_never_passes(self):
         self.assertEqual(self.verdict([page()])[0], "missing")
 
@@ -521,18 +650,24 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(self.verdict([page(check(5, "failure", name="other"), check(4))])[0], "pass")
 
     def test_bad_input_is_refused(self):
-        for text in ("", "{not json", "[]", '{"check_runs": 3}', '{"check_runs": [{"name": "verify", "app": {"slug": "github-actions"}}]}'):
-            with self.subTest(text=text), tempfile.TemporaryDirectory() as scratch:
-                path = Path(scratch) / "pages"
-                path.write_text(text)
+        good_runs = json.dumps(page(check(1)))
+        good_workflows = json.dumps(WORKFLOWS["pages"][0])
+        cases = [(text, good_workflows) for text in ("", "{not json", "[]", '{"check_runs": 3}', '{"check_runs": [1]}')]
+        cases.append((json.dumps(page({"name": "verify", "app": {"slug": "github-actions"}, "check_suite": {"id": PUSH_SUITE}})), good_workflows))
+        cases += [(good_runs, text) for text in ("", "[]", '{"workflow_runs": {}}', '{"workflow_runs": [2]}')]
+        for runs, workflows in cases:
+            with self.subTest(runs=runs, workflows=workflows), tempfile.TemporaryDirectory() as scratch:
+                (Path(scratch) / "runs").write_text(runs)
+                (Path(scratch) / "workflows").write_text(workflows)
+                argv = ["evaluate.py", f"{scratch}/runs", f"{scratch}/workflows", SHA, "0", "verify"]
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(evaluate.main(["evaluate.py", "checks", str(path), "0", "verify"]), 2)
+                    self.assertEqual(evaluate.main(argv), 2)
 
     def test_usage_errors_fail(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(evaluate.main(["evaluate.py"]), 2)
-            self.assertEqual(evaluate.main(["evaluate.py", "checks", "x", "0"]), 2)
-            self.assertEqual(evaluate.main(["evaluate.py", "checks", "x", "0", "a", "a"]), 2)
+            self.assertEqual(evaluate.main(["evaluate.py", "r", "w", SHA, "0"]), 2)
+            self.assertEqual(evaluate.main(["evaluate.py", "r", "w", SHA, "0", "a", "a"]), 2)
 
 
 if __name__ == "__main__":
