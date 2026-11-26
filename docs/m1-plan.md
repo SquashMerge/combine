@@ -1,6 +1,6 @@
 # M1 plan: daemon, streaming terminals, hosts
 
-Working plan for SPEC.md milestone 1 (rev 31). SPEC.md is the source of truth for behavior; this file only orders the work. **M1 is done when** a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts, and keystroke echo over the local network stays within the 30 ms budget.
+Working plan for SPEC.md milestone 1 (rev 32). SPEC.md is the source of truth for behavior; this file only orders the work. **M1 is done when** a personal MBP switches between `mini` and `work-mbp` spaces with live terminals and restored layouts, and keystroke echo over the local network stays within the 30 ms budget.
 
 Every slice ends with a clean `trellis rules check`, a clean `python3 -I tools/arch-guard/check.py`, its tests passing (the full suite through `heavy-medium.sh`, which `./tools/verify` takes itself), and a review by opencode before the next slice that depends on it starts.
 

@@ -14,7 +14,10 @@ use combined::model::SpaceId;
 use daemon_support::ShortTempDir;
 use tokio::sync::mpsc;
 
-const BOUND: Duration = Duration::from_secs(10);
+/// How long a test waits for the watcher to report a change. It only matters when one is
+/// missing, and it is long because FSEvents holds deliveries back under load: 10-21 s was
+/// measured on a loaded machine, where a 10 s bound failed (#81).
+const BOUND: Duration = Duration::from_secs(30);
 
 /// Puts a folder's mode back when dropped, so the temp dir can be removed.
 struct Restore(PathBuf);

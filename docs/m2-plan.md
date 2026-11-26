@@ -1,6 +1,6 @@
 # M2 plan: agent-built diagrams
 
-This is the working plan for SPEC.md milestone 2 (rev 31). SPEC.md is the source of truth for behavior; this file only orders the work.
+This is the working plan for SPEC.md milestone 2 (rev 32). SPEC.md is the source of truth for behavior; this file only orders the work.
 
 M2 covers "MCP server and shim, `create_panel` / `update_panel` / `show_diagram` / `panel_status` with revisions and states, Mermaid with Pele and Markdown renderers, headless validation" (SPEC roadmap). M0 handed it this done criterion: **M2 is done when an agent creates a class diagram panel and fixes its own Mermaid errors with no client attached.**
 

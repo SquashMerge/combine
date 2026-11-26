@@ -4,6 +4,7 @@
 mod daemon_support;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,14 @@ use notify::event::{
 use notify::{Event, EventKind};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-const BOUND: Duration = Duration::from_secs(10);
+/// How long a test waits for the watcher to report a change. It only matters when one is
+/// missing, and it is long because FSEvents holds deliveries back under load: 10-15 s was
+/// measured on a loaded machine, where the old 10 s bound failed (#81).
+const BOUND: Duration = Duration::from_secs(30);
 const SLICE: Duration = Duration::from_millis(200);
+/// The real watchers' interval for comparing their watches with the disk: longer than any
+/// test, so a change they report came from an event, never from that check.
+const NO_CHECK: Duration = Duration::from_secs(3600);
 
 fn roots(space: &SpaceId) -> WatchRoots {
     let mut roots = WatchRoots::new();
@@ -241,7 +248,7 @@ fn classify_reports_panel_folder_events_as_panels() {
 
 fn start(space: &SpaceId) -> (SpaceWatcher, UnboundedReceiver<FileChange>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let watcher = SpaceWatcher::new(tx).unwrap();
+    let watcher = SpaceWatcher::with_arm_retry(tx, NO_CHECK).unwrap();
     watcher.watch(space).unwrap();
     (watcher, rx)
 }
@@ -274,6 +281,22 @@ fn change_after(
     false
 }
 
+/// Changes `workspace`'s mode, an event that names the folder itself, as its creation does.
+/// Called each slice while a test waits for a re-arm, it keeps the test from resting on one
+/// creation event, which FSEvents can hold back, or report without the removal of the folder it
+/// replaced, under load (#81). The watcher settles the space on any event naming its
+/// `.workspace/`, and [`start`]'s watcher never runs its periodic check, so a broken re-arm
+/// still fails.
+fn nudge(workspace: &Path, round: &mut u32) {
+    *round += 1;
+    let mode = if round.is_multiple_of(2) {
+        0o755
+    } else {
+        0o700
+    };
+    let _ = fs::set_permissions(workspace, fs::Permissions::from_mode(mode));
+}
+
 fn scratch_space() -> (ShortTempDir, SpaceId) {
     let scratch = ShortTempDir::new();
     let folder = scratch.path().join("project");
@@ -289,8 +312,12 @@ fn workspace_creation_rearms_watch() {
     let workspace = Path::new(&space.0).join(".workspace");
     assert!(!watcher.is_armed(&space));
     fs::create_dir(&workspace).unwrap();
+    let mut nudges = 0;
     assert!(
-        change_after(&mut rx, &space, "layout.json", || {}),
+        change_after(&mut rx, &space, "layout.json", || nudge(
+            &workspace,
+            &mut nudges
+        )),
         "creating .workspace reported no layout change"
     );
     assert!(watcher.is_armed(&space));
@@ -309,7 +336,10 @@ fn workspace_creation_rearms_watch() {
     while rx.try_recv().is_ok() {}
     fs::create_dir(&workspace).unwrap();
     assert!(
-        change_after(&mut rx, &space, "layout.json", || {}),
+        change_after(&mut rx, &space, "layout.json", || nudge(
+            &workspace,
+            &mut nudges
+        )),
         "re-creating .workspace reported no layout change"
     );
 }
@@ -321,8 +351,12 @@ fn rearm_never_registers_a_path_twice() {
     let workspace = Path::new(&space.0).join(".workspace");
     for cycle in 1..=3 {
         fs::create_dir(&workspace).unwrap();
+        let mut nudges = 0;
         assert!(
-            change_after(&mut rx, &space, "layout.json", || {}),
+            change_after(&mut rx, &space, "layout.json", || nudge(
+                &workspace,
+                &mut nudges
+            )),
             "cycle {cycle}: creating .workspace reported no layout change"
         );
         let paths = watcher.watched_paths();
@@ -348,7 +382,7 @@ fn failed_watch_is_not_registered() {
     let folder = scratch.path().join("later");
     let space = SpaceId(folder.to_str().unwrap().to_string());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let watcher = SpaceWatcher::new(tx).unwrap();
+    let watcher = SpaceWatcher::with_arm_retry(tx, NO_CHECK).unwrap();
     assert!(watcher.watch(&space).is_err());
     fs::create_dir_all(folder.join(".workspace")).unwrap();
     watcher.watch(&space).unwrap();
