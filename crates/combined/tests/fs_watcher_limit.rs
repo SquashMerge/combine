@@ -23,7 +23,10 @@ const CHILD_TEST: &str = "child_watches_under_a_small_file_limit";
 const SPACES: usize = 30;
 const SMALL_LIMIT: u64 = 256;
 const RAISED_LIMIT: u64 = 4096;
-const BOUND: Duration = Duration::from_secs(10);
+/// How long a test waits for the watcher to report a change. It only matters when one is
+/// missing, and it is long because FSEvents holds deliveries back under load: 10-21 s was
+/// measured on a loaded machine, where a 10 s bound failed (#81).
+const BOUND: Duration = Duration::from_secs(30);
 
 fn set_soft_limit(soft: u64) {
     let mut limit = libc::rlimit {
