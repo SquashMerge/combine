@@ -1,6 +1,6 @@
 {
   "heartbeat_observed": true,
-  "herdr_core_version": "0.1.21",
+  "herdr_core_version": "0.1.22",
   "missed_observed": false,
   "steps": [
     "spawned Z, which runs through the capture",
