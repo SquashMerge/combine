@@ -356,6 +356,7 @@ export function App({
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
+    previousRoot.current = null;
     setPanelActionError(null);
     setConfirmClose(null);
   }, [selectedId]);

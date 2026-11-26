@@ -288,6 +288,25 @@ describe('App dropping a stored active tab', () => {
     await waitFor(() => expect(document.querySelector('[data-tile-id="t1"]')).not.toBeNull());
     expect(selectedTab('t1')).toBe('p2');
   });
+
+  it('compares nothing after a switch away and back, even when the other space never answers', async () => {
+    const { layoutPort } = await mount(saved(null, { t1: 'p1' }));
+    const first = layout();
+    const tileOf = (panels: string[], active: string) => ({
+      ...first,
+      root: { type: 'tile' as const, id: 't1', panels, active },
+    });
+    await waitFor(() => expect(layoutPort.calls).toHaveLength(1));
+    act(() => layoutPort.push(HOST_A, tileOf(['p1', 'p2'], 'p2')));
+    await waitFor(() => expect(selectedTab('t1')).toBe('p1'));
+    fireEvent.click(screen.getByRole('button', { name: /^beta/ }));
+    await waitFor(() => expect(layoutPort.calls.filter((c) => c.kind === 'watch')).toHaveLength(2));
+    fireEvent.click(screen.getByRole('button', { name: /^alpha/ }));
+    await waitFor(() => expect(layoutPort.calls.filter((c) => c.kind === 'watch')).toHaveLength(3));
+    act(() => layoutPort.push(HOST_A, { ...tileOf(['p1', 'p2', 'p3'], 'p3'), layoutRevision: '4' as DecimalU64 }));
+    await waitFor(() => expect(document.querySelector('[data-tile-id="t1"]')).not.toBeNull());
+    expect(selectedTab('t1')).toBe('p1');
+  });
 });
 
 describe('App with tile IDs that name inherited properties', () => {
