@@ -125,7 +125,7 @@ The owner decided these on 2026-11-23. They take the plan's recommendations unle
 
 | Issue | Where it goes |
 | --- | --- |
-| #34 (S7 follow-ups) | **S3:** the hash check before writing, and re-arming the macOS watcher. **S5:** the watch races and the writer items. **S7:** the palette and missing-panel items. The rest stays separate. S7 outcome: Cmd+K registers before the first paint and takes Cmd alone, matched by key or code; the dialog traps Tab, has `aria-autocomplete="list"` and closes on a backdrop click; fuzzy scoring is linear (SPEC rev 29). |
+| #34 (S7 follow-ups) | **S3:** the hash check before writing, and re-arming the macOS watcher. **S5:** the watch races and the writer items. **S7:** the palette and missing-panel items. The rest stays separate. S7 outcome: Cmd+K registers before the first paint and takes Cmd alone, matched by key or code; the dialog traps Tab, has `aria-autocomplete="list"` and closes on a backdrop click; fuzzy scoring time is proportional to query length times text length (SPEC rev 29). |
 | #37 (S8 follow-ups) | **S8:** the auto-open loop guard and the approval-line display. The rest stays separate. |
 | #38 (S6 follow-ups) | **S8:** the terminal dropdown, the backend label and the stream-open failure state. **S7:** the disconnected-tree items. The rest stays separate. S7 outcome: a held tree disables Split, Close tile, × and Pin with a reason, and a failed rewatch marks it stale (SPEC rev 29). |
 | #78 (palette: panels of unwatched spaces) | Not routed to a slice. S7's palette lists the watched space's panels only (SPEC rev 29). |
