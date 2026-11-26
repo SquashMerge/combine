@@ -1,6 +1,6 @@
-# Combine — Spec (rev 28)
+# Combine — Spec (rev 29)
 
-Updated 2026-11-25
+Updated 2026-11-26
 
 Combine is named for the combine harvester and for the verb: it combines every agent terminal, and the views agents build around them, into one window.
 
@@ -17,6 +17,8 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 28 (CI):** `./tools/verify` runs on GitHub Actions (`.github/workflows/verify.yml`) for every pull request and every push to `main`, on a macOS arm64 runner with pinned Rust, Node, Python and trellis. On a runner the trellis step retries only trellis's typed cold-start answers (`index_not_ready`, `deadline_exceeded`), at most four attempts; everything else fails at once. The herdr-core run and an x86_64 build stay local. The plan is for CI to become the full check, so local full verifies can stop.
 
 **Changes from rev 27 (#48, M2-S5, panels reach the client):** panels reach the client.
 
@@ -1425,6 +1427,7 @@ app/
     test/
 spike/                              M0 code: disposable, outside the workspace
 tools/                              developer scripts
+.github/workflows/verify.yml        CI: `./tools/verify` on every pull request and every push to main
 ```
 
 Each rule says what checks it today. `rules.toml` checks layer direction between mapped first-party files, and package use where trellis can prove the package. It can't check everything this table needs (verified with fixtures in review 2026-11-20):
@@ -1457,6 +1460,8 @@ python3 -I tools/arch-guard/check.py
 ```
 
 Review new `unknown` and unassigned references from trellis on these boundaries, not only new deviations.
+
+`./tools/verify` runs both checks, the formatter, whole-workspace clippy, the full test suite, the shipped daemon and app builds and the frontend checks. GitHub Actions runs it on every pull request and every push to `main` (`.github/workflows/verify.yml`): an arm64 `macos-latest` runner, the same Rust, Node and Python versions as the local machine (pinned in the workflow, since the repository has no toolchain file), and the published binary of the trellis release installed locally, checked against its SHA-256. The runner has no heavy-run lease, so `./tools/verify` runs directly. On CI (`CI=true`) the trellis daemon starts cold, so the trellis step runs `tools/trellis-check/ci-check.sh`, which retries only trellis's typed cold-start answers, at most four attempts: no report on stdout, exit status 1, and stderr ending `Error: index_not_ready` or `Error: deadline_exceeded` (optionally `: <message>`) after nothing but trellis's indexing progress lines. A deviation, any other code, any other output and any other failure fail at once, as they do locally. `tools/trellis-check/test_ci_check.py` tests that classification and runs in `./tools/verify` everywhere. CI doesn't build for `x86_64-apple-darwin`, and the herdr-core run needs `hc` and a real core, so it stays local.
 
 `app/src-tauri/tests/` and `crates/combine/tests/` run in-process daemons from `combined`, a dev-dependency with `test-support`; trellis reports those references as cross-app `unknown`. They are acceptable on the row above because the files are in the hidden `app-tests` and `cli-tests` layers and the dependency is dev-only.
 

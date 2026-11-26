@@ -1,0 +1,124 @@
+# The full ./tools/verify for every pull request and every push to main (SPEC.md, "Repository
+# layout and architecture rules"). The herdr-core run (sh tools/verify-herdr-core) needs hc and a
+# real core, so it stays a local run and is not here.
+#
+# macos-latest is an arm64 runner. The Intel MacBook Pro is also a target; CI doesn't build for
+# x86_64 yet.
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. Runs on main are never cancelled.
+concurrency:
+  group: verify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Keep these in step with the local machine: there is no rust-toolchain file, and app/web has no
+  # engines field or .nvmrc.
+  RUST_TOOLCHAIN: 1.98.1
+  NODE_VERSION: 24.22.1
+  PYTHON_VERSION: "3.13"
+  # trellis is installed locally from source at the v0.2.2 tag; CI takes the same release's
+  # published binary, checked against the SHA-256 the release lists.
+  TRELLIS_VERSION: 0.2.2
+  TRELLIS_SHA256: 649ee8ce904934e335d3340316e221d4eb05b1542fc7ae2ce437fac95bf487a8
+  # Incremental build state is no use to a fresh runner and only makes the target cache bigger.
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    # A cold run builds the whole workspace several ways (clippy, tests with all features, the
+    # shipped daemon and app without them) on a three-core runner.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # tools/verify keeps the CARGO_TARGET_DIR it is given. Outside the checkout, so trellis never
+      # indexes build output.
+      - name: Set the build directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/combine-target" >>"$GITHUB_ENV"
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install trellis ${{ env.TRELLIS_VERSION }}
+        run: |
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "trellis $TRELLIS_VERSION publishes no macOS binary for $(uname -m)" >&2
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/trellis"
+          tarball="trellis-$TRELLIS_VERSION-aarch64-apple-darwin.tar.gz"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$tarball" \
+            "https://github.com/SquashMerge/trellis/releases/download/v$TRELLIS_VERSION/$tarball"
+          echo "$TRELLIS_SHA256  $dir/$tarball" | shasum -a 256 -c -
+          tar -xzf "$dir/$tarball" -C "$dir" trellis
+          echo "$dir" >>"$GITHUB_PATH"
+          "$dir/trellis" --version
+
+      # Caches are saved only from main, so pull requests don't fill the repository's cache quota
+      # with copies of the build directory; a pull request restores main's.
+      - name: Restore the cargo registry
+        id: cargo-registry
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Restore the build directory
+        id: cargo-target
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_TARGET_DIR }}
+          key: cargo-target-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-target-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: ./tools/verify
+        run: ./tools/verify
+
+      - name: Save the cargo registry
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cargo-registry.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
+
+      - name: Save the build directory
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cargo-target.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_TARGET_DIR }}
+          key: ${{ steps.cargo-target.outputs.cache-primary-key }}
