@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, GetPanel, Panel, PanelState, RequestId, TermId,
+    ClientMessage, ClosePanel, DaemonMessage, GetPanel, Panel, PanelState, RequestId, TermId,
 };
 use combined::core::{PanelApiError, PanelUpdate, PanelView};
 use combined::model::SpaceId;
@@ -127,6 +127,58 @@ fn a_stalled_panel_read_leaves_terminal_frames_flowing() {
         }),
         "the outside edit was never applied after the stall ended"
     );
+}
+
+#[test]
+fn a_client_close_waits_for_lane_work_and_terminal_output_flows() {
+    let (rig, store, term) = rig_with_p();
+    let mut client = rig.client();
+    let attachment = attach(&mut client, &term);
+    let stall = store.stall(&rig.space, CONTENT);
+    rig.store
+        .write_outside(&rig.space, CONTENT, b"outside".to_vec());
+    assert!(
+        wait_until(WAIT, || store.entered()),
+        "the stalled read never started"
+    );
+
+    client.send(&ClientMessage::ClosePanel(ClosePanel {
+        request: RequestId(30),
+        space: rig.space.0.clone(),
+        panel: "p".to_string(),
+    }));
+    thread::sleep(QUIET);
+
+    let mut reader = rig.client();
+    assert_ne!(
+        get_panel(&mut reader, &rig, "p", 31).state,
+        PanelState::Removed,
+        "the close ran while the lane was busy"
+    );
+    rig.control.emit(&term, b"marker-close");
+    assert!(
+        read_until_tail(
+            &mut client,
+            attachment,
+            b"marker-close",
+            Duration::from_secs(2)
+        )
+        .is_some(),
+        "terminal output stopped flowing while a close waited"
+    );
+
+    stall.release();
+    loop {
+        match client.recv() {
+            DaemonMessage::PanelClosed(closed) => {
+                assert_eq!(closed.request, RequestId(30));
+                break;
+            }
+            DaemonMessage::Error(error) => panic!("the close was refused: {error:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(rig.get("p").unwrap().0.state, PanelState::Removed);
 }
 
 #[test]
