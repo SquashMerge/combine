@@ -9,14 +9,22 @@ mod panel_support;
 
 use std::time::Duration;
 
-use combine_protocol::PanelState;
-use combined::core::{LAYOUT_FILE, SCRATCH_TTL_MS};
+use combine_protocol::{
+    ClientMessage, DaemonMessage, LayoutOp, MutateLayout, PanelState, RequestId,
+};
+use combined::core::{LayoutTiming, LAYOUT_FILE, SCRATCH_TTL_MS};
 use combined::ports::ScratchDir;
 use daemon_support::wait_until;
 use mcp_support::{cwd_caller, wire_options, McpWire};
-use panel_support::{settled_read_count, PanelRig, Race};
+use panel_support::{settled_read_count, watch_panels, PanelRig, PanelServerConfig, Race};
 use serde_json::{json, Value};
 
+/// Writes the layout only at shutdown.
+const HOUR: LayoutTiming = LayoutTiming {
+    debounce_ms: 3_600_000,
+    max_wait_ms: 3_600_000,
+    retry_ms: 3_600_000,
+};
 const MERMAID: &str = "graph TD; A-->B";
 const THEIRS_JSON: &[u8] = br#"{"version":1,"renderer":"markdown","title":"theirs"}"#;
 const REMOVE_CONFLICT: &str = "the panel's files changed outside Combine, so it wasn't removed";
@@ -32,6 +40,17 @@ fn content_path(id: &str) -> String {
 /// A rig with a terminal in the project folder and an open channel on its space.
 fn rig_and_wire() -> (PanelRig, McpWire) {
     let rig = PanelRig::with_options(wire_options());
+    let wire = wire_of(&rig);
+    (rig, wire)
+}
+
+/// [`rig_and_wire`] with the layout written on `timing`.
+fn rig_and_wire_with(timing: LayoutTiming) -> (PanelRig, McpWire) {
+    let rig = PanelRig::with_config(PanelServerConfig {
+        layout_timing: timing,
+        options: wire_options(),
+        ..PanelServerConfig::default()
+    });
     let wire = wire_of(&rig);
     (rig, wire)
 }
@@ -54,6 +73,35 @@ fn panel_ids(listed: &Value) -> Vec<&str> {
         .iter()
         .map(|panel| panel["panel"].as_str().unwrap())
         .collect()
+}
+
+/// The panels of tile `id` in the stored layout, `None` without a file or such a tile.
+fn tile_panels(rig: &PanelRig, id: &str) -> Option<Vec<String>> {
+    fn find(node: &Value, id: &str) -> Option<Vec<String>> {
+        if node["type"] == "tile" {
+            return (node["id"] == id).then(|| {
+                node["panels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|panel| panel.as_str().unwrap().to_string())
+                    .collect()
+            });
+        }
+        find(&node["a"], id).or_else(|| find(&node["b"], id))
+    }
+    let layout: Value = serde_json::from_slice(&rig.bytes(LAYOUT_FILE)?).ok()?;
+    find(&layout["root"], id)
+}
+
+fn wait_tile(rig: &PanelRig, id: &str, expected: &[&str]) {
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            tile_panels(rig, id).is_some_and(|panels| panels == expected)
+        }),
+        "tile {id} never held {expected:?}; it holds {:?}",
+        tile_panels(rig, id)
+    );
 }
 
 fn wait_validated(rig: &PanelRig, id: &str) {
@@ -199,7 +247,7 @@ fn show_diagram_makes_a_scratch_mermaid_panel() {
 // AC14
 
 #[test]
-fn placement_is_stored_and_no_layout_is_written() {
+fn placement_is_stored_and_applied_to_the_layout() {
     let (rig, mut wire) = rig_and_wire();
     let mut args = markdown_args("pl", "x");
     args["placement"] = json!("main");
@@ -210,7 +258,8 @@ fn placement_is_stored_and_no_layout_is_written() {
 
     let stored: Value = serde_json::from_slice(&rig.bytes(&file_path("pl")).unwrap()).unwrap();
     assert_eq!(stored["placement"], "main");
-    assert_eq!(rig.write_count(LAYOUT_FILE), 0);
+    wait_tile(&rig, "main", &["pl"]);
+    assert_eq!(rig.write_count(LAYOUT_FILE), 1);
 }
 
 #[test]
@@ -331,6 +380,121 @@ fn a_remove_that_conflicts_with_an_outside_edit_is_remove_conflict_and_the_panel
         .last()
         .unwrap()
         .ends_with("error=remove_conflict"));
+}
+
+#[test]
+fn remove_panel_takes_the_id_out_of_the_layout() {
+    let (rig, mut wire) = rig_and_wire();
+    wire.tool("create_panel", markdown_args("p", "x"));
+    wire.tool(
+        "create_panel",
+        json!({"id": "s", "renderer": "markdown", "content": "y", "lifetime": "scratch"}),
+    );
+    wait_tile(&rig, "main", &["p", "s"]);
+
+    assert!(!wire.tool("remove_panel", json!({"panel": "p"})).is_error);
+    wait_tile(&rig, "main", &["s"]);
+    assert!(!wire.tool("remove_panel", json!({"panel": "s"})).is_error);
+    wait_tile(&rig, "main", &[]);
+}
+
+#[test]
+fn a_remove_conflict_keeps_the_tab() {
+    let (rig, racing) = PanelRig::racing_with(wire_options());
+    let mut wire = wire_of(&rig);
+    wire.tool("create_panel", markdown_args("p", "one"));
+    wait_validated(&rig, "p");
+    wait_tile(&rig, "main", &["p"]);
+    settled_read_count(&rig.store, &rig.space, &file_path("p"), 1);
+
+    racing.arm(
+        &rig.space,
+        &file_path("p"),
+        Race::BeforeCompare,
+        THEIRS_JSON.to_vec(),
+    );
+    let removed = wire.tool("remove_panel", json!({"panel": "p"}));
+    assert_eq!(removed.code(), "remove_conflict");
+    // Well past the layout's debounce: the tab is still there and nothing was written for it.
+    std::thread::sleep(Duration::from_millis(700));
+
+    assert_eq!(tile_panels(&rig, "main"), Some(vec!["p".to_string()]));
+    assert_eq!(rig.write_count(LAYOUT_FILE), 1);
+}
+
+// AC16
+
+/// A layout with `main` holding `p1` and an empty `side` tile, written by someone else.
+const TWO_TILES: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,
+    "a":{"type":"tile","id":"main","panels":["p1"],"active":"p1"},
+    "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
+const OVERLAPPING: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,
+    "a":{"type":"tile","id":"main","panels":["p1","p2"],"active":"p1"},
+    "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
+
+fn dropped_of(wire: &mut McpWire) -> Value {
+    wire.tool("list_panels", json!({})).body["dropped"].clone()
+}
+
+#[test]
+fn list_panels_reports_dropped_until_the_next_mutation() {
+    let (rig, mut wire) = rig_and_wire_with(HOUR);
+    rig.store
+        .write_outside(&rig.space, LAYOUT_FILE, TWO_TILES.as_bytes().to_vec());
+    assert_eq!(dropped_of(&mut wire), Value::Null);
+    let mut args = markdown_args("p9", "x");
+    args["placement"] = json!("main");
+    assert!(!wire.tool("create_panel", args).is_error);
+    assert_eq!(dropped_of(&mut wire), Value::Null);
+
+    // An outside edit to the placed tile's panels wins over the held placement.
+    rig.store
+        .write_outside(&rig.space, LAYOUT_FILE, OVERLAPPING.as_bytes().to_vec());
+    assert!(
+        wait_until(Duration::from_secs(5), || dropped_of(&mut wire)
+            != Value::Null),
+        "the dropped placement was never reported"
+    );
+    let dropped = dropped_of(&mut wire);
+    assert_eq!(dropped["op_count"], 1);
+    assert!(dropped["message"].as_str().unwrap().contains("dropped"));
+
+    // A placement is an accepted change, but it doesn't clear the notice.
+    assert!(
+        !wire
+            .tool("create_panel", markdown_args("p10", "x"))
+            .is_error
+    );
+    assert_eq!(dropped_of(&mut wire)["op_count"], 1);
+
+    // A client's change does.
+    let mut client = rig.client();
+    let (layout, _) = watch_panels(&mut client, &rig.space, 1);
+    client.send(&ClientMessage::MutateLayout(MutateLayout {
+        request: RequestId(2),
+        space: rig.space.0.clone(),
+        base_layout_revision: layout.layout.layout_revision,
+        ops: vec![LayoutOp::SetActive {
+            tile: "main".to_string(),
+            panel: "p2".to_string(),
+        }],
+    }));
+    loop {
+        match client.recv() {
+            DaemonMessage::Layout(reply) if reply.request == Some(RequestId(2)) => break,
+            DaemonMessage::Error(error) => panic!("{error:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(dropped_of(&mut wire), Value::Null);
+}
+
+#[test]
+fn list_panels_dropped_is_null_with_no_held_layout() {
+    let (_rig, mut wire) = rig_and_wire();
+    let listed = wire.tool("list_panels", json!({}));
+    assert!(!listed.is_error, "{listed:?}");
+    assert_eq!(listed.body["dropped"], Value::Null);
 }
 
 // AC20

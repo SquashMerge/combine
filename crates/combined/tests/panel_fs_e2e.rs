@@ -200,7 +200,14 @@ fn scratch_panel_lives_under_data_scratch_sha256() {
     assert!(read(&folder.join("panel.json")).contains("\"renderer\": \"markdown\""));
     assert!(read(&folder.join("scratch.json")).contains(&rig.space.0));
     assert!(!rig.panel_dir("s").exists());
-    assert!(!rig.work.join(".workspace").exists());
+    // The daemon places the panel, so the project gains `.workspace/layout.json`, and no panel
+    // folder.
+    assert!(
+        wait_until(BOUND, || rig.work.join(".workspace/layout.json").exists()),
+        "the placement was never written"
+    );
+    assert!(read(&rig.work.join(".workspace/layout.json")).contains("\"s\""));
+    assert!(!rig.work.join(".workspace/panels").exists());
     assert_eq!(rig.server.stats().connections(), 0);
 }
 

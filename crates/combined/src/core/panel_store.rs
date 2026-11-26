@@ -80,6 +80,14 @@ impl Default for PanelTiming {
     }
 }
 
+/// A created panel, and whether this call made it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateOutcome {
+    pub view: PanelView,
+    /// False when an idempotency key found the panel an earlier call made.
+    pub created: bool,
+}
+
 /// A request to make a panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelCreate {
@@ -879,7 +887,7 @@ impl SpaceState {
         create: PanelCreate,
         ids: &mut dyn IdSource,
         wall_ms: u64,
-    ) -> Result<PanelView, PanelApiError> {
+    ) -> Result<(PanelView, bool), PanelApiError> {
         if let Some(detail) = &self.listing_failed {
             return Err(PanelApiError::ListingFailed {
                 detail: detail.clone(),
@@ -921,7 +929,7 @@ impl SpaceState {
                 rec.live() && rec.file.idempotency_key.as_deref() == Some(key.as_str())
             });
             if let Some((id, rec)) = same {
-                return Ok(self.view_of(id, rec));
+                return Ok((self.view_of(id, rec), false));
             }
         }
         let id = match create.id {
@@ -987,7 +995,7 @@ impl SpaceState {
         self.records.insert(id.clone(), rec);
         self.service(out, &id);
         self.begin_validation(out, &id, core_error);
-        self.view_now(&id)
+        self.view_now(&id).map(|view| (view, true))
     }
 
     fn view_now(&self, id: &str) -> Result<PanelView, PanelApiError> {
@@ -2076,15 +2084,28 @@ impl PanelStore {
         &mut self,
         space: &SpaceId,
         create: PanelCreate,
-        _now: Millis,
+        now: Millis,
         wall_ms: u64,
         ids: &mut dyn IdSource,
     ) -> Result<PanelView, PanelApiError> {
+        self.create_with_outcome(space, create, now, wall_ms, ids)
+            .map(|outcome| outcome.view)
+    }
+
+    /// `create`, also saying whether the call made the panel (false for an idempotent repeat).
+    pub fn create_with_outcome(
+        &mut self,
+        space: &SpaceId,
+        create: PanelCreate,
+        _now: Millis,
+        wall_ms: u64,
+        ids: &mut dyn IdSource,
+    ) -> Result<CreateOutcome, PanelApiError> {
         let result = self
             .in_space(space, |state, out| state.create(out, create, ids, wall_ms))
             .unwrap_or(Err(PanelApiError::UnknownSpace));
         self.finish();
-        result
+        result.map(|(view, created)| CreateOutcome { view, created })
     }
 
     pub fn update(

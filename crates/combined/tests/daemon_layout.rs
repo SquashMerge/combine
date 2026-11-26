@@ -2,7 +2,9 @@
 //! Layout sync through the running server: a real Unix socket, the fake backend and an
 //! in-memory or real file store. Waits are bounded polls; nothing asserts a duration.
 
+mod common;
 mod daemon_support;
+mod panel_support;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -631,4 +633,56 @@ fn fifo_layout_file_is_refused_without_blocking_the_daemon() {
         matches!(listed, Some(DaemonMessage::Terminals(_))),
         "the other client got no terminal list: {listed:?}"
     );
+}
+
+fn tile_panels(root: &LayoutNode, wanted: &str) -> Option<Vec<String>> {
+    match root {
+        LayoutNode::Split { a, b, .. } => tile_panels(a, wanted).or_else(|| tile_panels(b, wanted)),
+        LayoutNode::Tile { id, panels, .. } if id == wanted => Some(panels.clone()),
+        LayoutNode::Tile { .. } => None,
+    }
+}
+
+#[test]
+fn a_client_add_panel_without_a_tile_uses_the_stored_placement() {
+    let env = Env::new(PROMPT);
+    env.store
+        .write_outside(&env.space, LAYOUT_FILE, outside_layout(0.5));
+    let mut client = env.client();
+    assert_eq!(env.watch(&mut client, 1).layout_revision, 0);
+
+    let mut create = panel_support::named("p", panel_support::markdown("x"));
+    create.placement = Some("side".to_string());
+    env.server
+        .server
+        .panels()
+        .create(&env.space, create)
+        .unwrap();
+    let push = expect_layout(&client, None);
+    assert_eq!(tile_panels(&push.root, "side"), Some(vec!["p".to_string()]));
+
+    // The user takes the tab out; adding it again with no tile goes where the panel asked.
+    let removed = env.mutate(
+        &mut client,
+        2,
+        push.layout_revision,
+        vec![LayoutOp::RemovePanel {
+            panel: "p".to_string(),
+        }],
+    );
+    assert_eq!(tile_panels(&removed.root, "side"), Some(Vec::new()));
+    let added = env.mutate(
+        &mut client,
+        3,
+        removed.layout_revision,
+        vec![LayoutOp::AddPanel {
+            panel: "p".to_string(),
+            tile: None,
+        }],
+    );
+    assert_eq!(
+        tile_panels(&added.root, "side"),
+        Some(vec!["p".to_string()])
+    );
+    assert_eq!(tile_panels(&added.root, "main"), Some(Vec::new()));
 }
