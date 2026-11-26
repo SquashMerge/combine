@@ -203,21 +203,38 @@ pub struct TimeCalibration {
     pub t_class: Duration,
 }
 
-/// Measures `t_first`, `t_class` and `t_slow` at the default caps and returns L. Panics, naming
-/// the numbers, when L is under 10 ms or under 10 times a small check.
+/// The median of an odd-length set of samples.
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+/// Measures `t_first`, `t_class` and `t_slow` at the default caps and returns L. Each is a best
+/// time over several runs, since load only adds time, so the ratio between them holds on a busy
+/// machine; `t_first` is the best first check of five fresh engines, because a check after a
+/// time-limit stop runs on a rebuilt engine. The returned `t_class` is the warm median. Panics,
+/// naming the numbers, when L is under 10 ms or under 10 times a small check.
 pub async fn calibrate_time_limit() -> TimeCalibration {
-    let (check, warmup) = PeleDiagramCheck::start(DiagramLimits::default());
-    warmup.finished().await.expect("the engine starts");
-    let (t_first, answer) = timed(&check, CLASS).await;
-    assert_eq!(answer, Some(SUCCESS));
-    let mut warm = Vec::new();
+    let mut cold = Vec::new();
+    let mut started = None;
     for _ in 0..5 {
+        let (check, warmup) = PeleDiagramCheck::start(DiagramLimits::default());
+        warmup.finished().await.expect("the engine starts");
+        let (took, answer) = timed(&check, CLASS).await;
+        assert_eq!(answer, Some(SUCCESS));
+        cold.push(took);
+        started = Some(check);
+    }
+    let check = started.expect("five engines started");
+    let t_first = cold.into_iter().min().expect("five cold samples");
+    let mut warm = Vec::new();
+    for _ in 0..9 {
         let (took, answer) = timed(&check, CLASS).await;
         assert_eq!(answer, Some(SUCCESS));
         warm.push(took);
     }
-    warm.sort();
-    let t_class = warm[warm.len() / 2];
+    let t_warm_best = warm.iter().copied().min().expect("nine warm samples");
+    let t_class = median(warm);
     let slow = slow_input();
     let mut t_slow = TIME_LIMIT;
     for _ in 0..2 {
@@ -230,10 +247,10 @@ pub async fn calibrate_time_limit() -> TimeCalibration {
         t_slow = t_slow.min(took);
     }
     let limit = t_slow / 8;
-    let small = t_class.max(t_first);
+    let small = t_warm_best.max(t_first);
     assert!(
         limit >= Duration::from_millis(10) && limit >= small * 10,
-        "t_first {t_first:?}, t_class {t_class:?}, t_slow {t_slow:?}, L {limit:?}: \
+        "t_first {t_first:?}, t_warm_best {t_warm_best:?}, t_class {t_class:?}, t_slow {t_slow:?}, L {limit:?}: \
          re-run the spike's P7/P9 rule"
     );
     TimeCalibration { limit, t_class }
