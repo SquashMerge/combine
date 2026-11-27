@@ -27,7 +27,7 @@ use combine_protocol::{
     HostId, RequestId, Resume, TermId, MAX_AUTOMATIC_REPLY, MAX_INPUT_CHUNK,
 };
 
-use super::outbound::{NotConnected, Outbound, RequestKind};
+use super::outbound::{Outbound, RequestKind, SendError};
 
 /// Names one open panel stream. The app entry layer allocates these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,9 +63,12 @@ pub enum ForwardError {
     Invalid,
 }
 
-impl From<NotConnected> for ForwardError {
-    fn from(_: NotConnected) -> Self {
-        ForwardError::NotConnected
+impl From<SendError> for ForwardError {
+    fn from(error: SendError) -> Self {
+        match error {
+            SendError::NotConnected => ForwardError::NotConnected,
+            SendError::Unencodable(_) => ForwardError::TooLarge,
+        }
     }
 }
 

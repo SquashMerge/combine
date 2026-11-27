@@ -2,6 +2,7 @@
 
 use combined::core::{
     default_layout, encode_layout, parse_layout, validate_layout, LayoutError, LAYOUT_MAX_BYTES,
+    LAYOUT_MAX_DEPTH,
 };
 use combined::model::{PanelId, SplitNode, TileId, ACTIVE_TERMINAL_TAB};
 use serde_json::{json, Value};
@@ -189,6 +190,38 @@ fn rejects_oversized_file() {
     let mut value = file(tile("main", &[], None));
     value["groups"] = json!(["x".repeat(LAYOUT_MAX_BYTES)]);
     assert!(matches!(load(&value), Err(LayoutError::TooLarge(_))));
+}
+
+#[test]
+fn size_limit_holds_at_its_exact_edge() {
+    let mut layout = default_layout();
+    layout.groups = json!([""]);
+    let bare = encode_layout(&layout).unwrap().len();
+    layout.groups = json!(["x".repeat(LAYOUT_MAX_BYTES - bare)]);
+    assert_eq!(encode_layout(&layout).unwrap().len(), LAYOUT_MAX_BYTES);
+    validate_layout(&layout).unwrap();
+    layout.groups = json!(["x".repeat(LAYOUT_MAX_BYTES - bare + 1)]);
+    assert_eq!(
+        validate_layout(&layout).unwrap_err(),
+        LayoutError::TooLarge(LAYOUT_MAX_BYTES + 1)
+    );
+}
+
+#[test]
+fn depth_limit_holds_at_its_exact_edge() {
+    // A root tile is one level deep, and each split around it adds one.
+    let nest = |splits: usize| {
+        let mut node = tile("leaf", &[], None);
+        for level in 0..splits {
+            node = split(0.5, node, tile(&format!("t{level}"), &[], None));
+        }
+        file(node)
+    };
+    load(&nest(LAYOUT_MAX_DEPTH - 1)).unwrap();
+    assert_eq!(
+        load(&nest(LAYOUT_MAX_DEPTH)).unwrap_err(),
+        LayoutError::TooDeep
+    );
 }
 
 #[test]

@@ -166,8 +166,11 @@ export function App({
         }),
       );
       if (current.error !== null) return;
-      if (terminalId !== null) persist(clientStatePort.setSpaceState(hostId, path, nextSpace), hostId);
-      persist(clientStatePort.setLastSpace(hostId, path, selectedAtMs), hostId);
+      // One outcome for both writes, so the one that settles last can't clear the other's error.
+      const writes: Promise<void>[] = [];
+      if (terminalId !== null) writes.push(clientStatePort.setSpaceState(hostId, path, nextSpace));
+      writes.push(clientStatePort.setLastSpace(hostId, path, selectedAtMs));
+      persist(Promise.all(writes).then(() => undefined), hostId);
     },
     [clientStatePort, persist, updateStates],
   );

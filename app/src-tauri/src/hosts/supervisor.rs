@@ -171,6 +171,9 @@ pub enum SessionEnd {
 }
 
 pub trait SessionPhase: Send {
+    /// Runs before the host is published as connected, so whatever the phase sets up for
+    /// sending, such as its outbound slot, is there by the time anything sees the host connected.
+    fn prepare(&mut self, _host_id: &HostId) {}
     fn run(&mut self, io: SessionIo<'_>) -> SessionEnd;
 }
 
@@ -419,10 +422,11 @@ impl Supervisor {
         self.backoff.reset();
         self.attempt = 0;
         self.connected_once = true;
+        let mut phase = (self.deps.phase)();
+        phase.prepare(id);
         self.deps
             .events
             .connection(&self.name, ConnectionState::Connected);
-        let mut phase = (self.deps.phase)();
         let end = phase.run(SessionIo {
             host_id: id,
             reader: &mut *link.reader,
@@ -577,6 +581,48 @@ mod tests {
             connection(recv(&events)),
             dropped("connection closed", None, 1000)
         );
+        assert!(joins_within(handle, WAIT));
+    }
+
+    /// A layout watch sent as soon as the host shows as connected finds the session's slot.
+    #[test]
+    fn the_outbound_slot_is_registered_before_the_host_is_connected() {
+        use combine_protocol::{ClientMessage, WatchLayout};
+
+        use super::super::attachments::Attachments;
+        use super::super::outbound::RequestKind;
+        use super::super::session::LivePhase;
+        use super::super::testing::RecordingTerminalSink;
+
+        let double = Double::welcome(a());
+        let probe = double.probe();
+        let mut rig = rig_with(
+            vec![Step::Serve(double)],
+            MemoryHostIdStore::new(),
+            FakeClock::stop_after(1),
+        );
+        let outbound = Arc::clone(&rig.deps.outbound);
+        let attachments = Arc::new(Attachments::new(RecordingTerminalSink::new()));
+        let phase_outbound = Arc::clone(&outbound);
+        rig.deps.phase = Arc::new(move || {
+            Box::new(LivePhase::new(
+                Arc::clone(&phase_outbound),
+                Arc::clone(&attachments),
+            )) as Box<dyn SessionPhase>
+        });
+        let events = rig.events;
+        let handle = spawn_supervisor("mini".to_string(), None, None, rig.deps, StopSignal::new());
+        assert_eq!(connection(recv(&events)), ConnectionState::Connecting);
+        assert_eq!(recv(&events), Event::HostId("mini".to_string(), a()));
+        assert_eq!(connection(recv(&events)), ConnectionState::Connected);
+        let watch = outbound.send(&a(), RequestKind::Layout, |request| {
+            ClientMessage::WatchLayout(WatchLayout {
+                request,
+                space: "/work".to_string(),
+            })
+        });
+        assert!(watch.is_ok(), "{watch:?}");
+        probe.drop_now();
         assert!(joins_within(handle, WAIT));
     }
 

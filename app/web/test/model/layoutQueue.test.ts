@@ -82,6 +82,19 @@ describe('LayoutQueue', () => {
     expect(sent.map((s) => s.base)).toEqual(['5', '6']);
   });
 
+  it('forgets replies for other requests once the send resolves', async () => {
+    const { queue } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.enqueue(setActive('t1'));
+    // Replies to the watch, and to nothing this queue sent, arrive while the ID is unknown.
+    queue.onSnapshot(rid(40), snap('5'));
+    queue.onError(rid(41), 'invalid_request', 'not ours');
+    const early = (queue as unknown as { early: Map<DecimalU64, unknown> }).early;
+    expect(early.size).toBe(2);
+    await flush();
+    expect(early.size).toBe(0);
+  });
+
   it('stale after newer push resends immediately', async () => {
     const { queue, sent, notices } = setup();
     queue.onSnapshot(null, snap('5'));

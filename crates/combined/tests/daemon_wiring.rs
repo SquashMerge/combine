@@ -7,12 +7,14 @@ mod daemon_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use combine_protocol::{Attach, ClientMessage, RequestId, TermId};
+use combine_protocol::{Attach, ClientMessage, HostId, RequestId, TermId};
 use combined::adapters::fs::config::{BackendName, DaemonConfigFile};
 use combined::adapters::fs::ids_file;
-use combined::core::{Core, CoreConfig};
+use combined::core::{BackendCommand, Core, CoreConfig, Effect};
 use combined::model::Millis;
 use combined::ports::Capabilities;
+use combined::testing::{FakeBackend, FakeConfig};
+use combined::wiring;
 use combined::wiring::backend::{self, BackendChoice};
 use combined::wiring::clock::MonotonicClock;
 use combined::wiring::config::{self, DaemonConfigError, DaemonEnv, HerdrCoreSource};
@@ -143,6 +145,41 @@ fn core_ids_after_restart_exceed_the_previous_high_water() {
     let (_, second_base) = IdReservation::start(&path).unwrap();
     assert!(second_base > first_high);
     assert!(issue_ids(second_base) > first_high);
+}
+
+/// `server_parts` hands the reservation's base to core: a second incarnation's first
+/// attachment ID is the first ID above the first incarnation's block.
+#[test]
+fn server_parts_issues_the_first_attachment_id_at_the_reservation_base() {
+    let scratch = ShortTempDir::new();
+    let path = scratch.path().join("ids.json");
+    drop(IdReservation::start(&path).unwrap());
+    let (ids, id_base) = IdReservation::start(&path).unwrap();
+    assert_eq!(id_base, ID_BLOCK + 1);
+    assert_eq!(id_base, 1_048_577);
+    let (fake, _control) = FakeBackend::new(FakeConfig::default());
+    let mut parts = wiring::server_parts(fake, id_base, HostId("host-a".into()), ids).unwrap();
+    let core = parts.driver.core_mut();
+    let connection = core.connect();
+    core.client_message(
+        connection,
+        ClientMessage::Attach(Attach {
+            request: RequestId(1),
+            terminal: TermId("fake:1".to_string()),
+            options: request_options(80, 24, false),
+            instance: None,
+        }),
+        Millis(0),
+    );
+    let attachments: Vec<u64> = core
+        .take_effects()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Backend(BackendCommand::Attach { attachment, .. }) => Some(attachment.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attachments, [id_base]);
 }
 
 #[test]

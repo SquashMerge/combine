@@ -228,8 +228,22 @@ describe('useSpaceLayout', () => {
     const view = mount(port, hosts(), key(HOST_A, '/src/one'));
     await waitFor(() => expect(port.calls).toHaveLength(1));
     act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '1' as DecimalU64, code: 'unknown_space', message: 'no such space' }));
+    expect(view.result.current.error).toBeNull();
+    await act(async () => open());
     expect(view.result.current.error).toBe('no such space');
-    open();
+  });
+
+  it("does not take another request's error for the watch's before the watch resolves", async () => {
+    const port = new MemoryLayoutPort();
+    let open = () => undefined as void;
+    port.watchGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const view = mount(port, hosts(), key(HOST_A, '/src/one'));
+    await waitFor(() => expect(port.calls).toHaveLength(1));
+    act(() => port.emit({ kind: 'error', hostId: HOST_A, request: '7' as DecimalU64, code: 'invalid_request', message: 'not the watch' }));
+    await act(async () => open());
+    expect(view.result.current.error).toBeNull();
   });
 
   function gateListener(port: MemoryLayoutPort): () => Promise<void> {

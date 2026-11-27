@@ -222,14 +222,17 @@ export class LayoutQueue {
         if (generation !== this.generation) return;
         flight.request = request;
         const early = this.early.get(request);
+        // Replies held while the request ID was unknown that aren't this one's are someone
+        // else's: the next flight holds its own.
+        this.early.clear();
         if (early === undefined) return;
-        this.early.delete(request);
         this.reply(request, early);
         this.pump();
       },
       (cause: unknown) => {
         if (generation !== this.generation) return;
         this.flight = null;
+        this.early.clear();
         this.intents.length = 0;
         this.onNotice(errorText(cause));
       },

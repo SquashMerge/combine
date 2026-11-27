@@ -1833,15 +1833,17 @@ impl Server {
             self.run_spawn_effects().await;
             self.queue_spawn_replies();
             self.settle_panels();
-            // Panel calls and answers place and unplace panels. Run that layout work in this
-            // pass, so a placement is read and written without waiting for another wake.
+            // A removed connection's unwatch can flush a layout.
+            for conn in self.driver.take_disconnects() {
+                self.remove(conn);
+            }
+            // Panel calls and answers place and unplace panels, and an unwatch flushes. Run that
+            // layout work in this pass, so it is read and written without waiting for another
+            // wake.
             if self.layouts.has_work() {
                 continue;
             }
             self.arm_layouts();
-            for conn in self.driver.take_disconnects() {
-                self.remove(conn);
-            }
             self.ids
                 .keep_ahead(self.driver.core().high_water())
                 .map_err(|error| {

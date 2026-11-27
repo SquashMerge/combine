@@ -9,7 +9,7 @@ import { type SpaceKey, spaceKeyId } from '../model/space';
 
 const NOT_CONNECTED = 'not connected';
 
-export interface SpaceLayout {
+export interface SpaceLayoutView {
   snapshot: LayoutSnapshot | null;
   notice: string | null;
   error: string | null;
@@ -65,7 +65,7 @@ export function useSpaceLayout(
   selected: SpaceKey | null,
   newTileId?: () => string,
   panelPort?: PanelPort,
-): SpaceLayout {
+): SpaceLayoutView {
   const [held, setHeld] = useState<Held | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +80,9 @@ export function useSpaceLayout(
   const panelsSessionRef = useRef(0);
   const watched = useRef<SpaceKey | null>(null);
   const watchRequest = useRef<DecimalU64 | null>(null);
+  // Errors that arrive before the watch's request ID is known, by request, so only the watch's
+  // own error is shown once it is.
+  const earlyErrors = useRef(new Map<DecimalU64, string>());
   // Bumped whenever the watch is replaced, dropped or unmounted, so a late watch reply from an
   // older watch is ignored.
   const watchGeneration = useRef(0);
@@ -115,6 +118,7 @@ export function useSpaceLayout(
         ...(newTileId === undefined ? {} : { newTileId }),
       });
       watchRequest.current = null;
+      earlyErrors.current.clear();
       setHeld(null);
       setNotice(null);
       setError(null);
@@ -122,7 +126,11 @@ export function useSpaceLayout(
       const generation = watchGeneration.current;
       port.watchLayout(next.hostId, next.path).then(
         (request) => {
-          if (watchGeneration.current === generation) watchRequest.current = request;
+          if (watchGeneration.current !== generation) return;
+          watchRequest.current = request;
+          const early = earlyErrors.current.get(request);
+          earlyErrors.current.clear();
+          if (early !== undefined) setError(early);
         },
         (cause: unknown) => {
           if (watchGeneration.current === generation) setError(errorText(cause));
@@ -180,9 +188,8 @@ export function useSpaceLayout(
         }
         case 'error':
           queue.current?.onError(event.request, event.code, event.message);
-          if (watchRequest.current === null || event.request === watchRequest.current) {
-            setError(event.message);
-          }
+          if (watchRequest.current === null) earlyErrors.current.set(event.request, event.message);
+          else if (event.request === watchRequest.current) setError(event.message);
           return;
         case 'disconnected':
           queue.current?.onDisconnected();
