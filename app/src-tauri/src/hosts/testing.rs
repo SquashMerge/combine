@@ -54,17 +54,39 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// A scratch directory `/tmp/cs5-<pid>-<n>`, short enough for a Unix socket path. Removed on drop.
+/// A new directory `<parent>/<prefix>-<8 random hex digits>`, mode 0700. As with `mkdtemp`, a
+/// name that exists (a killed run's leftover: pids are reused) is retried, never reused.
+/// A copy of `combined::testing::fresh_dir`: the app's own code doesn't depend on `combined`.
+pub fn fresh_dir(parent: &Path, prefix: &str) -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..16 {
+        let suffix = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish() as u32;
+        let path = parent.join(format!("{prefix}-{suffix:08x}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            created => {
+                created.unwrap_or_else(|error| panic!("creating {}: {error}", path.display()));
+                return path;
+            }
+        }
+    }
+    panic!("no free {prefix}-* name under {}", parent.display());
+}
+
+/// A new scratch directory `/tmp/cs5-<8 random hex digits>`, mode 0700, short enough for a Unix
+/// socket path. Removed on drop.
 pub struct ShortTempDir {
     path: PathBuf,
 }
 
 impl ShortTempDir {
     pub fn new() -> Self {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = PathBuf::from(format!("/tmp/cs5-{}-{n}", std::process::id()));
-        fs::create_dir_all(&path).expect("create the scratch directory");
-        ShortTempDir { path }
+        ShortTempDir {
+            path: fresh_dir(Path::new("/tmp"), "cs5"),
+        }
     }
 
     pub fn path(&self) -> &Path {

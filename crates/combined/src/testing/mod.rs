@@ -29,7 +29,7 @@ pub use control::FakeControl;
 pub use diagram_check::{FakeAnswer, FakeDiagramCheck, FakeHold};
 pub use fake_backend::FakeBackend;
 pub use file_store::MemoryFileStore;
-pub use scratch_dir::{check_in_scratch, wait_until, work_dir, ShortTempDir};
+pub use scratch_dir::{check_in_scratch, fresh_dir, wait_until, work_dir, ShortTempDir};
 pub use scratch_store::MemoryScratchStore;
 pub use wall_clock::FakeWallClock;
 pub use wire_client::{attach, read_until_tail, WireClient, RECV_TIMEOUT};

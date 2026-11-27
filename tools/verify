@@ -77,9 +77,15 @@ if command -v trellis >/dev/null 2>&1 && [ "${CI:-}" = true ]; then
   # ci-check.sh retries exactly those, and fails at once on anything else.
   sh tools/trellis-check/ci-check.sh
 elif command -v trellis >/dev/null 2>&1; then
-  trellis rules check --format json >"${TMPDIR:-/tmp}/combine-trellis-$$.json"
-  status=$?
-  rm -f "${TMPDIR:-/tmp}/combine-trellis-$$.json"
+  # Only trellis's exit status passes or fails the step. The summary (counts, and the files in
+  # no layer) is for the review AGENTS.md asks of new unknowns; it decides nothing.
+  report="${TMPDIR:-/tmp}/combine-trellis-$$.json"
+  status=0
+  trellis rules check --format json >"$report" || status=$?
+  if [ -s "$report" ]; then
+    python3 -I -B tools/trellis-check/summary.py "$report" || :
+  fi
+  rm -f "$report"
   [ "$status" -eq 0 ] || exit "$status"
 elif [ -n "${COMBINE_VERIFY_WITHOUT_TRELLIS:-}" ]; then
   echo "trellis not installed; skipped (COMBINE_VERIFY_WITHOUT_TRELLIS is set)"

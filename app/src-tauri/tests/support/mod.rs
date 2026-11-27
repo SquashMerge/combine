@@ -4,9 +4,7 @@
 //! traffic. No ssh, no network listener and no herdr-core.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -19,23 +17,18 @@ use combined::model::{SpaceId, SpawnSpec};
 use combined::ports::TerminalBackend;
 use combined::rpc::socket::{bind, MAX_SOCKET_PATH};
 use combined::rpc::{self, PanelHandle, ServeOptions, ServerHandle};
-use combined::testing::{FakeBackend, FakeConfig};
+use combined::testing::{fresh_dir, FakeBackend, FakeConfig};
 use combined::wiring::ids::IdReservation;
 use combined::wiring::server_parts;
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// `/tmp/c48-<pid>-<n>`, mode 0700, removed on drop.
+/// `/tmp/c48-<8 random hex digits>`, always new, mode 0700, removed on drop.
 pub struct ScratchDir {
     pub path: PathBuf,
 }
 
 impl ScratchDir {
     pub fn new() -> ScratchDir {
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = PathBuf::from(format!("/tmp/c48-{}-{n}", std::process::id()));
-        fs::create_dir(&path).expect("create the scratch directory");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("restrict it");
+        let path = fresh_dir(Path::new("/tmp"), "c48");
         ScratchDir { path }
     }
 }
