@@ -5,7 +5,7 @@ use std::path::Path;
 
 use combine_protocol::{HostId, TermId, TerminalInfo, TerminalState as WireState, Terminals};
 
-use super::model::{SpaceKey, SpaceView, TerminalState, TerminalSummary};
+use super::model::{BackendView, SpaceKey, SpaceView, TerminalState, TerminalSummary};
 use super::text::is_blank;
 
 /// One view per space, in the daemon's order, including a space with no terminals.
@@ -27,6 +27,14 @@ pub fn space_views(host_id: &HostId, terminals: &Terminals) -> Vec<SpaceView> {
                 .collect(),
         })
         .collect()
+}
+
+/// The backend the daemon named, if it did.
+pub fn backend_view(terminals: &Terminals) -> Option<BackendView> {
+    terminals.backend.as_ref().map(|backend| BackendView {
+        id: backend.id.clone(),
+        instance: backend.instance.clone(),
+    })
 }
 
 fn summary(info: &TerminalInfo) -> TerminalSummary {
@@ -58,7 +66,7 @@ fn name_of(info: &TerminalInfo) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use combine_protocol::{SpaceInfo, SpaceKind};
+    use combine_protocol::{BackendInfo, SpaceInfo, SpaceKind};
 
     use super::super::testing::{host_id, HOST_A};
     use super::*;
@@ -93,9 +101,43 @@ mod tests {
             request: None,
             terminals: vec![terminal],
             spaces: vec![space("/work", &[&id])],
+            backend: None,
         };
         let mut views = space_views(&host_id(HOST_A), &list);
         views.remove(0).terminals.remove(0)
+    }
+
+    #[test]
+    fn backend_view_names_the_backend_the_daemon_gave() {
+        let mut list = Terminals {
+            request: None,
+            terminals: Vec::new(),
+            spaces: Vec::new(),
+            backend: None,
+        };
+        assert_eq!(backend_view(&list), None);
+        list.backend = Some(BackendInfo {
+            id: "backend-a".to_string(),
+            instance: Some("0123abcd".to_string()),
+        });
+        assert_eq!(
+            backend_view(&list),
+            Some(BackendView {
+                id: "backend-a".to_string(),
+                instance: Some("0123abcd".to_string()),
+            })
+        );
+        list.backend = Some(BackendInfo {
+            id: "backend-a".to_string(),
+            instance: None,
+        });
+        assert_eq!(
+            backend_view(&list),
+            Some(BackendView {
+                id: "backend-a".to_string(),
+                instance: None,
+            })
+        );
     }
 
     #[test]
@@ -112,6 +154,7 @@ mod tests {
                 info("t2", &["zsh"], &[], WireState::Exited),
             ],
             spaces: vec![space("/work/a", &["t1", "t2"])],
+            backend: None,
         };
         let views = space_views(&host_id(HOST_A), &list);
         assert_eq!(
@@ -145,6 +188,7 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: vec![space("/empty", &[])],
+            backend: None,
         };
         let views = space_views(&host_id(HOST_A), &list);
         assert_eq!(views.len(), 1);

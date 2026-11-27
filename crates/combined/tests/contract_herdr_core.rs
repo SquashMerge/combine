@@ -217,6 +217,10 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
         |e| matches!(e, TermEvent::Created(i) if i.id == b),
     )
     .await?;
+    let instance = backend.instance();
+    if instance.is_none() {
+        return Err("the core named no backend instance".to_string());
+    }
     target
         .restart_backend()
         .await
@@ -228,6 +232,13 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
         |e| matches!(e, TermEvent::Restarted { id } if *id == b),
     )
     .await?;
+    backend
+        .list()
+        .await
+        .map_err(|e| format!("the same core refused a call after the restart: {e}"))?;
+    if backend.instance() != instance {
+        return Err("the backend instance changed across the restart".to_string());
+    }
 
     let meta = std::fs::read_to_string(format!("{FIXTURES}/meta.json"))
         .map_err(|_| "no meta.json: run `sh tools/verify-herdr-core --capture`".to_string())?;

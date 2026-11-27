@@ -12,7 +12,9 @@ use super::attachments::{Attachments, TerminalSink};
 use super::config::{HostConfig, HostsStore, Transport};
 use super::link::Connector;
 use super::local::{LocalSocketConnector, SocketGuardEnv};
-use super::model::{ConfigStatus, ConnectionState, HostView, HostsSnapshot, SpaceView};
+use super::model::{
+    BackendView, ConfigStatus, ConnectionState, HostView, HostsSnapshot, SpaceView,
+};
 use super::outbound::Outbound;
 use super::panels::PanelReply;
 use super::registry::HostRegistry;
@@ -127,8 +129,8 @@ impl HostEvents for Inner {
         self.mutate(|r| r.set_host_id(name, host_id));
     }
 
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
-        self.mutate(|r| r.replace_spaces(host_id, spaces));
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+        self.mutate(|r| r.replace_spaces(host_id, spaces, backend));
     }
 
     fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
@@ -186,6 +188,7 @@ impl HostsService {
                 host_id: h.host_id.clone(),
                 connection: ConnectionState::Connecting,
                 spaces: Vec::new(),
+                backend: None,
             })
             .collect();
         let status = ConfigStatus {

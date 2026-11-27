@@ -68,6 +68,10 @@ impl TerminalBackend for FakeBackend {
         ID_PREFIX
     }
 
+    fn instance(&self) -> Option<String> {
+        Some("fake-core".to_string())
+    }
+
     fn capabilities(&self) -> Capabilities {
         lock(&self.world).capabilities()
     }

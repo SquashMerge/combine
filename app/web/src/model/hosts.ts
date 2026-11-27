@@ -30,11 +30,19 @@ export interface SpaceView {
   terminals: TerminalSummary[];
 }
 
+/** The backend that owns a host's terminals. `instance` tells one backend of that kind from another. */
+export interface BackendView {
+  id: string;
+  instance: string | null;
+}
+
 export interface HostView {
   name: string;
   hostId: HostId | null;
   connection: ConnectionState;
   spaces: SpaceView[];
+  /** `null` until the host's daemon has named its backend. The parser always sets it. */
+  backend?: BackendView | null;
 }
 
 export interface ConfigStatus {
@@ -131,6 +139,15 @@ function parseSpace(value: unknown, what: string): SpaceView {
   };
 }
 
+function parseBackend(value: unknown, what: string): BackendView | null {
+  if (value === undefined || value === null) return null;
+  const r = record(value, what);
+  return {
+    id: str(r['id'], `${what}.id`),
+    instance: nullableStr(r['instance'], `${what}.instance`),
+  };
+}
+
 function parseHost(value: unknown, what: string): HostView {
   const r = record(value, what);
   const hostId = r['hostId'] === null ? null : parseHostId(r['hostId']);
@@ -139,6 +156,7 @@ function parseHost(value: unknown, what: string): HostView {
     hostId,
     connection: parseConnection(r['connection'], `${what}.connection`),
     spaces: array(r['spaces'], `${what}.spaces`).map((s, i) => parseSpace(s, `${what}.spaces[${i}]`)),
+    backend: parseBackend(r['backend'], `${what}.backend`),
   };
   if (host.hostId === null && host.spaces.length > 0) {
     throw new ModelError(`${what} has spaces but no hostId`);

@@ -99,6 +99,8 @@ fn parse_error(error: &Value) -> RpcError {
 pub(super) struct Hello {
     pub version: String,
     pub features: Vec<String>,
+    /// The core's permanent id, when `hello` carried a usable one.
+    pub core_id: Option<String>,
 }
 
 impl Hello {
@@ -116,6 +118,21 @@ struct HelloResult {
     methods: Vec<String>,
     #[serde(default)]
     features: Vec<String>,
+    #[serde(default)]
+    core: Value,
+}
+
+/// The longest core id kept, in bytes.
+const MAX_CORE_ID_LEN: usize = 128;
+
+/// The core's id from `hello`'s `core` object, or `None` unless it is 1 to 128 bytes with no `/`
+/// and no control character: the id becomes part of a layout tab ID.
+fn core_id(core: &Value) -> Option<String> {
+    let id = core.get("id")?.as_str()?;
+    let usable = !id.is_empty()
+        && id.len() <= MAX_CORE_ID_LEN
+        && !id.chars().any(|c| c == '/' || c.is_control());
+    usable.then(|| id.to_string())
 }
 
 /// Reads the reply line to `hello`. Anything but generation 1, framed, with every required
@@ -158,6 +175,7 @@ pub(super) fn parse_hello(line: &[u8]) -> Result<Hello, BackendError> {
     Ok(Hello {
         version: hello.version,
         features: hello.features,
+        core_id: core_id(&hello.core),
     })
 }
 
@@ -408,6 +426,53 @@ mod tests {
         assert!(hello_line().contains(r#""framed":true"#));
         assert!(hello_line().contains(r#""generation":1"#));
         assert!(hello_line().ends_with('\n'));
+    }
+
+    fn hello_with_core(core: Value) -> Vec<u8> {
+        let mut reply: Value =
+            serde_json::from_slice(&hello_reply(1, true, &[], &all_methods())).expect("json");
+        match core {
+            Value::Null => {
+                reply["result"]
+                    .as_object_mut()
+                    .expect("result")
+                    .remove("core");
+            }
+            core => reply["result"]["core"] = core,
+        }
+        reply.to_string().into_bytes()
+    }
+
+    #[test]
+    fn hello_reads_the_core_id() {
+        let hello = parse_hello(&hello_reply(1, true, &[], &all_methods())).expect("hello");
+        assert_eq!(hello.core_id.as_deref(), Some("x"));
+        let long = "a".repeat(128);
+        let hello = parse_hello(&hello_with_core(json!({"id": long}))).expect("hello");
+        assert_eq!(hello.core_id, Some(long));
+    }
+
+    #[test]
+    fn hello_without_a_core_id_has_none() {
+        for core in [
+            Value::Null,
+            json!({"name": "y"}),
+            json!({"id": 7}),
+            json!({"id": ""}),
+            json!({"id": "a".repeat(129)}),
+            json!("x"),
+        ] {
+            let hello = parse_hello(&hello_with_core(core.clone())).expect("hello");
+            assert_eq!(hello.core_id, None, "{core}");
+        }
+    }
+
+    #[test]
+    fn a_core_id_with_a_slash_is_ignored() {
+        for id in ["a/b", "/", "ab\u{0}", "a\nb", "a\u{7f}b"] {
+            let hello = parse_hello(&hello_with_core(json!({"id": id}))).expect("hello");
+            assert_eq!(hello.core_id, None, "{id:?}");
+        }
     }
 
     #[test]

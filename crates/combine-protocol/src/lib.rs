@@ -64,4 +64,4 @@ pub use panels::{
 };
 pub use spawn::{SkippedPanel, SpawnSource, TemplateInfo};
 pub use stream::{read_message, write_message};
-pub use terminals::{SpaceInfo, SpaceKind, TerminalInfo, TerminalState};
+pub use terminals::{BackendInfo, SpaceInfo, SpaceKind, TerminalInfo, TerminalState};
