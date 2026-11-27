@@ -901,6 +901,7 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: Vec::new(),
+            backend: None,
         });
         assert_eq!(rig.route(terminals.clone()), Some(terminals));
         assert_eq!(rig.route(error(None, None)), Some(error(None, None)));

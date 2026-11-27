@@ -556,6 +556,46 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
             ),
         ),
         (
+            "terminals",
+            DaemonMessage::Terminals(Terminals {
+                request: Some(RequestId(7)),
+                terminals: vec![TerminalInfo {
+                    id: TermId(s("t8")),
+                    cwd: s("/Users/me/src/trellis"),
+                    argv: vec![s("zsh")],
+                    state: TerminalState::Running,
+                    exit_code: None,
+                    labels: Default::default(),
+                    cols: 80,
+                    rows: 24,
+                }],
+                spaces: vec![SpaceInfo {
+                    id: s("/Users/me/src/trellis"),
+                    kind: SpaceKind::Repository,
+                    terminals: vec![TermId(s("t8"))],
+                }],
+                backend: Some(BackendInfo {
+                    id: s("backend-a"),
+                    instance: Some(s("0123abcd")),
+                }),
+            }),
+            control_frame(
+                r#"{"type":"terminals","request":7,"terminals":[{"id":"t8","cwd":"/Users/me/src/trellis","argv":["zsh"],"state":"running","exit_code":null,"labels":{},"cols":80,"rows":24}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["t8"]}],"backend":{"id":"backend-a","instance":"0123abcd"}}"#,
+            ),
+        ),
+        (
+            "terminals_no_backend",
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                terminals: vec![],
+                spaces: vec![],
+                backend: None,
+            }),
+            control_frame(
+                r#"{"type":"terminals","request":null,"terminals":[],"spaces":[],"backend":null}"#,
+            ),
+        ),
+        (
             "panels_push",
             DaemonMessage::Panels(Panels {
                 request: None,

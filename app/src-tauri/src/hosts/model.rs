@@ -128,6 +128,18 @@ pub struct HostView {
     pub host_id: Option<HostId>,
     pub connection: ConnectionState,
     pub spaces: Vec<SpaceView>,
+    /// The backend that owns the host's terminals, once the daemon has said. Always serialized,
+    /// `null` until then.
+    pub backend: Option<BackendView>,
+}
+
+/// The backend behind a host's terminals. `id` is trimmed external text; `instance` is passed
+/// whole because a layout tab ID is built from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendView {
+    pub id: String,
+    pub instance: Option<String>,
 }
 
 /// `reason` and `message` are Combine text; `detail` is external text.
@@ -385,12 +397,14 @@ mod tests {
         host_id: Option<&str>,
         connection: ConnectionState,
         spaces: Vec<SpaceView>,
+        backend: Option<BackendView>,
     ) -> HostView {
         HostView {
             name: name.to_string(),
             host_id: host_id.map(id),
             connection,
             spaces,
+            backend,
         }
     }
 
@@ -425,6 +439,10 @@ mod tests {
                             terminal("hc:t9", "prime-1", "prime-agent run", TerminalState::Running),
                         ],
                     }],
+                    Some(BackendView {
+                        id: "herdr-core".to_string(),
+                        instance: Some("4bcff4a58f4d97d505396e5a43a807e6".to_string()),
+                    }),
                 ),
                 view(
                     "mini",
@@ -438,6 +456,7 @@ mod tests {
                         key: SpaceKey { host_id: id(mini), path: "/Users/example/src/mimir".to_string() },
                         terminals: Vec::new(),
                     }],
+                    None,
                 ),
                 view(
                     "work-mbp",
@@ -447,9 +466,10 @@ mod tests {
                         detail: Some("example@work-mbp.local: Permission denied (publickey).".to_string()),
                     },
                     Vec::new(),
+                    None,
                 ),
-                view("spare", None, ConnectionState::Reconnecting { attempt: 2 }, Vec::new()),
-                view("new", None, ConnectionState::Connecting, Vec::new()),
+                view("spare", None, ConnectionState::Reconnecting { attempt: 2 }, Vec::new(), None),
+                view("new", None, ConnectionState::Connecting, Vec::new(), None),
             ],
         };
         let file = fixture("hosts-snapshot.json");

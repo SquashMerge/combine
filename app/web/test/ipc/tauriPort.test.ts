@@ -36,6 +36,18 @@ describe('createTauriHostsPort', () => {
     expect(await createTauriHostsPort().getSnapshot()).toEqual(parseHostsSnapshot(fixture));
   });
 
+  it('carries each host\'s backend through the parser', async () => {
+    mockIPC((cmd) => (cmd === HOSTS_SNAPSHOT_COMMAND ? fixture : undefined), {
+      shouldMockEvents: true,
+    });
+    const hosts = (await createTauriHostsPort().getSnapshot()).hosts;
+    expect(hosts[0]?.backend).toEqual({
+      id: 'herdr-core',
+      instance: '4bcff4a58f4d97d505396e5a43a807e6',
+    });
+    expect(hosts[1]?.backend).toBeNull();
+  });
+
   it('rejects a malformed hosts_snapshot result', async () => {
     mockIPC(() => ({ revision: 7 }), { shouldMockEvents: true });
     await expect(createTauriHostsPort().getSnapshot()).rejects.toThrow();

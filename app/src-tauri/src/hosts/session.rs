@@ -16,7 +16,7 @@ use super::outbound::{Outbound, Outgoing, RequestKind};
 use super::panels::PanelReply;
 use super::spawn::SpawnReply;
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
-use super::terminals::space_views;
+use super::terminals::{backend_view, space_views};
 use super::text::display_text;
 
 /// Where a host's layout traffic goes, with the panel list that rides the layout watch. The
@@ -86,7 +86,11 @@ impl SessionPhase for LivePhase {
                     };
                     match message {
                         DaemonMessage::Terminals(list) => {
-                            events.spaces(host_id, space_views(host_id, &list));
+                            events.spaces(
+                                host_id,
+                                space_views(host_id, &list),
+                                backend_view(&list),
+                            );
                         }
                         DaemonMessage::Layout(reply) => {
                             events.layout(host_id, reply.request, reply.layout);
@@ -177,7 +181,7 @@ mod tests {
     };
 
     use super::super::attachments::StreamId;
-    use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
+    use super::super::model::{BackendView, ConfigStatus, ConnectionState, HostView, SpaceView};
     use super::super::outbound::NotConnected;
     use super::super::registry::HostRegistry;
     use super::super::spawn::SpawnSink;
@@ -261,6 +265,7 @@ mod tests {
                 kind: SpaceKind::Folder,
                 terminals: Vec::<TermId>::new(),
             }],
+            backend: None,
         }
     }
 
@@ -290,11 +295,11 @@ mod tests {
     impl HostEvents for RegistryEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
+        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
             self.0
                 .lock()
                 .expect("registry")
-                .replace_spaces(host_id, spaces);
+                .replace_spaces(host_id, spaces, backend);
         }
     }
 
@@ -310,6 +315,7 @@ mod tests {
                 host_id: Some(host_id(HOST_A)),
                 connection: ConnectionState::Connected,
                 spaces: Vec::new(),
+                backend: None,
             }],
         );
         let events = Arc::new(RegistryEvents(Mutex::new(registry)));
@@ -395,7 +401,13 @@ mod tests {
     impl HostEvents for LayoutEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
             self.0.layout(host_id, request, snapshot);
         }
@@ -573,7 +585,13 @@ mod tests {
     impl HostEvents for SpawnEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
             self.0.spawn_reply(host_id, reply);
         }
@@ -585,7 +603,13 @@ mod tests {
     impl HostEvents for BothEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn layout_error(
             &self,
             host_id: &HostId,

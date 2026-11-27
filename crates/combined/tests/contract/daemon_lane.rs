@@ -73,6 +73,8 @@ struct Inbox {
     attached: BTreeMap<u64, AttachmentId>,
     resumed: Option<(AttachmentId, Option<Cursor>)>,
     listed: Vec<Vec<TermId>>,
+    /// The backend instance each `terminals` snapshot named.
+    instances: Vec<Option<String>>,
 }
 
 impl Inbox {
@@ -104,6 +106,12 @@ impl Inbox {
             DaemonMessage::Terminals(terminals) => {
                 let ids = terminals.terminals.iter().map(|t| t.id.clone()).collect();
                 self.listed.push(ids);
+                self.instances.push(
+                    terminals
+                        .backend
+                        .clone()
+                        .and_then(|backend| backend.instance),
+                );
             }
             DaemonMessage::Ownership(ownership) => {
                 self.seen.entry(ownership.attachment).or_default().ownership =
@@ -402,6 +410,9 @@ pub fn two_panels_across_a_restart(
 
     let (mut bridge, _welcome) = BridgeClient::open(scratch, daemon.socket());
     let mut inbox = Inbox::default();
+    bridge.send(&ClientMessage::WatchTerminals(WatchTerminals {
+        request: RequestId(9),
+    }));
     attach(&mut bridge, 1, &term, 80, 24);
     attach(&mut bridge, 2, &term, 100, 30);
     pump_until(
@@ -476,6 +487,26 @@ pub fn two_panels_across_a_restart(
             })
         },
     )?;
+
+    let before = inbox.instances.len();
+    bridge.send(&ClientMessage::WatchTerminals(WatchTerminals {
+        request: RequestId(10),
+    }));
+    pump_until(
+        &mut bridge,
+        &mut inbox,
+        MESSAGE_WAIT,
+        "a terminals snapshot after the restart",
+        true,
+        |inbox| inbox.instances.len() > before,
+    )?;
+    let instance = inbox.instances.first().cloned().flatten();
+    if instance.is_none() || inbox.instances.iter().any(|seen| *seen != instance) {
+        return Err(format!(
+            "the backend instance changed across the restart: {:?}",
+            inbox.instances
+        ));
+    }
 
     input(&mut bridge, a, b"a-after");
     if !wait_until(MESSAGE_WAIT, || typed_has(target, &term, b"a-after")) {

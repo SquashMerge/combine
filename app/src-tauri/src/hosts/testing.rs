@@ -28,7 +28,7 @@ use super::link::{
     ticking_reader, Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link,
     TimedSocket,
 };
-use super::model::{ConnectionState, HostsSnapshot, SpaceView};
+use super::model::{BackendView, ConnectionState, HostsSnapshot, SpaceView};
 use super::panels::PanelReply;
 use super::service::SnapshotSink;
 use super::session::LayoutSink;
@@ -532,7 +532,7 @@ impl Clock for FakeClock {
 pub enum Event {
     Connection(String, ConnectionState),
     HostId(String, HostId),
-    Spaces(HostId, Vec<SpaceView>),
+    Spaces(HostId, Vec<SpaceView>, Option<BackendView>),
 }
 
 /// Sends every [`HostEvents`] call to a channel.
@@ -560,8 +560,8 @@ impl HostEvents for RecordingEvents {
         self.send(Event::HostId(name.to_string(), host_id.clone()));
     }
 
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
-        self.send(Event::Spaces(host_id.clone(), spaces));
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+        self.send(Event::Spaces(host_id.clone(), spaces, backend));
     }
 }
 

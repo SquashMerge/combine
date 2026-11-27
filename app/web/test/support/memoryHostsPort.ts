@@ -1,5 +1,5 @@
 import type { HostsPort, Unsubscribe } from '../../src/ipc/port';
-import type { ConnectionState, HostsSnapshot } from '../../src/model/hosts';
+import type { BackendView, ConnectionState, HostsSnapshot } from '../../src/model/hosts';
 import { decimalU64FromBigInt, decimalU64ToBigInt } from '../../src/model/ids';
 
 type Listener = (snapshot: HostsSnapshot) => void;
@@ -42,6 +42,15 @@ export class MemoryHostsPort implements HostsPort {
       hosts: this.current.hosts.map((host) =>
         host.name === name ? { ...host, connection: state } : host,
       ),
+    });
+  }
+
+  setBackend(name: string, backend: BackendView | null): void {
+    const revision = decimalU64FromBigInt(decimalU64ToBigInt(this.current.revision) + 1n);
+    this.push({
+      ...this.current,
+      revision,
+      hosts: this.current.hosts.map((host) => (host.name === name ? { ...host, backend } : host)),
     });
   }
 
