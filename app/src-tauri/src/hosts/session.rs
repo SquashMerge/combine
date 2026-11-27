@@ -89,10 +89,19 @@ impl SessionPhase for LivePhase {
                     };
                     match message {
                         DaemonMessage::Terminals(list) => {
-                            if session.is_none() {
-                                let instance =
-                                    list.backend.as_ref().and_then(|b| b.instance.clone());
-                                session = Some(self.attachments.session_started(host_id, instance));
+                            let instance = list.backend.as_ref().and_then(|b| b.instance.clone());
+                            match (session, instance) {
+                                (None, instance) => {
+                                    session =
+                                        Some(self.attachments.session_started(host_id, instance));
+                                }
+                                // The first list was refused, so the session started with no
+                                // instance: this one supplies it, without a restart.
+                                (Some(started), Some(instance)) => {
+                                    self.attachments
+                                        .instance_learned(host_id, started, instance);
+                                }
+                                (Some(_), None) => {}
                             }
                             events.spaces(
                                 host_id,
@@ -1105,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_terminal_list_still_readies_the_session_without_an_instance() {
+    fn a_refused_terminal_list_readies_the_session_and_a_later_list_supplies_the_instance() {
         let (events, _published) = RecordingEvents::new();
         let mut rig = start(events);
         let request = watch_request(read_client(&mut rig.daemon));
@@ -1120,6 +1129,67 @@ mod tests {
             }),
         );
         wait_connection(&rig, Delivered::Connection(true, None));
+
+        // The list fits again: a push names the instance, and the session goes on.
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                ..list_of(Some(CORE_A))
+            }),
+        );
+        wait_connection(&rig, up(CORE_A));
+        const LATER: StreamId = StreamId(2);
+        rig.attachments.open_stream(LATER, host_id(HOST_A));
+        assert_eq!(
+            rig.terminals.deliveries(),
+            [
+                (STREAM, down()),
+                (STREAM, Delivered::Connection(true, None)),
+                (STREAM, up(CORE_A)),
+                (LATER, up(CORE_A)),
+            ],
+            "the session isn't restarted, and a stream opened later hears the instance"
+        );
+        // A route made before the instance was learned survives it.
+        rig.attachments
+            .attach(
+                &rig.outbound,
+                STREAM,
+                TermId("t1".to_string()),
+                options(),
+                Some(CORE_A.to_string()),
+            )
+            .expect("attach");
+        let request = match read_client(&mut rig.daemon) {
+            ClientMessage::Attach(attach) => attach.request,
+            other => panic!("expected attach, got {other:?}"),
+        };
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                ..list_of(Some("core-b"))
+            }),
+        );
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Attached(Attached {
+                request,
+                attachment: AttachmentId(10),
+            }),
+        );
+        let attached = DaemonMessage::Attached(Attached {
+            request,
+            attachment: AttachmentId(10),
+        });
+        let seen = rig.terminals.wait_for(5);
+        assert_eq!(seen.last(), Some(&(STREAM, Delivered::Message(attached))));
+        assert_eq!(
+            seen.len(),
+            5,
+            "a later instance never replaces the first: {seen:?}"
+        );
         assert_eq!(end_session(rig), SessionEnd::Closed);
     }
 

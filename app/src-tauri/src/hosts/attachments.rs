@@ -323,6 +323,28 @@ impl Attachments {
             .unwrap_or_default()
     }
 
+    /// The session `session_started` numbered `session` started without an instance (its first
+    /// terminal list was refused), and a later list names `instance`. The streams are told, and
+    /// later ones hear it when they open; the session keeps its pending requests and routes.
+    /// Nothing changes for another session, or once the session already has an instance.
+    pub fn instance_learned(&self, host_id: &HostId, session: u64, instance: String) {
+        let mut state = self.state();
+        let host = state.host(host_id);
+        if host.session != session || !host.connected || host.instance.is_some() {
+            return;
+        }
+        host.instance = Some(instance.clone());
+        for (stream, _) in state.streams.iter().filter(|(_, host)| *host == host_id) {
+            self.sink.deliver(
+                *stream,
+                StreamDelivery::Connection {
+                    connected: true,
+                    instance: Some(&instance),
+                },
+            );
+        }
+    }
+
     /// The session for `host_id` is gone, and so are its pending requests and attachments.
     pub fn session_ended(&self, host_id: &HostId) {
         self.set_connected(host_id, None, None);
@@ -1164,6 +1186,41 @@ mod tests {
                 (S1, Seen::Connection(true, None)),
                 (S2, Seen::Connection(true, None)),
             ]
+        );
+    }
+
+    #[test]
+    fn an_instance_learned_later_reaches_the_streams_and_keeps_the_sessions_routes() {
+        let rig = Rig::with_streams();
+        let host = rig.host.clone();
+        rig.router.session_ended(&host);
+        let session = rig.router.session_started(&host, None);
+        rig.attached(S1, 10);
+        rig.seen();
+        rig.router
+            .instance_learned(&host, session + 1, "core-x".to_string());
+        assert!(
+            rig.seen().is_empty(),
+            "another session's list changes nothing"
+        );
+        rig.router
+            .instance_learned(&host, session, "core-b".to_string());
+        let core_b = || Seen::Connection(true, Some("core-b".to_string()));
+        assert_eq!(rig.seen(), [(S1, core_b()), (S2, core_b())]);
+        rig.router
+            .instance_learned(&host, session, "core-c".to_string());
+        assert!(rig.seen().is_empty(), "the first instance stays");
+        rig.router.open_stream(StreamId(3), host.clone());
+        assert_eq!(rig.seen(), [(StreamId(3), core_b())]);
+        assert_eq!(
+            rig.forward(
+                S1,
+                ClientMessage::Focus(Focus {
+                    attachment: AttachmentId(10)
+                })
+            ),
+            Ok(()),
+            "the route made before the instance was learned survives"
         );
     }
 
