@@ -10,6 +10,7 @@ mod time;
 pub use content_hash::ContentHash;
 pub use layout::{
     InvalidId, LayoutRevision, PanelId, SpaceLayout, Split, SplitDir, SplitNode, Tile, TileId,
+    ACTIVE_TERMINAL_TAB,
 };
 pub use panel::{Lifetime, ViewPanelFile};
 pub use space::{RootKind, Space, SpaceId};

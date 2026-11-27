@@ -38,7 +38,7 @@ fn split(ratio: f64, a: SplitNode, b: SplitNode) -> SplitNode {
 
 fn layout(root: SplitNode) -> SpaceLayout {
     SpaceLayout {
-        version: 1,
+        version: 2,
         root,
         groups: json!([]),
         extra: Map::new(),
@@ -660,4 +660,73 @@ fn panel_ops_touch_only_the_target_tiles_fields() {
     let applied = apply(&before, &[add("p9", Some("b"), true)]).unwrap();
     let changed = diff_fields(&before, &applied.layout);
     assert_eq!(changed, only("b"));
+}
+
+#[test]
+fn reserved_terminal_tab_ids_are_ordinary_panel_ids() {
+    let pinned = ".terminal/instance/7";
+    let applied = apply(
+        &two_tiles(),
+        &[
+            add(".active-terminal", Some("a"), false),
+            add(pinned, Some("b"), true),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        panels_of(&applied.layout, "a"),
+        ["p1", "p2", "p3", ".active-terminal"]
+    );
+    assert_eq!(panels_of(&applied.layout, "b"), ["p4", pinned]);
+    assert_eq!(
+        tile_of(&applied.layout.root, "b").unwrap().active,
+        Some(p(pinned))
+    );
+
+    let active = LayoutOp::SetActive {
+        tile: t("b"),
+        panel: p(".active-terminal"),
+    };
+    assert!(matches!(
+        apply(&applied.layout, &[active]),
+        Err(LayoutError::PanelNotInTile(..))
+    ));
+    let moved = LayoutOp::MovePanel {
+        panel: p(pinned),
+        to_tile: t("a"),
+        index: 0,
+    };
+    let moved = apply(&applied.layout, &[moved]).unwrap().layout;
+    assert_eq!(panels_of(&moved, "a")[0], pinned);
+    let removed = apply(&moved, &[remove(pinned), remove(".active-terminal")])
+        .unwrap()
+        .layout;
+    assert_eq!(panels_of(&removed, "a"), ["p1", "p2", "p3"]);
+
+    let twice = apply(
+        &two_tiles(),
+        &[add(pinned, None, true), add(pinned, Some("b"), true)],
+    );
+    assert!(matches!(twice, Err(LayoutError::PanelInLayout(id)) if id == p(pinned)));
+}
+
+#[test]
+fn split_then_add_into_the_new_tile_in_one_batch() {
+    let pinned = ".terminal/instance/7";
+    let split = LayoutOp::SplitTile {
+        tile: t("a"),
+        dir: SplitDir::H,
+        new_tile: t("n"),
+        ratio: 0.5,
+        panel: None,
+    };
+    let applied = apply(&two_tiles(), &[split, add(pinned, Some("n"), true)]).unwrap();
+    assert_eq!(panels_of(&applied.layout, "n"), [pinned]);
+    assert_eq!(
+        tile_of(&applied.layout.root, "n").unwrap().active,
+        Some(p(pinned))
+    );
+    assert_eq!(panels_of(&applied.layout, "a"), ["p1", "p2", "p3"]);
+    assert!(applied.touched.contains(&FieldPath::Structure));
+    assert!(applied.touched.contains(&FieldPath::TilePanels(t("n"))));
 }

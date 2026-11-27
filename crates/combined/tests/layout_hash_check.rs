@@ -55,7 +55,7 @@ const PROMPT: LayoutTiming = LayoutTiming {
     retry_ms: 3_600_000,
 };
 /// What someone else writes: the same two tiles, with another ratio.
-const OUTSIDE: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.3,
+const OUTSIDE: &str = r#"{"version":2,"root":{"type":"split","dir":"h","ratio":0.3,
     "a":{"type":"tile","id":"main","panels":[],"active":null},
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
 

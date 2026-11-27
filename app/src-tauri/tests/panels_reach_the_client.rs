@@ -28,7 +28,7 @@ use combined::model::Lifetime;
 use support::{write_hosts, PanelDaemon, PanelEvent, RecordingPanels, ScratchDir};
 
 const HOST: &str = "00000000-0000-4000-8000-000000000048";
-const LAYOUT: &str = r#"{"version":1,"root":{"type":"tile","id":"main","panels":["doc"],"active":"doc"},"groups":[]}"#;
+const LAYOUT: &str = r#"{"version":2,"root":{"type":"tile","id":"main","panels":["doc"],"active":"doc"},"groups":[]}"#;
 const SOURCE: &str = "# Doc\n\nA panel made in core.\n";
 
 const POLL: Duration = Duration::from_millis(20);

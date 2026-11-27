@@ -15,7 +15,14 @@ use crate::model::{InvalidId, PanelId, SpaceLayout, Split, SplitDir, SplitNode, 
 pub const LAYOUT_MAX_BYTES: usize = 256 * 1024;
 /// The most nodes on one path from the root to a tile.
 pub const LAYOUT_MAX_DEPTH: usize = 64;
-const SUPPORTED_VERSION: u32 = 1;
+/// The version the daemon writes.
+pub const CURRENT_VERSION: u32 = 2;
+/// The version before the follow-active tab. The daemon reads it and migrates it.
+const FIRST_VERSION: u32 = 1;
+
+fn supported_version(version: u64) -> bool {
+    version == u64::from(FIRST_VERSION) || version == u64::from(CURRENT_VERSION)
+}
 
 /// Why a layout, or a change to it, was refused. The text is shown to the user.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +56,7 @@ impl fmt::Display for LayoutError {
             LayoutError::UnsupportedVersion(version) => {
                 write!(
                     f,
-                    "layout version {version} isn't supported (expected {SUPPORTED_VERSION})"
+                    "layout version {version} isn't supported (expected {FIRST_VERSION} or {CURRENT_VERSION})"
                 )
             }
             LayoutError::TooLarge(bytes) => {
@@ -118,14 +125,15 @@ impl From<InvalidId> for LayoutError {
     }
 }
 
-/// A new layout with a single empty tile, used until the first change is accepted.
+/// A new layout with a single tile holding the follow-active tab, used until the first change is
+/// accepted.
 pub fn default_layout() -> SpaceLayout {
     SpaceLayout {
-        version: SUPPORTED_VERSION,
+        version: CURRENT_VERSION,
         root: SplitNode::Tile(Tile {
             id: TileId::main(),
-            panels: Vec::new(),
-            active: None,
+            panels: vec![PanelId::active_terminal()],
+            active: Some(PanelId::active_terminal()),
             extra: Map::new(),
         }),
         groups: Value::Array(Vec::new()),
@@ -145,9 +153,10 @@ pub fn parse_layout(value: &Value) -> Result<SpaceLayout, LayoutError> {
             .as_u64()
             .ok_or_else(|| LayoutError::Malformed("version must be a whole number".to_string()))?,
     };
-    if version != u64::from(SUPPORTED_VERSION) {
+    if !supported_version(version) {
         return Err(LayoutError::UnsupportedVersion(version));
     }
+    let version = u32::try_from(version).map_err(|_| LayoutError::UnsupportedVersion(version))?;
     let root = object
         .get("root")
         .ok_or_else(|| LayoutError::Malformed("root is missing".to_string()))?;
@@ -160,7 +169,7 @@ pub fn parse_layout(value: &Value) -> Result<SpaceLayout, LayoutError> {
         extra.remove(known);
     }
     Ok(SpaceLayout {
-        version: SUPPORTED_VERSION,
+        version,
         root: parse_node(root, 1)?,
         groups,
         extra,
@@ -250,11 +259,11 @@ fn parse_node(value: &Value, depth: usize) -> Result<SplitNode, LayoutError> {
     }
 }
 
-/// Checks everything the daemon requires of a layout: version 1, at most [`LAYOUT_MAX_BYTES`]
+/// Checks everything the daemon requires of a layout: version 1 or 2, at most [`LAYOUT_MAX_BYTES`]
 /// encoded, at most [`LAYOUT_MAX_DEPTH`] deep, finite ratios strictly between 0 and 1, unique
 /// tile IDs and unique panel IDs, and an active panel that matches each tile's panels.
 pub fn validate_layout(layout: &SpaceLayout) -> Result<(), LayoutError> {
-    if layout.version != SUPPORTED_VERSION {
+    if !supported_version(u64::from(layout.version)) {
         return Err(LayoutError::UnsupportedVersion(u64::from(layout.version)));
     }
     check_node(&layout.root, 1, &mut BTreeSet::new(), &mut BTreeSet::new())?;
@@ -412,6 +421,11 @@ pub enum LayoutOp {
     RemovePanel {
         panel: PanelId,
     },
+    /// The daemon's one-time change of a version 1 layout to version 2: when no tab ID in the
+    /// tree starts with `.`, it adds the follow-active tab like [`LayoutOp::AddPanel`] into the
+    /// first tile (active only when that tile shows nothing); then the version becomes 2. On a
+    /// version 2 layout it changes nothing. Clients can't send it.
+    Migrate,
 }
 
 /// The result of [`apply_ops`].
@@ -504,6 +518,14 @@ pub fn touched_with_origins(
             if let Some(source) = tile_holding(&layout.root, panel) {
                 touched.insert(FieldPath::TilePanels(source.id.clone()));
                 touched.insert(FieldPath::TileActive(source.id.clone()));
+            }
+        }
+        LayoutOp::Migrate => {
+            if let Some(target) = migration_target(layout) {
+                touched.insert(FieldPath::TilePanels(target.id.clone()));
+                if target.active.is_none() {
+                    touched.insert(FieldPath::TileActive(target.id.clone()));
+                }
             }
         }
     }
@@ -610,8 +632,36 @@ fn apply_op(layout: &mut SpaceLayout, op: &LayoutOp) -> Result<(), LayoutError> 
                 remove_panel(tile, panel);
             }
         }
+        LayoutOp::Migrate => migrate(layout),
     }
     Ok(())
+}
+
+/// The tile a migration adds the follow-active tab to: the first tile in tree order, when the
+/// layout is version 1 and no tab ID in it starts with `.`.
+fn migration_target(layout: &SpaceLayout) -> Option<&Tile> {
+    let mut flat = Flat::default();
+    flatten(&layout.root, &mut flat);
+    let has_terminal_tab = flat
+        .tiles
+        .values()
+        .flat_map(|tile| &tile.panels)
+        .any(|panel| panel.as_str().starts_with('.'));
+    (layout.version == FIRST_VERSION && !has_terminal_tab).then(|| first_tile(&layout.root))
+}
+
+fn migrate(layout: &mut SpaceLayout) {
+    if let Some(target) = migration_target(layout).map(|tile| tile.id.clone()) {
+        if let Some(tile) = find_tile_mut(&mut layout.root, &target) {
+            tile.panels.push(PanelId::active_terminal());
+            if tile.active.is_none() {
+                tile.active = Some(PanelId::active_terminal());
+            }
+        }
+    }
+    if layout.version == FIRST_VERSION {
+        layout.version = CURRENT_VERSION;
+    }
 }
 
 fn split_tile(

@@ -214,7 +214,7 @@ fn model_tile(id: &str) -> SplitNode {
 /// The bytes of a two-tile layout with the given ratio, as someone else would write them.
 fn outside_layout(ratio: f64) -> Vec<u8> {
     let layout = SpaceLayout {
-        version: 1,
+        version: 2,
         root: SplitNode::Split(combined::model::Split {
             dir: SplitDir::H,
             ratio,
@@ -418,6 +418,68 @@ fn daemon_restart_restores_identical_layout() {
     let after = watch_space(&mut client, &space, 1);
     assert_eq!(after.root, before.root);
     assert_eq!(after.error, None);
+}
+
+#[test]
+fn a_fresh_space_starts_with_the_follow_active_tab() {
+    let env = Env::new(HOUR);
+    let mut client = env.client();
+    let snapshot = env.watch(&mut client, 1);
+    assert_eq!(snapshot.layout_revision, 0);
+    assert_eq!(snapshot.error, None);
+    assert_eq!(
+        snapshot.root,
+        LayoutNode::Tile {
+            id: "main".to_string(),
+            panels: vec![".active-terminal".to_string()],
+            active: Some(".active-terminal".to_string()),
+        }
+    );
+    assert_eq!(env.writes(), 0);
+    assert!(env.store.bytes(&env.space, LAYOUT_FILE).is_none());
+}
+
+#[test]
+fn terminal_tabs_survive_a_daemon_restart() {
+    let pinned = ".terminal/instance/7";
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = || -> Arc<FsFileStore> { Arc::new(FsFileStore::with_fallback(&fallback)) };
+    refuse_default_herdr_core(&fallback, &scratch);
+    let seed = |_: &_, backend: &_| seed_project_terminal(backend, &scratch);
+
+    let mut first = layout_server(&scratch, "a", store(), HOUR, seed);
+    refuse_default_herdr_core(&first.socket, &scratch);
+    let space = first.work.to_str().unwrap().to_string();
+    let mut client = WireClient::open(&first.socket).0;
+    watch_space(&mut client, &space, 1);
+    let mut ops = split_main();
+    ops.push(LayoutOp::AddPanel {
+        panel: pinned.to_string(),
+        tile: Some("side".to_string()),
+    });
+    send_mutate(&mut client, &space, 2, 0, ops);
+    let before = expect_layout(&client, Some(2));
+    assert_eq!(
+        tile_panels(&before.root, "side"),
+        Some(vec![pinned.to_string()])
+    );
+    assert!(first.server.shutdown().is_none());
+    drop(client);
+
+    let second = layout_server(&scratch, "b", store(), HOUR, seed);
+    let mut client = WireClient::open(&second.socket).0;
+    let after = watch_space(&mut client, &space, 1);
+    assert_eq!(after.root, before.root);
+    assert_eq!(after.error, None);
+    assert_eq!(
+        tile_panels(&after.root, "main"),
+        Some(vec![".active-terminal".to_string()])
+    );
+    assert_eq!(
+        tile_panels(&after.root, "side"),
+        Some(vec![pinned.to_string()])
+    );
 }
 
 #[test]

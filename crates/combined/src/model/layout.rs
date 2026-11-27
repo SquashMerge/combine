@@ -6,6 +6,9 @@ use serde_json::{Map, Value};
 
 const MAX_ID_BYTES: usize = 256;
 
+/// The tab that shows each client's active terminal of the space.
+pub const ACTIVE_TERMINAL_TAB: &str = ".active-terminal";
+
 /// Why a tile or panel ID was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidId {
@@ -67,6 +70,11 @@ impl PanelId {
         let text = text.into();
         check_id(&text)?;
         Ok(PanelId(text))
+    }
+
+    /// The follow-active tab's ID.
+    pub fn active_terminal() -> PanelId {
+        PanelId(ACTIVE_TERMINAL_TAB.to_string())
     }
 
     pub fn as_str(&self) -> &str {

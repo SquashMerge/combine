@@ -1325,13 +1325,28 @@ impl Server {
                             };
                         self.layouts.apply_read(&space, read, self.clock.now());
                     }
-                    LayoutEffect::Write { space, bytes, .. } => {
+                    LayoutEffect::Write {
+                        space,
+                        bytes,
+                        project_only,
+                        ..
+                    } => {
                         // The file must still be what the daemon last saw. The window between
                         // this read and the write's rename can't be closed: an outside write
-                        // landing in it is overwritten.
+                        // landing in it is overwritten. A project-only write also needs the
+                        // file to be the project's own, not the fallback copy.
                         let expected = FileMark::from(self.layouts.known_hash(&space));
                         let current = self.store.read(&space, LAYOUT_FILE, LAYOUT_MAX_BYTES).await;
-                        if !expected.matches(&current) {
+                        let unchanged = if project_only {
+                            expected.matches_project(&current)
+                        } else {
+                            expected.matches(&current)
+                        };
+                        if !unchanged {
+                            if project_only && expected.matches(&current) {
+                                self.layouts.apply_write_held(&space, self.clock.now());
+                                continue;
+                            }
                             let read = match current {
                                 Ok(file) => LayoutRead::from(file),
                                 Err(error) => LayoutRead::from(error),
@@ -1340,8 +1355,17 @@ impl Server {
                                 .apply_write_conflict(&space, read, self.clock.now());
                             continue;
                         }
-                        let written = match self.store.write(&space, LAYOUT_FILE, bytes).await {
+                        let written = if project_only {
+                            self.store.write_project(&space, LAYOUT_FILE, bytes).await
+                        } else {
+                            self.store.write(&space, LAYOUT_FILE, bytes).await
+                        };
+                        let written = match written {
                             Ok(outcome) => LayoutWritten::from(outcome),
+                            Err(_) if project_only => {
+                                self.layouts.apply_write_held(&space, self.clock.now());
+                                continue;
+                            }
                             Err(error) => LayoutWritten::from(error),
                         };
                         self.layouts.apply_write(&space, written, self.clock.now());

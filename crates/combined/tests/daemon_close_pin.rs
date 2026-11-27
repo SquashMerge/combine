@@ -15,7 +15,7 @@ use combine_protocol::{
     PanelState, PinPanel, RequestId, WatchTerminals,
 };
 use combined::core::{LayoutTiming, LAYOUT_FILE, PIN_UNDONE, SCRATCH_TTL_MS};
-use combined::model::Lifetime;
+use combined::model::{Lifetime, ACTIVE_TERMINAL_TAB};
 use combined::ports::StoreError;
 use combined::rpc::ServeOptions;
 use daemon_support::{wait_until, WireClient};
@@ -71,7 +71,8 @@ fn unthrottled_rig() -> PanelRig {
     }))
 }
 
-/// The panel IDs the tiles of `layout` name, in tree order.
+/// The panel IDs the tiles of `layout` name, in tree order. The default layout's follow-active
+/// tab isn't one of the panels these tests close and pin, so it is left out.
 fn names(layout: &Layout) -> Vec<String> {
     fn walk(node: &Value, into: &mut Vec<String>) {
         if node["type"] == "tile" {
@@ -80,7 +81,8 @@ fn names(layout: &Layout) -> Vec<String> {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|panel| panel.as_str().unwrap().to_string()),
+                    .map(|panel| panel.as_str().unwrap().to_string())
+                    .filter(|panel| panel != ACTIVE_TERMINAL_TAB),
             );
         } else {
             walk(&node["a"], into);
@@ -112,7 +114,7 @@ fn active_of(layout: &Layout) -> Vec<String> {
     found
 }
 
-/// The layout as `layout.json` stores it: the IDs its tiles name.
+/// The layout as `layout.json` stores it: the IDs its tiles name, without the follow-active tab.
 fn stored_names(rig: &PanelRig) -> Option<Vec<String>> {
     let bytes = rig.bytes(LAYOUT_FILE)?;
     let layout: Value = serde_json::from_slice(&bytes).unwrap();
@@ -124,7 +126,8 @@ fn stored_names(rig: &PanelRig) -> Option<Vec<String>> {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|panel| panel.as_str().unwrap().to_string()),
+                    .map(|panel| panel.as_str().unwrap().to_string())
+                    .filter(|panel| panel != ACTIVE_TERMINAL_TAB),
             );
         } else {
             walk(&node["a"], into);

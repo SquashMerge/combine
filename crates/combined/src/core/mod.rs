@@ -25,7 +25,8 @@ pub use effects::{BackendCommand, ConnectionId, Effect, RefusedCommand};
 pub use layout::{
     apply_ops, default_layout, diff_fields, encode_layout, first_tile, identity_origins,
     parse_layout, target_tile, tile_holding, touched_with_origins, validate_layout, AppliedOps,
-    FieldPath, LayoutError, LayoutOp, Origins, SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
+    FieldPath, LayoutError, LayoutOp, Origins, SplitKey, CURRENT_VERSION, LAYOUT_MAX_BYTES,
+    LAYOUT_MAX_DEPTH,
 };
 pub use layout_sync::{
     dropped_notice, layout_snapshot, ops_from_wire, DroppedBatch, LayoutEffect, LayoutRead,

@@ -53,10 +53,18 @@ pub fn split(ratio: f64, a: SplitNode, b: SplitNode) -> SplitNode {
 
 pub fn layout(root: SplitNode) -> SpaceLayout {
     SpaceLayout {
-        version: 1,
+        version: 2,
         root,
         groups: json!([]),
         extra: Map::new(),
+    }
+}
+
+/// A version 1 layout, as written before the follow-active tab.
+pub fn layout_v1(root: SplitNode) -> SpaceLayout {
+    SpaceLayout {
+        version: 1,
+        ..layout(root)
     }
 }
 
@@ -89,6 +97,16 @@ pub struct Sim {
     pub layouts: Layouts,
     pub disk: BTreeMap<SpaceId, Vec<u8>>,
     pub writes: Vec<(SpaceId, Vec<u8>, usize)>,
+    /// The bytes of each write the sync asked to make to the project only.
+    pub project_only_writes: Vec<Vec<u8>>,
+    /// The fallback copy of each space, which an ordinary write to a project that can't be
+    /// written lands in.
+    pub fallback: BTreeMap<SpaceId, Vec<u8>>,
+    /// The project refuses writes. Reads still see `disk` as the project's file, unless
+    /// `read_from_fallback` is set.
+    pub project_refuses: bool,
+    /// Reads report `disk` as the fallback copy.
+    pub read_from_fallback: bool,
     pub reads: usize,
     /// Outcomes to give the next writes instead of storing them.
     pub write_outcomes: VecDeque<LayoutWritten>,
@@ -102,6 +120,10 @@ impl Sim {
             layouts: Layouts::new(timing),
             disk: BTreeMap::new(),
             writes: Vec::new(),
+            project_only_writes: Vec::new(),
+            fallback: BTreeMap::new(),
+            project_refuses: false,
+            read_from_fallback: false,
             reads: 0,
             write_outcomes: VecDeque::new(),
             failing_reads: None,
@@ -148,7 +170,7 @@ impl Sim {
                             (None, Some(bytes)) => LayoutRead::Found {
                                 hash: hash(bytes),
                                 bytes: bytes.clone(),
-                                read_only: false,
+                                read_only: self.read_from_fallback,
                             },
                         };
                         self.layouts.apply_read(&space, read, now);
@@ -157,14 +179,29 @@ impl Sim {
                         space,
                         bytes,
                         op_count,
+                        project_only,
                     } => {
+                        if project_only {
+                            // As the server does: a fallback copy or a refusing project holds
+                            // the migration, and nothing is written.
+                            if self.read_from_fallback || self.project_refuses {
+                                self.layouts.apply_write_held(&space, now);
+                                continue;
+                            }
+                            self.project_only_writes.push(bytes.clone());
+                        }
                         self.writes.push((space.clone(), bytes.clone(), op_count));
                         let outcome = self.write_outcomes.pop_front().unwrap_or_else(|| {
+                            let read_only = self.project_refuses && !project_only;
                             let outcome = LayoutWritten::Ok {
                                 hash: hash(&bytes),
-                                read_only: false,
+                                read_only,
                             };
-                            self.disk.insert(space.clone(), bytes);
+                            if read_only {
+                                self.fallback.insert(space.clone(), bytes);
+                            } else {
+                                self.disk.insert(space.clone(), bytes);
+                            }
                             outcome
                         });
                         self.layouts.apply_write(&space, outcome, now);

@@ -1174,6 +1174,47 @@ fn stale_or_future_resize_is_stale_generation() {
 }
 
 #[test]
+fn a_non_owner_resize_is_applied_on_its_grant() {
+    let mut rig = Rig::new();
+    let c = rig.core.connect();
+    let id = rig.open(c, 1, false);
+    rig.effects();
+    rig.pull(c);
+    assert_eq!(rig.owner(1), None);
+    let generation = rig.generation(1);
+
+    rig.send(
+        c,
+        ClientMessage::Resize(Resize {
+            attachment: id,
+            cols: 120,
+            rows: 40,
+            ownership_generation: generation,
+        }),
+    );
+    assert!(rig.pull(c).is_empty());
+    assert!(
+        rig.commands()
+            .iter()
+            .all(|command| !matches!(command, BackendCommand::Resize { .. })),
+        "a non-owner's resize reached the terminal before its grant"
+    );
+
+    rig.request_ownership(c, id);
+    assert_eq!(rig.owner(1), Some(id));
+    let commands = rig.commands();
+    assert!(
+        commands.contains(&BackendCommand::Resize {
+            ownership: rig.generation(1),
+            attachment: id,
+            cols: 120,
+            rows: 40
+        }),
+        "{commands:?}"
+    );
+}
+
+#[test]
 fn watch_only_errors() {
     let mut rig = Rig::new();
     let c = rig.core.connect();

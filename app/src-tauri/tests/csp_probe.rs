@@ -21,7 +21,7 @@ use support::{write_hosts, PanelDaemon, ScratchDir};
 const HOST: &str = "00000000-0000-4000-8000-000000000048";
 const MERMAID: &str = "probe-mermaid";
 const MARKDOWN: &str = "probe-markdown";
-const LAYOUT: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,"a":{"type":"tile","id":"a","panels":["probe-mermaid"],"active":"probe-mermaid"},"b":{"type":"tile","id":"b","panels":["probe-markdown"],"active":"probe-markdown"}},"groups":[]}"#;
+const LAYOUT: &str = r#"{"version":2,"root":{"type":"split","dir":"h","ratio":0.5,"a":{"type":"tile","id":"a","panels":["probe-mermaid"],"active":"probe-mermaid"},"b":{"type":"tile","id":"b","panels":["probe-markdown"],"active":"probe-markdown"}},"groups":[]}"#;
 
 const OUT_ENV: &str = "COMBINE_CSP_PROBE_OUT";
 const DATA_ENV: &str = "COMBINE_CSP_PROBE_DATA";
