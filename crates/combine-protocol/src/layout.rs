@@ -23,9 +23,6 @@ pub enum SplitDirection {
 pub struct Ratio(f64);
 
 impl Ratio {
-    /// An even split. It stands in where a ratio can't be finite.
-    pub const HALF: Ratio = Ratio(0.5);
-
     /// `None` for NaN and infinities.
     pub fn new(value: f64) -> Option<Ratio> {
         value.is_finite().then_some(Ratio(value))

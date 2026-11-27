@@ -415,6 +415,7 @@ fn daemon_restart_restores_identical_layout() {
     drop(client);
 
     let second = layout_server(&scratch, "b", store(), HOUR, seed);
+    refuse_default_herdr_core(&second.socket, &scratch);
     let mut client = WireClient::open(&second.socket).0;
     let after = watch_space(&mut client, &space, 1);
     assert_eq!(after.root, before.root);
@@ -469,6 +470,7 @@ fn terminal_tabs_survive_a_daemon_restart() {
     drop(client);
 
     let second = layout_server(&scratch, "b", store(), HOUR, seed);
+    refuse_default_herdr_core(&second.socket, &scratch);
     let mut client = WireClient::open(&second.socket).0;
     let after = watch_space(&mut client, &space, 1);
     assert_eq!(after.root, before.root);
@@ -645,6 +647,37 @@ fn client_that_never_reads_layout_replies_is_disconnected() {
     assert!(
         wait_until(WAIT, || stats.connections() == 0),
         "the daemon kept a client that never reads its layout replies"
+    );
+}
+
+/// The same cap holds for replies: each `watch_layout` of the watched space is answered with a
+/// `layout` the client never reads.
+#[test]
+fn client_that_never_reads_layout_answers_is_disconnected() {
+    let env = Env::new(HOUR);
+    let mut client = env.client();
+    env.watch(&mut client, 1);
+    let stats = env.server.server.stats();
+    assert_eq!(stats.connections(), 1);
+
+    let mut frame = Vec::new();
+    combine_protocol::write_message(
+        &mut frame,
+        &ClientMessage::WatchLayout(WatchLayout {
+            request: RequestId(2),
+            space: env.name(),
+        }),
+    )
+    .unwrap();
+    let burst = frame.repeat(1_000);
+    for _ in 0..200 {
+        if client.try_send_bytes(&burst).is_err() {
+            break;
+        }
+    }
+    assert!(
+        wait_until(WAIT, || stats.connections() == 0),
+        "the daemon kept a client that never reads its layout answers"
     );
 }
 

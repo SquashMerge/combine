@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LayoutPort, PanelPort } from '../ipc/port';
-import type { HostsSnapshot } from '../model/hosts';
+import { type HostsSnapshot, isConnected } from '../model/hosts';
 import { type DecimalU64, type HostId, compareDecimalU64 } from '../model/ids';
 import type { LayoutEvent, LayoutSnapshot, SplitDirection } from '../model/layout';
 import { LayoutQueue } from '../model/layoutQueue';
@@ -9,7 +9,7 @@ import { type SpaceKey, spaceKeyId } from '../model/space';
 
 const NOT_CONNECTED = 'not connected';
 
-export interface SpaceLayout {
+export interface SpaceLayoutView {
   snapshot: LayoutSnapshot | null;
   notice: string | null;
   error: string | null;
@@ -48,10 +48,8 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function isConnected(hosts: HostsSnapshot | null, hostId: HostId): boolean {
-  return (hosts?.hosts ?? []).some(
-    (host) => host.hostId === hostId && host.connection.kind === 'connected',
-  );
+function hostConnected(hosts: HostsSnapshot | null, hostId: HostId): boolean {
+  return (hosts?.hosts ?? []).some((host) => host.hostId === hostId && isConnected(host));
 }
 
 /**
@@ -65,7 +63,7 @@ export function useSpaceLayout(
   selected: SpaceKey | null,
   newTileId?: () => string,
   panelPort?: PanelPort,
-): SpaceLayout {
+): SpaceLayoutView {
   const [held, setHeld] = useState<Held | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +78,9 @@ export function useSpaceLayout(
   const panelsSessionRef = useRef(0);
   const watched = useRef<SpaceKey | null>(null);
   const watchRequest = useRef<DecimalU64 | null>(null);
+  // Errors that arrive before the watch's request ID is known, by request, so only the watch's
+  // own error is shown once it is.
+  const earlyErrors = useRef(new Map<DecimalU64, string>());
   // Bumped whenever the watch is replaced, dropped or unmounted, so a late watch reply from an
   // older watch is ignored.
   const watchGeneration = useRef(0);
@@ -87,7 +88,7 @@ export function useSpaceLayout(
 
   const ready = listening === port && (panelPort === undefined || panelsListening === panelPort);
   const watchHost =
-    ready && selected !== null && isConnected(hosts, selected.hostId) ? selected.hostId : null;
+    ready && selected !== null && hostConnected(hosts, selected.hostId) ? selected.hostId : null;
   const watchPath = watchHost === null ? null : (selected?.path ?? null);
 
   useEffect(() => {
@@ -115,6 +116,7 @@ export function useSpaceLayout(
         ...(newTileId === undefined ? {} : { newTileId }),
       });
       watchRequest.current = null;
+      earlyErrors.current.clear();
       setHeld(null);
       setNotice(null);
       setError(null);
@@ -122,7 +124,11 @@ export function useSpaceLayout(
       const generation = watchGeneration.current;
       port.watchLayout(next.hostId, next.path).then(
         (request) => {
-          if (watchGeneration.current === generation) watchRequest.current = request;
+          if (watchGeneration.current !== generation) return;
+          watchRequest.current = request;
+          const early = earlyErrors.current.get(request);
+          earlyErrors.current.clear();
+          if (early !== undefined) setError(early);
         },
         (cause: unknown) => {
           if (watchGeneration.current === generation) setError(errorText(cause));
@@ -180,9 +186,8 @@ export function useSpaceLayout(
         }
         case 'error':
           queue.current?.onError(event.request, event.code, event.message);
-          if (watchRequest.current === null || event.request === watchRequest.current) {
-            setError(event.message);
-          }
+          if (watchRequest.current === null) earlyErrors.current.set(event.request, event.message);
+          else if (event.request === watchRequest.current) setError(event.message);
           return;
         case 'disconnected':
           queue.current?.onDisconnected();

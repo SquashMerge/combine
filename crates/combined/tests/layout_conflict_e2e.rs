@@ -478,13 +478,21 @@ fn held_change_is_written_once_the_file_can_be_read() {
         1
     );
 
-    // Someone fixes the file: the default layout, so the held split still applies.
-    unlock_file(&file);
+    // Someone fixes the file: the default layout, so the held split still applies. The rename
+    // replaces the locked file, which is never unlocked: a read of it unlocked would find the
+    // garbage and push it as malformed. A push may still come from a re-read of the locked
+    // file before the rename, so the first push without an error is the one checked.
     outside_write(
         &server.work,
         r#"{"version":1,"root":{"type":"tile","id":"main","panels":[],"active":null},"groups":[]}"#,
     );
-    let push = layout_reply(&client, None);
+    let deadline = std::time::Instant::now() + PUSH_WAIT;
+    let push = loop {
+        let push = layout_reply(&client, None);
+        if push.error.is_none() || std::time::Instant::now() >= deadline {
+            break push;
+        }
+    };
     assert_eq!(push.error, None);
     assert_eq!(push.dropped, None);
     assert_eq!(ratio_of(&push.root), 0.5);

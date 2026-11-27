@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use combined::core::{
-    apply_ops, default_layout, diff_fields, identity_origins, validate_layout, AppliedOps,
-    FieldPath, LayoutError, LayoutOp, SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
+    apply_ops, default_layout, diff_fields, encode_layout, identity_origins, validate_layout,
+    AppliedOps, FieldPath, LayoutError, LayoutOp, SplitKey, LAYOUT_MAX_BYTES, LAYOUT_MAX_DEPTH,
 };
 use combined::model::{PanelId, SpaceLayout, Split, SplitDir, SplitNode, Tile, TileId};
 use serde_json::{json, Map};
@@ -375,11 +375,18 @@ fn ops_exceeding_depth_rejected() {
     );
 }
 
+/// `layout` with its groups padded so it encodes to `size` bytes.
+fn padded_to(layout: &SpaceLayout, size: usize) -> SpaceLayout {
+    let mut padded = layout.clone();
+    padded.groups = json!([""]);
+    let bare = encode_layout(&padded).unwrap().len();
+    padded.groups = json!(["x".repeat(size - bare)]);
+    assert_eq!(encode_layout(&padded).unwrap().len(), size);
+    padded
+}
+
 #[test]
 fn ops_exceeding_size_cap_rejected() {
-    let mut big = default_layout();
-    big.groups = json!(["x".repeat(LAYOUT_MAX_BYTES - 1024)]);
-    validate_layout(&big).unwrap();
     let op = LayoutOp::SplitTile {
         tile: t("main"),
         dir: SplitDir::H,
@@ -387,9 +394,21 @@ fn ops_exceeding_size_cap_rejected() {
         ratio: 0.5,
         panel: None,
     };
-    assert!(apply(&big, std::slice::from_ref(&op)).is_ok());
-    big.groups = json!(["x".repeat(LAYOUT_MAX_BYTES - 100)]);
-    assert!(matches!(apply(&big, &[op]), Err(LayoutError::TooLarge(_))));
+    let small = padded_to(&default_layout(), 1_000);
+    let grown = encode_layout(&apply(&small, std::slice::from_ref(&op)).unwrap().layout)
+        .unwrap()
+        .len()
+        - 1_000;
+    // The op takes a valid layout to exactly the cap, and one byte more is over it.
+    let at_cap = padded_to(&default_layout(), LAYOUT_MAX_BYTES - grown);
+    let applied = apply(&at_cap, std::slice::from_ref(&op)).unwrap().layout;
+    assert_eq!(encode_layout(&applied).unwrap().len(), LAYOUT_MAX_BYTES);
+    let over = padded_to(&default_layout(), LAYOUT_MAX_BYTES - grown + 1);
+    validate_layout(&over).unwrap();
+    assert_eq!(
+        apply(&over, &[op]).unwrap_err(),
+        LayoutError::TooLarge(LAYOUT_MAX_BYTES + 1)
+    );
 }
 
 #[test]
@@ -485,6 +504,26 @@ fn diff_fields_reports_ratio_active_panels_structure() {
         .unwrap()
         .layout;
     assert!(diff_fields(&disk, &closed).contains(&FieldPath::Structure));
+
+    let mut turned = two_tiles();
+    let SplitNode::Split(root) = &mut turned.root else {
+        panic!("split")
+    };
+    root.dir = SplitDir::V;
+    assert_eq!(
+        diff_fields(&disk, &turned),
+        [FieldPath::Structure].into_iter().collect()
+    );
+
+    let mut swapped = two_tiles();
+    let SplitNode::Split(root) = &mut swapped.root else {
+        panic!("split")
+    };
+    std::mem::swap(&mut root.a, &mut root.b);
+    assert_eq!(
+        diff_fields(&disk, &swapped),
+        [FieldPath::Structure].into_iter().collect()
+    );
 
     let mut grouped = two_tiles();
     grouped.groups = json!([1]);

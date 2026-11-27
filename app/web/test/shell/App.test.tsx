@@ -350,6 +350,32 @@ describe('App', () => {
         fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
         await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
       });
+
+      it("keeps a selection's failed write shown when its other write succeeds later", async () => {
+        class SplitOutcomes extends DeferredClientStatePort {
+          override setSpaceState(...args: Parameters<DeferredClientStatePort['setSpaceState']>): Promise<void> {
+            void super.setSpaceState(...args);
+            return Promise.reject(new Error('disk full'));
+          }
+
+          override setLastSpace(...args: Parameters<DeferredClientStatePort['setLastSpace']>): Promise<void> {
+            void super.setLastSpace(...args);
+            return new Promise((done) => setTimeout(done, 5));
+          }
+        }
+        const port = new SplitOutcomes();
+        render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={new MemoryHostsPort(sample())} clientStatePort={port} />);
+        await screen.findByRole('navigation', { name: 'Spaces' });
+        await waitFor(() => expect(port.loads).toHaveLength(2));
+        await act(async () => port.resolve(HOST_A, defaultClientState()));
+        await act(async () => port.resolve(HOST_B, defaultClientState()));
+        fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+        await act(async () => new Promise((done) => setTimeout(done, 20)));
+        fireEvent.click(document.querySelector('[data-term-id="t1"] button') as Element);
+        expect((await screen.findByRole('alert')).textContent).toContain('Cannot save client state for mac: disk full');
+        await act(async () => new Promise((done) => setTimeout(done, 20)));
+        expect(screen.getByRole('alert').textContent).toContain('Cannot save client state for mac: disk full');
+      });
     });
   });
 });

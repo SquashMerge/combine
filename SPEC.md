@@ -251,7 +251,7 @@ Every machine that runs agents runs a daemon that listens only on a local Unix s
 - **Version:** one integer, starting at 1.
   - Any change to the wire bumps it: a new message type, frame kind, enum value or field, or a changed or removed one.
   - The daemon accepts only its own version, with no negotiation.
-  - **No compatibility before the first release.** Until then the client and the daemon ship together, and the wire keeps nothing for an older peer's sake: an optional field is optional because a message may omit it, not so that an older peer can read it. The policy is revisited at release.
+  - **No compatibility before the first release.** Until then the client and the daemon ship together, and the wire keeps nothing for an older peer's sake: an optional field is optional because a message may omit it, not so that an older peer can read it. The policy is revisited at release, along with the decoders it allows: a layout node or op decodes through one flat struct, so a field that belongs to another kind is still type-checked, which an exact version match makes harmless.
   - The frame header, `hello`, `welcome` and the `version_mismatch` error never change, so any two versions can tell each other they differ.
 - **Handshake:** the client's first frame is `hello { protocol_version }`. The daemon answers `welcome { protocol_version, host_id }`. If the versions differ, it instead sends `error` with code `version_mismatch` and the message `protocol version mismatch: client <c>, daemon <d>`, then closes. A version 7 client meeting a version 6 daemon, for example, reads `protocol version mismatch: client 7, daemon 6`. A client never shows the daemon's text raw. Before showing daemon text, or captured `ssh` stderr, it turns control characters and the bidirectional formatting characters U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069 into spaces, collapses each run of whitespace into one space, trims both ends, and cuts the result after 256 characters, marking the cut with `…`. The client's own message, which says what happened and what to do, is shown whole, with that trimmed text beside it. A `version_mismatch` error is shown as `protocol version mismatch: client <c>, daemon <d>`, with both numbers taken from its message; if they can't be read, the daemon's version shows as `unknown`.
 - **Client to daemon:**
@@ -647,7 +647,7 @@ A rail of spaces grouped by host swaps the whole screen; a terminal navigator sw
   - **Hosts:** "Retry <host>" for each host whose connection failed.
   - While the layout is held or read-only, there are no panel actions, and no panel that sits in no tile. There is no new-terminal or open-folder entry yet, and groups and other actions come with their milestones.
 - **Matching:** a case-insensitive subsequence match over the entry's label and detail text. A match scores +16 at the first character, +8 after a separator and +4 for each consecutive character, and loses 1 for each skipped character between two matched characters. The time to score an entry is proportional to the query's length times the text's length. Ties sort by kind (panel actions, spaces, terminals, panels, hosts), then label. An empty query lists entries in registry order. At most 50 results show.
-- A space that is read-only shows a `read-only` mark in the rail.
+- A space that is read-only shows a `read-only` mark in the rail. The client learns this only from the space's `layout`, so a space it no longer watches keeps the last mark it saw until it is watched again.
 
 **Panel tabs**
 

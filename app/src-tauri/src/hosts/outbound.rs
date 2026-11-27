@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use combine_protocol::{ClientMessage, HostId, RequestId};
+use combine_protocol::{ClientMessage, HostId, RequestId, WireMessage};
 
 /// How many request kinds a slot remembers. The oldest is evicted first.
 const MAX_KINDS: usize = 1024;
@@ -32,16 +32,33 @@ pub enum Outgoing {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotConnected;
+/// Why a message wasn't queued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    NotConnected,
+    /// It can't be encoded as one frame. It is refused here, where its sender hears of it,
+    /// rather than stopping the writer with its request unanswered.
+    Unencodable(String),
+}
 
-impl fmt::Display for NotConnected {
+impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("not connected")
+        match self {
+            SendError::NotConnected => f.write_str("not connected"),
+            SendError::Unencodable(reason) => write!(f, "cannot send the message: {reason}"),
+        }
     }
 }
 
-impl std::error::Error for NotConnected {}
+impl std::error::Error for SendError {}
+
+/// Refuses a message the writer couldn't encode.
+fn encodable(message: &ClientMessage) -> Result<(), SendError> {
+    message
+        .encode()
+        .map(drop)
+        .map_err(|error| SendError::Unencodable(error.to_string()))
+}
 
 struct SessionSlot {
     generation: u64,
@@ -93,13 +110,18 @@ impl Outbound {
         host_id: &HostId,
         kind: RequestKind,
         build: impl FnOnce(RequestId) -> ClientMessage,
-    ) -> Result<RequestId, NotConnected> {
+    ) -> Result<RequestId, SendError> {
         let mut state = self.state();
-        let slot = state.slots.get_mut(&host_id.0).ok_or(NotConnected)?;
+        let slot = state
+            .slots
+            .get_mut(&host_id.0)
+            .ok_or(SendError::NotConnected)?;
         let request = RequestId(slot.next_request);
+        let message = build(request);
+        encodable(&message)?;
         slot.tx
-            .send(Outgoing::Message(build(request)))
-            .map_err(|_| NotConnected)?;
+            .send(Outgoing::Message(message))
+            .map_err(|_| SendError::NotConnected)?;
         slot.next_request += 1;
         slot.kinds.insert(request.0, kind);
         while slot.kinds.len() > MAX_KINDS {
@@ -113,12 +135,13 @@ impl Outbound {
         &self,
         host_id: &HostId,
         message: ClientMessage,
-    ) -> Result<(), NotConnected> {
+    ) -> Result<(), SendError> {
+        encodable(&message)?;
         let state = self.state();
-        let slot = state.slots.get(&host_id.0).ok_or(NotConnected)?;
+        let slot = state.slots.get(&host_id.0).ok_or(SendError::NotConnected)?;
         slot.tx
             .send(Outgoing::Message(message))
-            .map_err(|_| NotConnected)
+            .map_err(|_| SendError::NotConnected)
     }
 
     pub fn kind_of(&self, host_id: &HostId, request: RequestId) -> Option<RequestKind> {
@@ -154,7 +177,7 @@ impl Drop for Registration {
 mod tests {
     use std::sync::mpsc;
 
-    use combine_protocol::WatchTerminals;
+    use combine_protocol::{WatchLayout, WatchTerminals, MAX_FRAME_LEN};
 
     use super::super::testing::{host_id, HOST_A};
     use super::*;
@@ -183,5 +206,38 @@ mod tests {
             outbound.kind_of(&host, last.expect("sent")),
             Some(RequestKind::Terminals)
         );
+    }
+
+    #[test]
+    fn an_unencodable_message_is_refused_and_the_slot_keeps_working() {
+        let outbound = Arc::new(Outbound::default());
+        let host = host_id(HOST_A);
+        let (tx, rx) = mpsc::channel();
+        let _registration = outbound.register(&host, tx);
+        let space = "x".repeat(MAX_FRAME_LEN as usize);
+        let refused = outbound.send(&host, RequestKind::Layout, |request| {
+            ClientMessage::WatchLayout(WatchLayout {
+                request,
+                space: space.clone(),
+            })
+        });
+        assert!(
+            matches!(refused, Err(SendError::Unencodable(_))),
+            "{refused:?}"
+        );
+        let untracked = outbound.send_untracked(
+            &host,
+            ClientMessage::WatchLayout(WatchLayout {
+                request: RequestId(9),
+                space,
+            }),
+        );
+        assert!(matches!(untracked, Err(SendError::Unencodable(_))));
+        assert!(rx.try_recv().is_err(), "nothing reached the writer");
+        let sent = outbound
+            .send(&host, RequestKind::Terminals, watch)
+            .expect("the slot still works");
+        assert_eq!(sent, RequestId(1));
+        assert_eq!(rx.try_recv(), Ok(Outgoing::Message(watch(sent))));
     }
 }

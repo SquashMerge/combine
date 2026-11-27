@@ -2,7 +2,7 @@
 //! runs the writer that the outbound channel feeds.
 
 use std::io::Write;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
@@ -12,7 +12,7 @@ use combine_protocol::{
 };
 
 use super::attachments::Attachments;
-use super::outbound::{Outbound, Outgoing, RequestKind};
+use super::outbound::{Outbound, Outgoing, Registration, RequestKind, SendError};
 use super::panels::PanelReply;
 use super::spawn::SpawnReply;
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
@@ -32,6 +32,15 @@ pub trait LayoutSink: Send + Sync {
 pub struct LivePhase {
     outbound: Arc<Outbound>,
     attachments: Arc<Attachments>,
+    opened: Option<Opened>,
+}
+
+/// The session's registered outbound slot, with `watch_terminals` queued first on it.
+struct Opened {
+    tx: Sender<Outgoing>,
+    rx: Receiver<Outgoing>,
+    registration: Registration,
+    watch: Result<RequestId, SendError>,
 }
 
 impl LivePhase {
@@ -39,6 +48,25 @@ impl LivePhase {
         LivePhase {
             outbound,
             attachments,
+            opened: None,
+        }
+    }
+
+    /// Registers the host's slot and queues `watch_terminals`. Anything sent from now on waits
+    /// in the channel until the writer starts.
+    fn open(&self, host_id: &HostId) -> Opened {
+        let (tx, rx) = mpsc::channel();
+        let registration = self.outbound.register(host_id, tx.clone());
+        let watch = self
+            .outbound
+            .send(host_id, RequestKind::Terminals, |request| {
+                ClientMessage::WatchTerminals(WatchTerminals { request })
+            });
+        Opened {
+            tx,
+            rx,
+            registration,
+            watch,
         }
     }
 }
@@ -53,6 +81,10 @@ fn writer_loop(writer: &mut (dyn Write + Send), rx: Receiver<Outgoing>) {
 }
 
 impl SessionPhase for LivePhase {
+    fn prepare(&mut self, host_id: &HostId) {
+        self.opened = Some(self.open(host_id));
+    }
+
     fn run(&mut self, io: SessionIo<'_>) -> SessionEnd {
         let SessionIo {
             host_id,
@@ -60,20 +92,22 @@ impl SessionPhase for LivePhase {
             writer,
             events,
         } = io;
-        let (tx, rx) = mpsc::channel();
-        let registration = self.outbound.register(host_id, tx.clone());
+        let Opened {
+            tx,
+            rx,
+            registration,
+            watch,
+        } = match self.opened.take() {
+            Some(opened) => opened,
+            None => self.open(host_id),
+        };
         // Panel streams stay disconnected until the first `terminals` reply names the daemon's
         // backend instance: a pinned panel must not attach or resume before it knows the
         // session's instance, whatever the registry still shows from the last session.
         let mut session: Option<u64> = None;
         thread::scope(|scope| {
             let writer_thread = scope.spawn(move || writer_loop(writer, rx));
-            let sent = self
-                .outbound
-                .send(host_id, RequestKind::Terminals, |request| {
-                    ClientMessage::WatchTerminals(WatchTerminals { request })
-                });
-            let end = if sent.is_err() {
+            let end = if watch.is_err() {
                 SessionEnd::Io("the writer stopped".to_string())
             } else {
                 loop {
@@ -206,7 +240,7 @@ mod tests {
 
     use super::super::attachments::StreamId;
     use super::super::model::{BackendView, ConfigStatus, ConnectionState, HostView, SpaceView};
-    use super::super::outbound::NotConnected;
+    use super::super::outbound::SendError;
     use super::super::registry::HostRegistry;
     use super::super::spawn::SpawnSink;
     use super::super::supervisor::HostEvents;
@@ -317,6 +351,46 @@ mod tests {
         assert_eq!(end_session(rig), SessionEnd::Closed);
     }
 
+    #[test]
+    fn a_prepared_phase_takes_sends_before_it_runs_after_watch_terminals() {
+        let attachments = Arc::new(Attachments::new(RecordingTerminalSink::new()));
+        let outbound = Arc::new(Outbound::default());
+        let host = host_id(HOST_A);
+        let mut phase = LivePhase::new(Arc::clone(&outbound), attachments);
+        phase.prepare(&host);
+        let layout = outbound
+            .send(&host, RequestKind::Layout, |request| {
+                ClientMessage::WatchLayout(WatchLayout {
+                    request,
+                    space: "/work".to_string(),
+                })
+            })
+            .expect("the slot is registered before the session runs");
+        let (client, mut daemon) = UnixStream::pair().expect("socket pair");
+        daemon.set_read_timeout(Some(WAIT)).expect("read timeout");
+        let (events, _published) = RecordingEvents::new();
+        let (done, ended) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = client.try_clone().expect("clone");
+            let mut writer = client;
+            let end = phase.run(SessionIo {
+                host_id: &host,
+                reader: &mut reader,
+                writer: &mut writer,
+                events: &*events,
+            });
+            let _ = done.send(end);
+        });
+        assert_eq!(watch_request(read_client(&mut daemon)), RequestId(1));
+        match read_client(&mut daemon) {
+            ClientMessage::WatchLayout(watch) => assert_eq!(watch.request, layout),
+            other => panic!("expected watch_layout, got {other:?}"),
+        }
+        daemon.shutdown(Shutdown::Both).expect("close");
+        let end = ended.recv_timeout(WAIT).expect("the session ends");
+        assert_eq!(end, SessionEnd::Closed);
+    }
+
     struct RegistryEvents(Mutex<HostRegistry>);
 
     impl HostEvents for RegistryEvents {
@@ -385,7 +459,7 @@ mod tests {
         let result = outbound.send(&host_id(HOST_A), RequestKind::Terminals, |request| {
             ClientMessage::WatchTerminals(WatchTerminals { request })
         });
-        assert_eq!(result, Err(NotConnected));
+        assert_eq!(result, Err(SendError::NotConnected));
     }
 
     #[test]
@@ -398,7 +472,7 @@ mod tests {
         let result = outbound.send(&host_id(HOST_A), RequestKind::Terminals, |request| {
             ClientMessage::WatchTerminals(WatchTerminals { request })
         });
-        assert_eq!(result, Err(NotConnected));
+        assert_eq!(result, Err(SendError::NotConnected));
     }
 
     #[test]
