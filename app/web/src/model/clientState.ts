@@ -3,6 +3,7 @@ import {
   type DecimalU64,
   ModelError,
   type TermId,
+  asRecord,
   compareDecimalU64,
   parseDecimalU64,
 } from './ids';
@@ -40,13 +41,6 @@ export interface RestoredSpaceState {
   activeTabs: Dict<string>;
 }
 
-function record(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function str(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new ModelError(`${what} must be a string`);
   return value;
@@ -65,8 +59,8 @@ export function defaultClientState(error: string | null = null): ClientState {
 }
 
 function parseSpaceState(value: unknown, what: string): ClientSpaceState {
-  const r = record(value, what);
-  const tabs = record(r['activeTabs'], `${what}.activeTabs`);
+  const r = asRecord(value, what);
+  const tabs = asRecord(r['activeTabs'], `${what}.activeTabs`);
   const activeTabs = emptyDict<string>();
   for (const [tile, panel] of Object.entries(tabs)) {
     activeTabs[tile] = str(panel, `${what}.activeTabs.${tile}`);
@@ -82,11 +76,11 @@ function parseSpaceState(value: unknown, what: string): ClientSpaceState {
 }
 
 export function parseClientState(json: unknown): ClientState {
-  const r = record(json, 'client state');
+  const r = asRecord(json, 'client state');
   const last = r['lastSpace'];
-  const lastRecord = last === null ? null : record(last, 'client state.lastSpace');
+  const lastRecord = last === null ? null : asRecord(last, 'client state.lastSpace');
   const spaces = emptyDict<ClientSpaceState>();
-  for (const [path, state] of Object.entries(record(r['spaces'], 'client state.spaces'))) {
+  for (const [path, state] of Object.entries(asRecord(r['spaces'], 'client state.spaces'))) {
     spaces[path] = parseSpaceState(state, `client state.spaces.${path}`);
   }
   const version = r['version'];

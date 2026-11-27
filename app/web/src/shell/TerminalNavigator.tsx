@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { HostView, HostsSnapshot, SpaceView } from '../model/hosts';
+import { type HostView, type HostsSnapshot, type SpaceView, isConnected } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
 import { groupAllTerminals } from './order';
@@ -24,7 +24,7 @@ interface TerminalListProps {
 }
 
 function TerminalList({ host, space, active, onSelectTerminal }: TerminalListProps) {
-  const dimmed = host.connection.kind !== 'connected' ? 'true' : 'false';
+  const dimmed = isConnected(host) ? 'false' : 'true';
   return (
     <ul>
       {space.terminals.map((terminal) => {

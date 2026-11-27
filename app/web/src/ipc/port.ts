@@ -9,7 +9,11 @@ export type Unsubscribe = () => void;
 
 export interface HostsPort {
   getSnapshot(): Promise<HostsSnapshot>;
-  onSnapshot(listener: (snapshot: HostsSnapshot) => void): Promise<Unsubscribe>;
+  /** `onInvalid` gets the parse error of a `hosts-changed` payload the model refused. */
+  onSnapshot(
+    listener: (snapshot: HostsSnapshot) => void,
+    onInvalid: (cause: unknown) => void,
+  ): Promise<Unsubscribe>;
   retryHost(name: string): Promise<void>;
 }
 

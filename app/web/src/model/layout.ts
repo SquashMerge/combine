@@ -1,4 +1,4 @@
-import { type DecimalU64, ModelError, parseDecimalU64 } from './ids';
+import { type DecimalU64, ModelError, asRecord, parseDecimalU64 } from './ids';
 import type { LayoutTile, LayoutTiles } from './clientState';
 import { type Dict, dictGet } from './dict';
 
@@ -43,13 +43,6 @@ export type LayoutEvent =
   | { kind: 'error'; hostId: string; request: DecimalU64; code: string; message: string }
   | { kind: 'disconnected'; hostId: string };
 
-function record(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function str(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new ModelError(`${what} must be a string`);
   return value;
@@ -89,7 +82,7 @@ function strings(value: unknown, what: string): string[] {
 }
 
 export function parseLayoutNode(value: unknown, what = 'layout node'): LayoutNode {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   const type = r['type'];
   if (type === 'tile') {
     return {
@@ -112,11 +105,11 @@ export function parseLayoutNode(value: unknown, what = 'layout node'): LayoutNod
 }
 
 export function parseLayoutSnapshot(value: unknown): LayoutSnapshot {
-  const r = record(value, 'layout snapshot');
+  const r = asRecord(value, 'layout snapshot');
   const droppedValue = r['dropped'];
   let dropped: DroppedNotice | null = null;
   if (droppedValue !== null) {
-    const d = record(droppedValue, 'layout snapshot.dropped');
+    const d = asRecord(droppedValue, 'layout snapshot.dropped');
     dropped = {
       opCount: count(d['opCount'], 'layout snapshot.dropped.opCount'),
       message: str(d['message'], 'layout snapshot.dropped.message'),
@@ -133,7 +126,7 @@ export function parseLayoutSnapshot(value: unknown): LayoutSnapshot {
 }
 
 export function parseLayoutEvent(value: unknown): LayoutEvent {
-  const r = record(value, 'layout event');
+  const r = asRecord(value, 'layout event');
   const hostId = str(r['hostId'], 'layout event.hostId');
   switch (r['kind']) {
     case 'snapshot':

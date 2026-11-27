@@ -23,16 +23,18 @@ export function useHostsSnapshot(port: HostsPort): HostsSnapshotState {
       );
     };
 
+    const fail = (cause: unknown): void => {
+      if (active) setError(cause instanceof Error ? cause.message : String(cause));
+    };
+
     const start = async (): Promise<void> => {
-      const stop = await port.onSnapshot(apply);
+      const stop = await port.onSnapshot(apply, fail);
       if (active) unsubscribe = stop;
       else stop();
       apply(await port.getSnapshot());
     };
 
-    start().catch((cause: unknown) => {
-      if (active) setError(cause instanceof Error ? cause.message : String(cause));
-    });
+    start().catch(fail);
 
     return () => {
       active = false;

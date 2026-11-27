@@ -86,11 +86,15 @@ describe('cursor and id parsers', () => {
     expect(() => parseHostId(HOST.toUpperCase())).toThrow(ModelError);
     expect(() => parseHostId('')).toThrow(ModelError);
     expect(() => parseHostId(null)).toThrow(ModelError);
+    expect(() => parseHostId('x')).toThrow('host id must be a lowercase UUID: "x"');
+    expect(() => parseHostId('x', 'event.hostId')).toThrow('event.hostId must be a lowercase UUID');
   });
 
   it('accepts only non-empty terminal ids', () => {
     expect(parseTermId('hc:t8')).toBe('hc:t8');
     expect(() => parseTermId('')).toThrow(ModelError);
     expect(() => parseTermId(8)).toThrow(ModelError);
+    expect(() => parseTermId(8)).toThrow('terminal id must be a non-empty string: 8');
+    expect(() => parseTermId('', 'event.terminal')).toThrow('event.terminal must be a non-empty string');
   });
 });

@@ -80,6 +80,24 @@ describe('parseHostsSnapshot', () => {
     expect(() => parseHostsSnapshot(json)).toThrow(ModelError);
   });
 
+  it('names the id field that failed', () => {
+    const term = clone();
+    term.hosts[0].spaces[0].terminals[0].id = '';
+    expect(() => parseHostsSnapshot(term)).toThrow(
+      'snapshot.hosts[0].spaces[0].terminals[0].id must be a non-empty string: ""',
+    );
+    const host = clone();
+    host.hosts[0].hostId = 'MINI';
+    expect(() => parseHostsSnapshot(host)).toThrow(
+      'snapshot.hosts[0].hostId must be a lowercase UUID: "MINI"',
+    );
+    const key = clone();
+    key.hosts[0].spaces[0].key.hostId = 7;
+    expect(() => parseHostsSnapshot(key)).toThrow(
+      'snapshot.hosts[0].spaces[0].key.hostId must be a lowercase UUID: 7',
+    );
+  });
+
   it('rejects two hosts sharing a host id', () => {
     const json = clone();
     json.hosts[3].hostId = json.hosts[0].hostId;

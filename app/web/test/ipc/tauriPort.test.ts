@@ -13,7 +13,7 @@ import {
   SET_LAST_SPACE_COMMAND,
 } from '../../src/ipc/names';
 import { createTauriClientStatePort, createTauriHostsPort } from '../../src/ipc/tauri';
-import { type DecimalU64, type HostId, type TermId } from '../../src/model/ids';
+import { type DecimalU64, type HostId, ModelError, type TermId } from '../../src/model/ids';
 import { type HostsSnapshot, parseHostsSnapshot } from '../../src/model/hosts';
 
 const fixture: unknown = JSON.parse(
@@ -27,6 +27,10 @@ beforeAll(() => {
 });
 
 afterEach(() => clearMocks());
+
+function unexpected(cause: unknown): never {
+  throw new Error(`unexpected invalid payload: ${String(cause)}`);
+}
 
 describe('createTauriHostsPort', () => {
   it('parses the hosts_snapshot command result', async () => {
@@ -68,7 +72,7 @@ describe('createTauriHostsPort', () => {
   it('delivers parsed snapshots until unsubscribed', async () => {
     mockIPC(() => undefined, { shouldMockEvents: true });
     const received: HostsSnapshot[] = [];
-    const unsubscribe = await createTauriHostsPort().onSnapshot((s) => received.push(s));
+    const unsubscribe = await createTauriHostsPort().onSnapshot((s) => received.push(s), unexpected);
 
     await emit(HOSTS_EVENT, fixture);
     expect(received).toEqual([parseHostsSnapshot(fixture)]);
@@ -81,10 +85,26 @@ describe('createTauriHostsPort', () => {
   it('passes event payloads through the model parser', async () => {
     mockIPC(() => undefined, { shouldMockEvents: true });
     const received: HostsSnapshot[] = [];
-    await createTauriHostsPort().onSnapshot((s) => received.push(s));
+    await createTauriHostsPort().onSnapshot((s) => received.push(s), unexpected);
 
     await emit(HOSTS_EVENT, { ...(fixture as object), unexpected: true });
     expect(received).toEqual([parseHostsSnapshot(fixture)]);
+  });
+
+  it('reports a malformed payload instead of dropping it', async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    const received: HostsSnapshot[] = [];
+    const invalid: unknown[] = [];
+    await createTauriHostsPort().onSnapshot(
+      (s) => received.push(s),
+      (cause) => invalid.push(cause),
+    );
+
+    await emit(HOSTS_EVENT, { ...(fixture as object), hosts: 'none' });
+    expect(received).toEqual([]);
+    expect(invalid).toHaveLength(1);
+    expect(invalid[0]).toBeInstanceOf(ModelError);
+    expect((invalid[0] as Error).message).toBe('snapshot.hosts must be an array');
   });
 });
 
