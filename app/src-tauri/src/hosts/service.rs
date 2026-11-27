@@ -298,6 +298,14 @@ impl HostsService {
     }
 }
 
+/// Stops the supervisors if `stop` wasn't called, so a test that fails before its `stop`
+/// doesn't leave them retrying until the process exits. After `stop` it does nothing.
+impl Drop for HostsService {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use combine_protocol::{ErrorCode, ErrorMessage, Spawned, TermId, MAX_FRAME_LEN};

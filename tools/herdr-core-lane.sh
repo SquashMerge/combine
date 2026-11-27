@@ -8,11 +8,21 @@
 # Portability: lane_check_own_child compares `ps -o comm=` with the executable's path or its
 # base name. macOS prints the full path, so it passes there. On Linux comm is cut to 15
 # characters, the comparison fails, and nothing is signalled (it fails closed). macOS is the
-# only target; do not loosen the comparison.
+# only target; do not loosen the comparison. If the lane ever runs off macOS, also note that a
+# lane core sharing the test's process group makes check_kill_target (lane_safety.rs) refuse
+# every crash: treat that as a stop-and-report, not as a check to relax.
 
 lane_path() { printf '%s' /usr/bin:/bin:/usr/sbin:/sbin; }
 
+# This machine's default core id, hard-coded. The lane also reads the live one at start
+# (lane_hc_default) and refuses either (lane_check_not_default).
 lane_default_core_id() { printf '%s' 4bcff4a58f4d97d505396e5a43a807e6; }
+
+# lane_check_not_default ID LIVE: ID is set and is neither the hard-coded default core id nor
+# LIVE, the id the default environment's core reported at lane start, which must be set too.
+lane_check_not_default() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$(lane_default_core_id)" ] && [ "$1" != "$2" ]
+}
 
 # lane_check_root ROOT: /tmp/chc.XXXXXX or its /private form, six letters and digits.
 lane_check_root() {
@@ -85,4 +95,15 @@ lane_hc_socket() {
     TMPDIR="${TMPDIR:-/tmp}" HC_SESSION="$LANE_SESSION" XDG_STATE_HOME="$LANE_ROOT/state" \
     XDG_CONFIG_HOME="$LANE_ROOT/config" XDG_RUNTIME_DIR="$LANE_ROOT/run" \
     HC_SOCKET="$LANE_SOCKET" "$LANE_HC" "$@"
+}
+
+# The default environment's `hc`, only for the one read-only `server status` that learns the
+# default core's live id: no HC_* variable and none of the lane's paths, only what lane_hc
+# passes from the caller plus the caller's own XDG_* directories when set, so it reaches the
+# core the caller's shell reaches.
+lane_hc_default() {
+  env -i PATH="$(lane_path)" HOME="${HOME:-}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+    TMPDIR="${TMPDIR:-/tmp}" ${XDG_STATE_HOME:+"XDG_STATE_HOME=$XDG_STATE_HOME"} \
+    ${XDG_CONFIG_HOME:+"XDG_CONFIG_HOME=$XDG_CONFIG_HOME"} \
+    ${XDG_RUNTIME_DIR:+"XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"} "$LANE_HC" "$@"
 }

@@ -242,8 +242,12 @@ fn host<'a>(snapshot: &'a HostsSnapshot, name: &str) -> &'a HostView {
 /// The host is connected, reports `host_id`, and shows `daemon`'s terminal in its project.
 fn shows_space(snapshot: &HostsSnapshot, name: &str, daemon: &Daemon) -> bool {
     let view = host(snapshot, name);
-    view.connection == ConnectionState::Connected
-        && view.host_id.as_ref() == Some(&daemon.host_id)
+    view.connection == ConnectionState::Connected && lists_space(view, name, daemon)
+}
+
+/// The host reports `host_id` and lists `daemon`'s terminal in its project, connected or not.
+fn lists_space(view: &HostView, name: &str, daemon: &Daemon) -> bool {
+    view.host_id.as_ref() == Some(&daemon.host_id)
         && view.spaces.iter().any(|space| {
             space.key.host_id == daemon.host_id
                 && space.key.path.ends_with(&format!("/{name}/work"))
@@ -279,9 +283,16 @@ fn two_hosts_show_spaces_from_both_and_a_dropped_host_reconnects() {
     });
 
     beta.stop();
-    wait_for(&service, "beta dimmed while alpha stays connected", |s| {
-        is_dimmed(host(s, "beta")) && host(s, "alpha").connection == ConnectionState::Connected
-    });
+    // "A host that drops shows its spaces dimmed" (SPEC.md): they stay listed while it is.
+    wait_for(
+        &service,
+        "beta dimmed, its space still listed, while alpha stays connected",
+        |s| {
+            is_dimmed(host(s, "beta"))
+                && lists_space(host(s, "beta"), "beta", &beta)
+                && shows_space(s, "alpha", &alpha)
+        },
+    );
 
     beta.start();
     wait_for(&service, "beta reconnected with its space", |s| {

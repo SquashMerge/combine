@@ -59,6 +59,8 @@ struct Seen {
     epochs: BTreeSet<u64>,
     data: Vec<u8>,
     data_cursors: Vec<Cursor>,
+    /// Where each `Data` event's bytes start in `data`, one per entry of `data_cursors`.
+    data_starts: Vec<usize>,
     last: Option<Cursor>,
     gap: bool,
     lost: bool,
@@ -119,6 +121,7 @@ impl Inbox {
             }
             DaemonMessage::Data(data) => {
                 let seen = self.seen.entry(data.cursor.attachment).or_default();
+                seen.data_starts.push(seen.data.len());
                 seen.data.extend_from_slice(&data.bytes);
                 seen.data_cursors.push(data.cursor);
             }
@@ -176,9 +179,13 @@ fn pump_until(
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    position(haystack, needle).is_some()
+}
+
+fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
-        .any(|window| window == needle)
+        .position(|window| window == needle)
 }
 
 fn typed_has(target: &HerdrCoreTarget, term: &TermId, needle: &[u8]) -> bool {
@@ -365,8 +372,13 @@ pub fn connect_attach_replay_resume(
         },
     )?;
     let replayed = inbox.view(attachment).ok_or("no replay")?;
-    if !contains(&replayed.data, b"[c23 two]") || !contains(&replayed.data, b"[c23 three]") {
-        return Err("the replay is missing two or three".to_string());
+    match (
+        position(&replayed.data, b"[c23 two]"),
+        position(&replayed.data, b"[c23 three]"),
+    ) {
+        (Some(two), Some(three)) if two < three => {}
+        (Some(_), Some(_)) => return Err("the replay has three before two".to_string()),
+        _ => return Err("the replay is missing two or three".to_string()),
     }
     if contains(&replayed.data, b"[c23 one]") {
         return Err("the replay repeats one, which was acked".to_string());
@@ -390,12 +402,28 @@ pub fn connect_attach_replay_resume(
                 .is_some_and(|seen| contains(&seen.data, b"[c23 four]"))
         },
     )?;
-    let live = inbox
-        .view(attachment)
-        .and_then(|seen| seen.data_cursors.get(seqs.len()))
+    let seen = inbox.view(attachment).ok_or("no events after the replay")?;
+    let live = seen
+        .data_cursors
+        .get(seqs.len())
         .ok_or("four's event is missing")?;
     if live.seq.0 != rt.seq.0 + 1 {
         return Err(format!("four has seq {}, after {}", live.seq.0, rt.seq.0));
+    }
+    // Four starts in that first live event: not in the replay, and not in a later event.
+    let start = seen.data_starts[seqs.len()];
+    let end = seen
+        .data_starts
+        .get(seqs.len() + 1)
+        .copied()
+        .unwrap_or(seen.data.len());
+    match position(&seen.data, b"[c23 four]") {
+        Some(at) if (start..end).contains(&at) => {}
+        other => {
+            return Err(format!(
+                "four starts at {other:?}, not in the first live event ({start}..{end})"
+            ))
+        }
     }
 
     bridge.send(&ClientMessage::Detach(Detach { attachment }));
@@ -599,21 +627,28 @@ pub fn two_panels_across_a_restart(
         ));
     }
 
-    for id in [a, b] {
-        let seen = inbox.view(id).ok_or("an attachment saw nothing")?;
-        let epochs: Vec<u64> = seen.epochs.iter().copied().collect();
-        if epochs != [1, 2] || seen.started.len() != 2 {
-            return Err(format!(
-                "{id:?} saw epochs {epochs:?} with {} started, expected exactly 1 and 2",
-                seen.started.len()
-            ));
+    // Exactly epochs 1 and 2, each opened by one `started`, with no gap or lost, and closed
+    // only as `closed` says.
+    let exact_epochs = |inbox: &Inbox, closed: Option<CloseReason>| -> Result<(), String> {
+        for id in [a, b] {
+            let seen = inbox.view(id).ok_or("an attachment saw nothing")?;
+            let epochs: Vec<u64> = seen.epochs.iter().copied().collect();
+            if epochs != [1, 2] || seen.started.len() != 2 {
+                return Err(format!(
+                    "{id:?} saw epochs {epochs:?} with {} started, expected exactly 1 and 2",
+                    seen.started.len()
+                ));
+            }
+            if seen.gap || seen.lost || seen.closed != closed {
+                return Err(format!(
+                    "{id:?} saw gap {}, lost {} and closed {:?} across the restart, expected closed {closed:?}",
+                    seen.gap, seen.lost, seen.closed
+                ));
+            }
         }
-        if seen.gap || seen.lost || seen.closed.is_some() {
-            return Err(format!(
-                "{id:?} saw a gap, lost or closed across the restart"
-            ));
-        }
-    }
+        Ok(())
+    };
+    exact_epochs(&inbox, None)?;
 
     for id in [a, b] {
         bridge.send(&ClientMessage::Detach(Detach { attachment: id }));
@@ -632,6 +667,8 @@ pub fn two_panels_across_a_restart(
             })
         },
     )?;
+    // The events filed while the detach was pumped are held to the same rule.
+    exact_epochs(&inbox, Some(CloseReason::Detached))?;
     bridge.close_stdin();
     require_clean_exit("the bridge", bridge.wait_exit())?;
 

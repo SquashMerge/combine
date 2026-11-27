@@ -195,7 +195,8 @@ order = 1
 paths = ["crates/combined/src/testing.rs", "crates/combined/src/testing/**"]
 
 # Integration tests of the Tauri backend. They may run in-process daemons from `combined`
-# (a dev-dependency with test-support); those references are cross-app `unknown`, reviewed.
+# (a dev-dependency with test-support); trellis reports those references as `unknown`
+# (`rust_module_ownership_unproved`, `test_only`), reviewed.
 [layers.app-tests]
 app = "combine-app"
 display = "hidden"
@@ -203,7 +204,8 @@ order = 0
 paths = ["app/src-tauri/tests/**"]
 
 # Integration tests of the shim: the real `combine mcp` against in-process daemons from
-# `combined` (a dev-dependency with test-support); those references are cross-app `unknown`, reviewed.
+# `combined` (a dev-dependency with test-support); trellis reports those references as `unknown`
+# (`rust_module_ownership_unproved`, `test_only`), reviewed.
 [layers.cli-tests]
 app = "combine"
 display = "hidden"

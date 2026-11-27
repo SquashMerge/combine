@@ -5,7 +5,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -601,6 +601,55 @@ fn a_pending_poll_registers_the_callers_waker() {
     env.stub.start("fake:1");
     assert!(flag.0.load(Ordering::SeqCst));
     assert!(env.driver.poll_event(&mut cx, NOW).is_ready());
+}
+
+struct Count(AtomicUsize);
+
+impl ArcWake for Count {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// #41: a call in flight registers the caller's waker through `running`, so the call finishing
+/// wakes the server loop by itself, without waiting for a housekeeping tick.
+#[test]
+fn a_call_in_flight_wakes_the_caller_when_it_completes() {
+    let mut env = Env::new();
+    let live = live_owner(&mut env, 1);
+    let release = env.stub.hold_next("fake:1", "write", false);
+    issue(&mut env, &live, Call::Write);
+    assert!(
+        env.driver.attachment(live.id).is_none(),
+        "the write is in flight"
+    );
+
+    let wakes = Arc::new(Count(AtomicUsize::new(0)));
+    let waker = waker(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+    // The first poll may wake once by itself, as `FuturesUnordered` takes the new call in;
+    // after that the polls settle, and nothing wakes the caller until the call finishes.
+    assert!(env.driver.poll_event(&mut cx, NOW).is_pending());
+    assert!(env.driver.poll_event(&mut cx, NOW).is_pending());
+    let settled = wakes.0.load(Ordering::SeqCst);
+    assert!(env.driver.poll_event(&mut cx, NOW).is_pending());
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        settled,
+        "a settled poll woke itself"
+    );
+
+    release.send(()).unwrap();
+    assert!(
+        wakes.0.load(Ordering::SeqCst) > settled,
+        "the finished call didn't wake the caller"
+    );
+    assert!(env.driver.poll_event(&mut cx, NOW).is_ready());
+    assert!(env.driver.attachment(live.id).is_some());
+    assert_eq!(
+        env.stub.log_of("fake:1").last().map(String::as_str),
+        Some("write held fake:1")
+    );
 }
 
 #[test]
