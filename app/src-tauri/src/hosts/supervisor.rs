@@ -499,14 +499,17 @@ mod tests {
     /// Runs the loop to its end, for scripts that end without outside help. A loop that does
     /// not end within [`WAIT`] is stopped and fails the test, instead of hanging it.
     fn run_to_end(rig: &Rig, stored: Option<HostId>, ssh: Option<(String, String)>) {
+        run_deps_to_end(rig.deps.clone(), stored, ssh);
+    }
+
+    /// [`run_to_end`] with deps the test built itself.
+    fn run_deps_to_end(
+        deps: SupervisorDeps,
+        stored: Option<HostId>,
+        ssh: Option<(String, String)>,
+    ) {
         let stop = StopSignal::new();
-        let handle = spawn_supervisor(
-            "mini".to_string(),
-            stored,
-            ssh,
-            rig.deps.clone(),
-            stop.clone(),
-        );
+        let handle = spawn_supervisor("mini".to_string(), stored, ssh, deps, stop.clone());
         let ended = joins_within(handle, WAIT);
         stop.stop();
         assert!(ended, "the supervisor did not stop within {WAIT:?}");
@@ -677,13 +680,7 @@ mod tests {
             connector: Arc::new(SshConnector::new(&script, "example@mini", "/opt/combined")),
             ..rig.deps
         };
-        run_supervisor(
-            "mini".to_string(),
-            Some(a()),
-            ssh_pair(),
-            deps,
-            StopSignal::new(),
-        );
+        run_deps_to_end(deps, Some(a()), ssh_pair());
         let mismatch = super::super::identity::mismatch_message("mini", &a(), &host_id(HOST_B));
         assert_eq!(states(&rig.events).last(), Some(&failed(&mismatch, None)));
         let pid = std::fs::read_to_string(&pidfile).expect("the script wrote its pid");

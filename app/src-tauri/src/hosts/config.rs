@@ -1,7 +1,7 @@
 //! `hosts.json`: the pure parser and the store that records a host's ID on first contact.
 //!
-//! Every [`ConfigError`] is Combine text that ends with at most one serde message, and entry
-//! errors name the entry's position, never its name.
+//! Every [`ConfigError`] is Combine text that ends with at most one serde message or I/O error
+//! kind, and entry errors name the entry's position, never its name.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -107,6 +107,11 @@ pub fn parse_hosts(bytes: &[u8]) -> Result<HostsConfig, ConfigError> {
     match object.get("version") {
         None => return Err(invalid("hosts.json has no \"version\" field")),
         Some(Value::Number(n)) if n.as_u64() == Some(1) => {}
+        Some(Value::Number(n)) if n.is_f64() => {
+            return Err(invalid(
+                "hosts.json has an unsupported \"version\"; this Combine reads version 1",
+            ))
+        }
         Some(Value::Number(n)) => {
             return Err(invalid(format!(
                 "hosts.json has version {n}; this Combine reads version 1"
@@ -118,7 +123,9 @@ pub fn parse_hosts(bytes: &[u8]) -> Result<HostsConfig, ConfigError> {
             ))
         }
     }
-    let file: HostsFileV1 = serde_json::from_value(value)
+    // Decoded from the bytes, not `value`, so a repeated key is an error here as it is for the
+    // store, rather than the last copy winning.
+    let file: HostsFileV1 = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("hosts.json does not match the schema: {e}")))?;
     let mut hosts: Vec<HostConfig> = Vec::with_capacity(file.hosts.len());
     for (index, entry) in file.hosts.iter().enumerate() {
@@ -295,14 +302,18 @@ pub struct HostsStore {
 
 impl HostsStore {
     /// A missing file means no hosts. An invalid or unreadable one leaves the store refusing
-    /// every write.
+    /// every write. An unreadable file's error names only the kind of I/O error, so it stays
+    /// Combine text.
     pub fn load(path: PathBuf) -> (HostsStore, Result<HostsConfig, ConfigError>) {
-        let loaded = match fs::read(&path) {
+        let loaded = match read_capped(&path) {
             Ok(bytes) => parse_hosts(&bytes).map(|config| (config, bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Ok((HostsConfig { hosts: Vec::new() }, Vec::new()))
             }
-            Err(e) => Err(invalid(format!("hosts.json could not be read: {e}"))),
+            Err(e) => Err(invalid(format!(
+                "hosts.json could not be read: {}",
+                e.kind()
+            ))),
         };
         match loaded {
             Ok((config, bytes)) => {
@@ -414,6 +425,16 @@ impl HostsStore {
     fn match_private_mode(&self, _file: &fs::File) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Reads at most one byte past [`MAX_FILE_BYTES`], enough for [`parse_hosts`] to refuse a file
+/// that is too big without reading all of it.
+fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 impl HostIdStore for HostsStore {
@@ -578,6 +599,35 @@ mod tests {
         assert_eq!(
             error_text(r#"{"version": 2, "hosts": []}"#),
             "hosts.json has version 2; this Combine reads version 1"
+        );
+    }
+
+    #[test]
+    fn a_fraction_or_exponent_version_is_not_echoed() {
+        for version in ["1e2", "1.0", "1.5"] {
+            assert_eq!(
+                error_text(&format!(r#"{{"version": {version}, "hosts": []}}"#)),
+                "hosts.json has an unsupported \"version\"; this Combine reads version 1",
+                "{version}"
+            );
+        }
+        assert_eq!(
+            error_text(r#"{"version": -3, "hosts": []}"#),
+            "hosts.json has version -3; this Combine reads version 1"
+        );
+    }
+
+    #[test]
+    fn rejects_repeated_keys() {
+        let top = error_text(r#"{"version": 1, "hosts": [], "hosts": []}"#);
+        assert!(
+            top.starts_with("hosts.json does not match the schema: duplicate field"),
+            "{top}"
+        );
+        let entry = error_text(&one_entry(r#"{"name": "a", "ssh": "a", "ssh": "b"}"#));
+        assert!(
+            entry.starts_with("hosts.json does not match the schema: duplicate field"),
+            "{entry}"
         );
     }
 
@@ -757,6 +807,39 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_file_is_invalid_and_names_only_the_error_kind() {
+        let dir = TestDir::new();
+        fs::create_dir(dir.file()).expect("a directory where hosts.json goes");
+        let (store, config) = HostsStore::load(dir.file());
+        assert_eq!(
+            config.expect_err("unreadable").to_string(),
+            "hosts.json could not be read: is a directory"
+        );
+        assert_eq!(
+            store.record_first_contact("mini", &id(ID_A)),
+            Err(StoreError::Invalid)
+        );
+        assert!(temp_leftovers(&dir).is_empty());
+    }
+
+    #[test]
+    fn load_refuses_a_file_over_1_mib() {
+        let dir = TestDir::new();
+        let mut bytes = br#"{"version": 1, "hosts": []}"#.to_vec();
+        bytes.resize(3 << 20, b' ');
+        fs::write(dir.file(), &bytes).expect("write");
+        let (store, config) = HostsStore::load(dir.file());
+        assert_eq!(
+            config.expect_err("too big").to_string(),
+            "hosts.json is over 1 MiB"
+        );
+        assert_eq!(
+            store.record_first_contact("mini", &id(ID_A)),
+            Err(StoreError::Invalid)
+        );
+    }
+
+    #[test]
     fn records_first_contact_with_safe_write() {
         let dir = TestDir::new();
         let store = store_with(
@@ -900,6 +983,20 @@ mod tests {
         let err = store.write_safely_from(b"x", 8000).expect_err("all taken");
         assert!(matches!(err, StoreError::Io(_)));
         assert_eq!(fs::read(dir.file()).expect("read"), b"new bytes");
+    }
+
+    #[test]
+    fn a_failed_write_removes_its_temp_file() {
+        let dir = TestDir::new();
+        let store = store_with(&dir, TWO_HOSTS);
+        fs::remove_file(dir.file()).expect("remove hosts.json");
+        fs::create_dir(dir.file()).expect("a directory the rename cannot replace");
+        let err = store
+            .write_safely_from(b"new bytes", 9000)
+            .expect_err("the rename fails");
+        assert!(matches!(err, StoreError::Io(_)), "{err:?}");
+        assert!(temp_leftovers(&dir).is_empty());
+        assert!(dir.file().is_dir());
     }
 
     #[test]

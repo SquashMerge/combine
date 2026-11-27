@@ -212,6 +212,9 @@ mod tests {
         assert_eq!(SYSTEM_SSH, "/usr/bin/ssh");
     }
 
+    /// What `ssh` writes for a host that is not in known_hosts.
+    const UNKNOWN_HOST_KEY: &str = "No ED25519 host key is known for mini and you have requested strict checking.\nHost key verification failed.\n";
+
     #[test]
     fn spawns_program_with_exact_argv() {
         let dir = ShortTempDir::new();
@@ -219,7 +222,7 @@ mod tests {
         let script = write_fake_ssh(
             dir.path(),
             &format!(
-                "printf '%s\\n' \"$@\" > '{}'\nprintf 'Host key verification failed.\\n' >&2\nexit 255",
+                "printf '%s\\n' \"$@\" > '{}'\nprintf '%s' '{UNKNOWN_HOST_KEY}' >&2\nexit 255",
                 argv_file.display()
             ),
         );
@@ -227,6 +230,7 @@ mod tests {
         assert!(run_handshake(&mut *link.reader, &mut *link.writer).is_err());
         let exit = link.finish().expect("an ssh link reports its exit");
         assert_eq!(exit.code, Some(255));
+        assert_eq!(exit.stderr, UNKNOWN_HOST_KEY);
         assert_eq!(
             classify(exit.code, &exit.stderr),
             Some(SshFailure::UnknownHostKey)
