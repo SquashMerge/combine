@@ -37,6 +37,17 @@ function decodeMessage(message: unknown) {
   return parseTerminalStreamEvent(message);
 }
 
+/**
+ * Lets a channel go after `open_stream` was refused: nothing reaches the listener any more, and
+ * the api forgets the channel's callback, which it would otherwise keep until Rust ended the
+ * channel, and Rust never does for a stream it didn't open. `cleanupCallback` is private in the
+ * api's typings, so it is called only if present.
+ */
+function releaseChannel(channel: Channel<unknown>): void {
+  channel.onmessage = () => undefined;
+  (channel as unknown as { cleanupCallback?: () => void }).cleanupCallback?.();
+}
+
 function createStream(stream: string): TerminalStream {
   return {
     async attach(terminal, options, instance) {
@@ -112,7 +123,13 @@ export function createTauriTerminalPort(): TerminalPort {
           console.error(error);
         }
       };
-      const stream = await invoke<string>(TERMINAL_OPEN_STREAM_COMMAND, { hostId, channel });
+      let stream: string;
+      try {
+        stream = await invoke<string>(TERMINAL_OPEN_STREAM_COMMAND, { hostId, channel });
+      } catch (error) {
+        releaseChannel(channel);
+        throw error;
+      }
       return createStream(stream);
     },
   };

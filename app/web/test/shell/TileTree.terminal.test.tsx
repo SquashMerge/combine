@@ -346,6 +346,32 @@ describe('TileTree terminal tabs', () => {
     expect(onRepinTerminal).toHaveBeenCalledWith(PIN_1, PIN_3, 't1');
   });
 
+  it('the pinned dropdown shows a pin of another space as its current option', async () => {
+    const onRepinTerminal = vi.fn();
+    const ctx = context({ spaceTerminals: [DEPLOY, DONE] });
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1])), { onRepinTerminal }, { ctx }));
+    await flush();
+    const select = within(bodyOf('t1')).getByTestId('terminal-switcher') as HTMLSelectElement;
+    expect(select.value).toBe('term-1');
+    expect([...select.options].map((o) => [o.value, o.textContent, o.disabled])).toEqual([
+      ['term-1', 'build (running)', false],
+      ['term-2', 'deploy (idle)', false],
+      ['term-3', 'done (exited)', false],
+    ]);
+    expect(select.selectedOptions[0]?.value).toBe('term-1');
+    fireEvent.change(select, { target: { value: 'term-2' } });
+    expect(onRepinTerminal).toHaveBeenCalledWith(PIN_1, PIN_2, 't1');
+  });
+
+  it('the follow-active dropdown shows an active terminal of another space as its current option', async () => {
+    const ctx = context({ spaceTerminals: [DEPLOY] });
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [ACTIVE_TERMINAL_TAB])), {}, { ctx }));
+    await flush();
+    const select = screen.getByTestId('terminal-switcher') as HTMLSelectElement;
+    expect(select.value).toBe('term-1');
+    expect([...select.options].map((o) => o.value)).toEqual(['term-1', 'term-2']);
+  });
+
   it('a terminal whose ID is too long to pin is disabled with its own reason, not as already open', async () => {
     const long = terminal('x'.repeat(300), 'long', 'sh', 'idle');
     const ctx = context({ spaceTerminals: [BUILD, long] });

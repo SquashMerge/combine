@@ -138,7 +138,12 @@ function TerminalTabBody({
   }
   const pinned = entry.kind === 'pinned';
   const instance = ctx.backend?.instance ?? null;
-  const options = ctx.spaceTerminals.map((candidate) => {
+  // A pin is host-wide, so its terminal may sit in another space: it is still the current
+  // option, so the select always has an option matching its value.
+  const candidates = ctx.spaceTerminals.some((candidate) => candidate.id === terminal.id)
+    ? ctx.spaceTerminals
+    : [terminal, ...ctx.spaceTerminals];
+  const options = candidates.map((candidate) => {
     const label = `${candidate.name} (${candidate.state})`;
     if (!pinned) return { id: candidate.id, label, disabled: false };
     const candidateTab = instance === null ? null : terminalTabId(instance, candidate.id);
