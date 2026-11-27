@@ -2,17 +2,37 @@
 //! The binary users install: built without `test-support`, it has no fake backend.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `/tmp/cs4s-<pid>`: short enough for a socket path, removed on drop.
+/// A new directory `<parent>/<prefix>-<8 random hex digits>`, mode 0700. As with `mkdtemp`, a
+/// name that exists (a killed run's leftover: pids are reused) is retried, never reused.
+/// A copy of `combined::testing::fresh_dir`: this crate is built without `test-support`.
+fn fresh_dir(parent: &Path, prefix: &str) -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..16 {
+        let suffix = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish() as u32;
+        let path = parent.join(format!("{prefix}-{suffix:08x}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            created => {
+                created.unwrap_or_else(|error| panic!("creating {}: {error}", path.display()));
+                return path;
+            }
+        }
+    }
+    panic!("no free {prefix}-* name under {}", parent.display());
+}
+
+/// `/tmp/cs4s-<8 random hex digits>`: short enough for a socket path, removed on drop.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Scratch {
-        let path = PathBuf::from(format!("/tmp/cs4s-{}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        Scratch(path)
+        Scratch(fresh_dir(Path::new("/tmp"), "cs4s"))
     }
 }
 

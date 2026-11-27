@@ -668,22 +668,36 @@ mod tests {
 
     use super::*;
     use notify::event::{CreateKind, Flag, ModifyKind, RemoveKind};
-    use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-    /// A folder under the temp dir, removed when dropped.
+    /// A new directory `<parent>/<prefix>-<8 random hex digits>`, mode 0700. As with `mkdtemp`, a
+    /// name that exists (a killed run's leftover: pids are reused) is retried, never reused.
+    /// A copy of `crate::testing::fresh_dir`, which unit tests without `test-support` lack.
+    fn fresh_dir(parent: &Path, prefix: &str) -> PathBuf {
+        use std::hash::{BuildHasher, Hasher};
+        use std::os::unix::fs::DirBuilderExt;
+        for _ in 0..16 {
+            let suffix = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish() as u32;
+            let path = parent.join(format!("{prefix}-{suffix:08x}"));
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                created => {
+                    created.unwrap_or_else(|error| panic!("creating {}: {error}", path.display()));
+                    return path;
+                }
+            }
+        }
+        panic!("no free {prefix}-* name under {}", parent.display());
+    }
+
+    /// A new folder under the temp dir, removed when dropped.
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new() -> Scratch {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "combined-watcher-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Scratch(path)
+            Scratch(fresh_dir(&std::env::temp_dir(), "combined-watcher"))
         }
     }
 

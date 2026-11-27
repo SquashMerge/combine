@@ -44,20 +44,36 @@ impl CallerIdentity for HerdrCoreCallerIdentity {
 mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
 
-    static NEXT: AtomicU32 = AtomicU32::new(0);
+    /// A new directory `<parent>/<prefix>-<8 random hex digits>`, mode 0700. As with `mkdtemp`, a
+    /// name that exists (a killed run's leftover: pids are reused) is retried, never reused.
+    /// A copy of `crate::testing::fresh_dir`, which unit tests without `test-support` lack.
+    fn fresh_dir(parent: &Path, prefix: &str) -> PathBuf {
+        use std::hash::{BuildHasher, Hasher};
+        use std::os::unix::fs::DirBuilderExt;
+        for _ in 0..16 {
+            let suffix = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish() as u32;
+            let path = parent.join(format!("{prefix}-{suffix:08x}"));
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                created => {
+                    created.unwrap_or_else(|error| panic!("creating {}: {error}", path.display()));
+                    return path;
+                }
+            }
+        }
+        panic!("no free {prefix}-* name under {}", parent.display());
+    }
 
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new() -> Scratch {
-            let n = NEXT.fetch_add(1, Ordering::SeqCst);
-            let path = PathBuf::from(format!("/tmp/c47b-{}-{n}", std::process::id()));
-            fs::create_dir(&path).unwrap();
-            Scratch(path)
+            Scratch(fresh_dir(Path::new("/tmp"), "c47b"))
         }
     }
 

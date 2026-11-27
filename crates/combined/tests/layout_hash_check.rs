@@ -60,11 +60,12 @@ const OUTSIDE: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
 
 struct Env {
-    _scratch: ShortTempDir,
     server: LayoutServer,
     memory: Arc<MemoryFileStore>,
     racing: Arc<RacingStore>,
     space: SpaceId,
+    /// Last: fields drop in order, so the server stops (and flushes) before its folder goes.
+    _scratch: ShortTempDir,
 }
 
 impl Env {

@@ -153,9 +153,10 @@ fn stored_ratio(work: &Path) -> f64 {
 /// Serves a project over real files, splits it and flushes, then leaves one pending
 /// `set_ratio(0.3)` at revision 2. Returns what the tests need.
 struct Pending {
-    _scratch: ShortTempDir,
     server: daemon_support::LayoutServer,
     client: WireClient,
+    /// Last: fields drop in order, so the server stops (and flushes) before its folder goes.
+    _scratch: ShortTempDir,
 }
 
 fn pending_ratio_change() -> Pending {
@@ -198,6 +199,46 @@ fn pending_ratio_change() -> Pending {
         server,
         client,
     }
+}
+
+/// #57: dropping a fixture stops its server before its scratch dir goes. The other way round,
+/// the server's last flush wrote a layout never yet written into a folder already removed, and
+/// recreated the dir (mode 0755, holding only `work/.workspace/layout.json`) after `Drop`.
+#[test]
+fn dropping_a_fixture_with_an_unwritten_layout_leaves_no_folder_behind() {
+    let scratch = ShortTempDir::new();
+    let fallback = scratch.path().join("spaces");
+    let store = Arc::new(FsFileStore::with_fallback(&fallback));
+    let server = layout_server(&scratch, "c", store, HOUR, |_, backend| {
+        seed_project_terminal(backend, &scratch)
+    });
+    refuse_default_herdr_core(&server.socket, &scratch);
+    let space = server.work.to_str().unwrap().to_string();
+    let mut client = WireClient::open(&server.socket).0;
+    watch(&mut client, &space, 1);
+    let split = vec![LayoutOp::SplitTile {
+        tile: "main".to_string(),
+        dir: SplitDirection::H,
+        new_tile: "side".to_string(),
+        ratio: Ratio::new(0.5).unwrap(),
+        panel: None,
+    }];
+    assert_eq!(mutate(&mut client, &space, 2, 0, split).layout_revision, 1);
+    assert!(
+        !server.work.join(".workspace").join(LAYOUT_FILE).exists(),
+        "the change is still pending"
+    );
+    let root = scratch.path().to_path_buf();
+    drop(Pending {
+        server,
+        client,
+        _scratch: scratch,
+    });
+    assert!(
+        !root.exists(),
+        "{} was recreated after Drop",
+        root.display()
+    );
 }
 
 #[test]

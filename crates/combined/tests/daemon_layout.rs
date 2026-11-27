@@ -68,10 +68,11 @@ const PROMPT: LayoutTiming = LayoutTiming {
 };
 
 struct Env {
-    _scratch: ShortTempDir,
     server: LayoutServer,
     store: Arc<MemoryFileStore>,
     space: SpaceId,
+    /// Last: fields drop in order, so the server stops (and flushes) before its folder goes.
+    _scratch: ShortTempDir,
 }
 
 impl Env {

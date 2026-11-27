@@ -3,9 +3,7 @@
 //! refused host-ID mismatch. No ssh, no network listener and no herdr-core.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +23,7 @@ use combined::model::SpawnSpec;
 use combined::ports::TerminalBackend;
 use combined::rpc::socket::{bind, MAX_SOCKET_PATH};
 use combined::rpc::{self, ServeOptions, ServerHandle};
-use combined::testing::{FakeBackend, FakeConfig};
+use combined::testing::{fresh_dir, FakeBackend, FakeConfig};
 use combined::wiring::ids::IdReservation;
 use combined::wiring::server_parts;
 
@@ -37,19 +35,14 @@ const STRANGER: &str = "11111111-2222-4333-8444-555555555555";
 const POLL: Duration = Duration::from_millis(20);
 const DEADLINE: Duration = Duration::from_secs(30);
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// `/tmp/c23-<pid>-<n>`, mode 0700, removed on drop.
+/// `/tmp/c23-<8 random hex digits>`, always new, mode 0700, removed on drop.
 struct ScratchDir {
     path: PathBuf,
 }
 
 impl ScratchDir {
     fn new() -> ScratchDir {
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = PathBuf::from(format!("/tmp/c23-{}-{n}", std::process::id()));
-        fs::create_dir(&path).expect("create the scratch directory");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("restrict it");
+        let path = fresh_dir(Path::new("/tmp"), "c23");
         ScratchDir { path }
     }
 }

@@ -350,6 +350,7 @@ pub fn hc_env(lane: &Lane, caller: &Caller, with_socket: bool) -> Vec<(String, S
 mod tests {
     use std::process::Command;
 
+    use combined::testing::fresh_dir;
     use serde_json::json;
 
     use super::*;
@@ -583,8 +584,7 @@ mod tests {
         }
         assert!(check_kind(PathKind::Directory, Expect::Directory, "root").is_ok());
         assert!(check_kind(PathKind::Symlink, Expect::Directory, "root").is_err());
-        let dir = std::env::temp_dir().join(format!("lane-kinds-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = fresh_dir(&std::env::temp_dir(), "lane-kinds");
         std::fs::write(dir.join("file"), b"x").expect("file");
         std::os::unix::fs::symlink(&dir, dir.join("link")).expect("link");
         assert_eq!(kind_of(&dir.join("file")), PathKind::File);
@@ -903,8 +903,7 @@ mod tests {
 
     #[test]
     fn shell_kind_checks_refuse_symlinks_and_regular_files() {
-        let dir = std::env::temp_dir().join(format!("lane-sh-kinds-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = fresh_dir(&std::env::temp_dir(), "lane-sh-kinds");
         let file = dir.join("file");
         std::fs::write(&file, b"x").expect("file");
         let link = dir.join("link");
