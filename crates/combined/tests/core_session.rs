@@ -1669,9 +1669,9 @@ fn hand_off_to_most_recently_focused_or_none() {
     let e = rig.open(*ce, 1, false);
     let f = rig.open(*cf, 1, false);
     rig.request_ownership(*ca, a);
-    // Focus order is neither ID order nor its reverse: the heir is never the lowest or the
-    // highest ID among the focused, and `f`, the highest ID, is never focused. `d` is focused
-    // last but is watch-only.
+    // Focus order is neither ID order nor its reverse: the first heir, `c`, is neither the lowest
+    // nor the highest ID among the focused, so ranking by ID either way fails. `f`, the highest
+    // ID, is never focused, and `d` is focused last but is watch-only.
     rig.focus(*cb, b);
     rig.focus(*ce, e);
     rig.focus(*cc, c);
