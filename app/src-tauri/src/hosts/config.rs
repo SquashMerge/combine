@@ -828,6 +828,11 @@ mod tests {
         let mut bytes = br#"{"version": 1, "hosts": []}"#.to_vec();
         bytes.resize(3 << 20, b' ');
         fs::write(dir.file(), &bytes).expect("write");
+        assert_eq!(
+            read_capped(&dir.file()).expect("read").len(),
+            MAX_FILE_BYTES + 1,
+            "the read stops one byte past the cap"
+        );
         let (store, config) = HostsStore::load(dir.file());
         assert_eq!(
             config.expect_err("too big").to_string(),

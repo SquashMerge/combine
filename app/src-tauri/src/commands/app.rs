@@ -166,12 +166,12 @@ mod tests {
         let unnamed: Vec<_> = registered_set.difference(&named_set).collect();
         assert!(unnamed.is_empty(), "not in the fixture: {unnamed:?}");
         // Only the probe's command, which the csp-probe build alone registers, may be missing.
-        let unregistered: Vec<_> = named_set.difference(&registered_set).collect();
-        let probe_only = usize::from(!cfg!(feature = "csp-probe"));
-        assert_eq!(
-            unregistered.len(),
-            probe_only,
-            "not registered: {unregistered:?}"
-        );
+        let unregistered: Vec<&str> = named_set.difference(&registered_set).copied().collect();
+        let expected: &[&str] = if cfg!(feature = "csp-probe") {
+            &[]
+        } else {
+            &["csp_probe_report"]
+        };
+        assert_eq!(unregistered, expected, "not registered");
     }
 }
