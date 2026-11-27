@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { parseClientState } from '../model/clientState';
-import { parseHostsSnapshot } from '../model/hosts';
+import { type HostsSnapshot, parseHostsSnapshot } from '../model/hosts';
 import { parseDecimalU64 } from '../model/ids';
 import { parseLayoutEvent } from '../model/layout';
 import {
@@ -24,8 +24,17 @@ export function createTauriHostsPort(): HostsPort {
     async getSnapshot() {
       return parseHostsSnapshot(await invoke(HOSTS_SNAPSHOT_COMMAND));
     },
-    onSnapshot(listener) {
-      return listen(HOSTS_EVENT, (event) => listener(parseHostsSnapshot(event.payload)));
+    onSnapshot(listener, onInvalid) {
+      return listen(HOSTS_EVENT, (event) => {
+        let snapshot: HostsSnapshot;
+        try {
+          snapshot = parseHostsSnapshot(event.payload);
+        } catch (cause) {
+          onInvalid(cause);
+          return;
+        }
+        listener(snapshot);
+      });
     },
     async retryHost(name) {
       await invoke(RETRY_HOST_COMMAND, { name });

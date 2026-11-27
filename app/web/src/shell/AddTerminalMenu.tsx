@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SpawnPort } from '../ipc/port';
-import type { HostsSnapshot } from '../model/hosts';
+import { type HostsSnapshot, isConnected } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, spaceKeyId } from '../model/space';
 import {
@@ -42,7 +42,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
 
   const host =
     selected === null ? undefined : snapshot.hosts.find((h) => h.hostId === selected.hostId);
-  const connected = host !== undefined && host.connection.kind === 'connected';
+  const connected = host !== undefined && isConnected(host);
   const disabled = selected === null || !connected;
   const showMenu = open && !disabled;
 

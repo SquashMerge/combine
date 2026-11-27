@@ -4,10 +4,16 @@ import { decimalU64FromBigInt, decimalU64ToBigInt } from '../../src/model/ids';
 
 type Listener = (snapshot: HostsSnapshot) => void;
 
+/** One `onSnapshot` call. Like Tauri's `listen`, each call registers separately, even with the same function. */
+interface Subscription {
+  listener: Listener;
+  onInvalid: ((cause: unknown) => void) | undefined;
+}
+
 export class MemoryHostsPort implements HostsPort {
   readonly retryCalls: string[] = [];
   private current: HostsSnapshot;
-  private readonly listeners = new Set<Listener>();
+  private readonly subscriptions = new Set<Subscription>();
 
   constructor(initial: HostsSnapshot) {
     this.current = initial;
@@ -17,10 +23,11 @@ export class MemoryHostsPort implements HostsPort {
     return Promise.resolve(this.current);
   }
 
-  onSnapshot(listener: Listener): Promise<Unsubscribe> {
-    this.listeners.add(listener);
+  onSnapshot(listener: Listener, onInvalid?: (cause: unknown) => void): Promise<Unsubscribe> {
+    const subscription: Subscription = { listener, onInvalid };
+    this.subscriptions.add(subscription);
     return Promise.resolve(() => {
-      this.listeners.delete(listener);
+      this.subscriptions.delete(subscription);
     });
   }
 
@@ -31,7 +38,12 @@ export class MemoryHostsPort implements HostsPort {
 
   push(next: HostsSnapshot): void {
     this.current = next;
-    for (const listener of [...this.listeners]) listener(next);
+    for (const { listener } of [...this.subscriptions]) listener(next);
+  }
+
+  /** Delivers a `hosts-changed` payload the model refused, as the Tauri port reports one. */
+  pushInvalid(cause: unknown): void {
+    for (const { onInvalid } of [...this.subscriptions]) onInvalid?.(cause);
   }
 
   setConnection(name: string, state: ConnectionState): void {
@@ -55,6 +67,6 @@ export class MemoryHostsPort implements HostsPort {
   }
 
   listenerCount(): number {
-    return this.listeners.size;
+    return this.subscriptions.size;
   }
 }

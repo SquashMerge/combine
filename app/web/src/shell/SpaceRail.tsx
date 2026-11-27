@@ -1,4 +1,5 @@
-import type { HostView, HostsSnapshot } from '../model/hosts';
+import { useState } from 'react';
+import { type HostView, type HostsSnapshot, isConnected } from '../model/hosts';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
 import type { HostsPort } from '../ipc/port';
 import { describeConnection } from './connectionText';
@@ -22,7 +23,15 @@ interface HostSectionProps {
 
 function HostSection({ host, selected, port, readOnlySpaces, onSelect }: HostSectionProps) {
   const { connection } = host;
-  const dimmed = connection.kind !== 'connected' ? 'true' : 'false';
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const connected = isConnected(host);
+  const dimmed = connected ? 'false' : 'true';
+  const retry = (): void => {
+    setRetryError(null);
+    port.retryHost(host.name).catch((cause: unknown) => {
+      setRetryError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
   const detail =
     connection.kind === 'dropped' || connection.kind === 'failed' ? connection.detail : null;
   return (
@@ -31,9 +40,16 @@ function HostSection({ host, selected, port, readOnlySpaces, onSelect }: HostSec
       <p role="status">{describeConnection(connection)}</p>
       {detail !== null && <p className="detail">{detail}</p>}
       {connection.kind === 'failed' && (
-        <button type="button" onClick={() => void port.retryHost(host.name)}>
-          Retry
-        </button>
+        <>
+          <button type="button" onClick={retry}>
+            Retry
+          </button>
+          {retryError !== null && (
+            <p className="detail" role="alert">
+              Retry failed: {retryError}
+            </p>
+          )}
+        </>
       )}
       <ul>
         {sortSpaces(host.spaces).map((space) => {
@@ -56,7 +72,7 @@ function HostSection({ host, selected, port, readOnlySpaces, onSelect }: HostSec
           );
         })}
       </ul>
-      {connection.kind === 'connected' && host.spaces.length === 0 && <p>No spaces</p>}
+      {connected && host.spaces.length === 0 && <p>No spaces</p>}
     </section>
   );
 }

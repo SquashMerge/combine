@@ -4,6 +4,7 @@ import {
   type HostId,
   ModelError,
   type TermId,
+  asRecord,
   parseDecimalU64,
   parseTermId,
 } from './ids';
@@ -42,13 +43,6 @@ export type SpawnEvent =
   | { kind: 'error'; hostId: string; request: DecimalU64; code: string; message: string }
   | { kind: 'disconnected'; hostId: string };
 
-function record(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function str(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new ModelError(`${what} must be a string`);
   return value;
@@ -72,9 +66,9 @@ function array(value: unknown, what: string): unknown[] {
 }
 
 function parseTemplate(value: unknown, what: string): TerminalTemplate {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   const env = emptyDict<string>();
-  for (const [key, v] of Object.entries(record(r['env'], `${what}.env`))) {
+  for (const [key, v] of Object.entries(asRecord(r['env'], `${what}.env`))) {
     env[key] = str(v, `${what}.env.${key}`);
   }
   return {
@@ -89,12 +83,12 @@ function parseTemplate(value: unknown, what: string): TerminalTemplate {
 }
 
 function parseSkipped(value: unknown, what: string): SkippedPanel {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   return { panel: str(r['panel'], `${what}.panel`), reason: str(r['reason'], `${what}.reason`) };
 }
 
 function parseTemplateList(value: unknown): TemplateList {
-  const r = record(value, 'template list');
+  const r = asRecord(value, 'template list');
   return {
     space: str(r['space'], 'template list.space'),
     templates: array(r['templates'], 'template list.templates').map((t, i) =>
@@ -108,7 +102,7 @@ function parseTemplateList(value: unknown): TemplateList {
 }
 
 export function parseSpawnEvent(json: unknown): SpawnEvent {
-  const r = record(json, 'spawn event');
+  const r = asRecord(json, 'spawn event');
   const hostId = str(r['hostId'], 'spawn event.hostId');
   switch (r['kind']) {
     case 'templates':
@@ -124,7 +118,7 @@ export function parseSpawnEvent(json: unknown): SpawnEvent {
         hostId,
         request: parseDecimalU64(r['request']),
         space: str(r['space'], 'spawn event.space'),
-        terminal: parseTermId(r['terminal']),
+        terminal: parseTermId(r['terminal'], 'spawn event.terminal'),
       };
     case 'error':
       return {

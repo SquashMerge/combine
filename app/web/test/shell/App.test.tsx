@@ -78,6 +78,17 @@ describe('App', () => {
     expect(port.retryCalls).toEqual(['mini']);
   });
 
+  it('shows a malformed hosts-changed payload like a failed fetch', async () => {
+    const port = new MemoryHostsPort(snapshot([host('a', null, connecting)]));
+    render(<App terminalPort={new MemoryTerminalPort()} layoutPort={new MemoryLayoutPort()} port={port} clientStatePort={new MemoryClientStatePort()} />);
+    await screen.findByRole('region', { name: 'a' });
+    act(() => port.pushInvalid(new Error('snapshot.hosts must be an array')));
+    expect(screen.getByRole('alert').textContent).toBe(
+      'Cannot reach the Combine backend: snapshot.hosts must be an array',
+    );
+    expect(screen.queryByRole('region', { name: 'a' })).toBeNull();
+  });
+
   it('shows an error when the backend cannot be reached', async () => {
     const port: HostsPort = {
       getSnapshot: () => Promise.reject(new Error('boom')),

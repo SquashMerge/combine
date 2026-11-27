@@ -37,6 +37,21 @@ describe('MemoryHostsPort', () => {
     expect(() => port.setConnection('mini', { kind: 'connected' })).toThrow(/out of range/);
   });
 
+  it('registers each subscription separately, as Tauri listen does', async () => {
+    const port = new MemoryHostsPort({ ...fixture, revision: '1' as HostsSnapshot['revision'] });
+    const seen: HostsSnapshot[] = [];
+    const listener = (s: HostsSnapshot) => seen.push(s);
+    const first = await port.onSnapshot(listener);
+    await port.onSnapshot(listener);
+    expect(port.listenerCount()).toBe(2);
+    port.setConnection('mini', { kind: 'connected' });
+    expect(seen).toHaveLength(2);
+    first();
+    expect(port.listenerCount()).toBe(1);
+    port.setConnection('mini', { kind: 'connecting' });
+    expect(seen).toHaveLength(3);
+  });
+
   it('stops notifying after unsubscribe', async () => {
     const port = new MemoryHostsPort(fixture);
     const unsubscribe = await port.onSnapshot(() => undefined);

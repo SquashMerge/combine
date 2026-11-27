@@ -2,6 +2,7 @@ import {
   type DecimalU64,
   type HostId,
   ModelError,
+  asRecord,
   type TermId,
   parseDecimalU64,
   parseHostId,
@@ -59,13 +60,6 @@ export interface HostsSnapshot {
 const TERMINAL_STATES: readonly string[] = ['running', 'waiting', 'idle', 'exited', 'unknown'];
 const U32_MAX = 4294967295;
 
-function record(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function str(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new ModelError(`${what} must be a string`);
   return value;
@@ -88,7 +82,7 @@ function array(value: unknown, what: string): unknown[] {
 }
 
 function parseConnection(value: unknown, what: string): ConnectionState {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   switch (r['kind']) {
     case 'connecting':
       return { kind: 'connecting' };
@@ -115,13 +109,13 @@ function parseConnection(value: unknown, what: string): ConnectionState {
 }
 
 function parseTerminal(value: unknown, what: string): TerminalSummary {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   const state = str(r['state'], `${what}.state`);
   if (!TERMINAL_STATES.includes(state)) {
     throw new ModelError(`${what}.state is not a known terminal state`);
   }
   return {
-    id: parseTermId(r['id']),
+    id: parseTermId(r['id'], `${what}.id`),
     name: str(r['name'], `${what}.name`),
     command: str(r['command'], `${what}.command`),
     state: state as TerminalState,
@@ -129,10 +123,13 @@ function parseTerminal(value: unknown, what: string): TerminalSummary {
 }
 
 function parseSpace(value: unknown, what: string): SpaceView {
-  const r = record(value, what);
-  const key = record(r['key'], `${what}.key`);
+  const r = asRecord(value, what);
+  const key = asRecord(r['key'], `${what}.key`);
   return {
-    key: { hostId: parseHostId(key['hostId']), path: str(key['path'], `${what}.key.path`) },
+    key: {
+      hostId: parseHostId(key['hostId'], `${what}.key.hostId`),
+      path: str(key['path'], `${what}.key.path`),
+    },
     terminals: array(r['terminals'], `${what}.terminals`).map((t, i) =>
       parseTerminal(t, `${what}.terminals[${i}]`),
     ),
@@ -141,7 +138,7 @@ function parseSpace(value: unknown, what: string): SpaceView {
 
 function parseBackend(value: unknown, what: string): BackendView | null {
   if (value === null) return null;
-  const r = record(value, what);
+  const r = asRecord(value, what);
   return {
     id: str(r['id'], `${what}.id`),
     instance: nullableStr(r['instance'], `${what}.instance`),
@@ -149,8 +146,8 @@ function parseBackend(value: unknown, what: string): BackendView | null {
 }
 
 function parseHost(value: unknown, what: string): HostView {
-  const r = record(value, what);
-  const hostId = r['hostId'] === null ? null : parseHostId(r['hostId']);
+  const r = asRecord(value, what);
+  const hostId = r['hostId'] === null ? null : parseHostId(r['hostId'], `${what}.hostId`);
   const host: HostView = {
     name: str(r['name'], `${what}.name`),
     hostId,
@@ -170,8 +167,8 @@ function parseHost(value: unknown, what: string): HostView {
 }
 
 export function parseHostsSnapshot(json: unknown): HostsSnapshot {
-  const r = record(json, 'snapshot');
-  const config = record(r['config'], 'snapshot.config');
+  const r = asRecord(json, 'snapshot');
+  const config = asRecord(r['config'], 'snapshot.config');
   const hosts = array(r['hosts'], 'snapshot.hosts').map((h, i) =>
     parseHost(h, `snapshot.hosts[${i}]`),
   );

@@ -65,6 +65,22 @@ describe('SpaceRail', () => {
     expect(port.retryCalls).toEqual(['mini']);
   });
 
+  it('shows a rejected Retry under the button, and clears it on the next try', async () => {
+    const hosts = snapshot([host('mini', null, { kind: 'failed', message: 'nope', detail: null })]);
+    const port = new MemoryHostsPort(hosts);
+    const refusal = new Error('no host named "mini" in hosts.json');
+    const results = [Promise.reject(refusal), new Promise<void>(() => undefined)];
+    port.retryHost = () => results.shift() ?? Promise.resolve();
+    render(<SpaceRail snapshot={hosts} selected={null} port={port} onSelect={() => undefined} />);
+    const section = screen.getByRole('region', { name: 'mini' });
+    fireEvent.click(within(section).getByRole('button', { name: 'Retry' }));
+    expect((await within(section).findByRole('alert')).textContent).toBe(
+      'Retry failed: no host named "mini" in hosts.json',
+    );
+    fireEvent.click(within(section).getByRole('button', { name: 'Retry' }));
+    expect(within(section).queryByRole('alert')).toBeNull();
+  });
+
   it("shows a failed host's SSH failure message and detail", async () => {
     const fixture = loadFixtureSnapshot();
     const work = fixture.hosts.find((h) => h.name === 'work-mbp');

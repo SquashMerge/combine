@@ -1,5 +1,6 @@
 import {
   ModelError,
+  asRecord,
   compareDecimalU64,
   decimalU64FromBigInt,
   parseCursor,
@@ -89,13 +90,6 @@ export const DATA_HEADER_BYTES = 24;
 
 const MAX_DIMENSION = 65535;
 const COLOUR = /^#[0-9a-fA-F]{6}$/;
-
-function asRecord(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
 
 function parseIntegerInRange(value: unknown, min: number, what: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > MAX_DIMENSION) {

@@ -58,7 +58,8 @@ export function decimalU64ToBigInt(value: DecimalU64): bigint {
   return BigInt(value);
 }
 
-function asRecord(value: unknown, what: string): Record<string, unknown> {
+/** The value as a plain object, or a ModelError naming `what`. The one object guard the parsers share. */
+export function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ModelError(`${what} must be an object`);
   }
@@ -74,16 +75,16 @@ export function parseCursor(value: unknown): Cursor {
   };
 }
 
-export function parseHostId(value: unknown): HostId {
+export function parseHostId(value: unknown, what = 'host id'): HostId {
   if (typeof value !== 'string' || !HOST_ID.test(value)) {
-    throw new ModelError(`not a lowercase UUID host id: ${JSON.stringify(value)}`);
+    throw new ModelError(`${what} must be a lowercase UUID: ${JSON.stringify(value)}`);
   }
   return value as HostId;
 }
 
-export function parseTermId(value: unknown): TermId {
+export function parseTermId(value: unknown, what = 'terminal id'): TermId {
   if (typeof value !== 'string' || value === '') {
-    throw new ModelError(`terminal id must be a non-empty string: ${JSON.stringify(value)}`);
+    throw new ModelError(`${what} must be a non-empty string: ${JSON.stringify(value)}`);
   }
   return value as TermId;
 }

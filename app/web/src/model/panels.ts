@@ -1,4 +1,4 @@
-import { type DecimalU64, type HostId, ModelError, parseDecimalU64 } from './ids';
+import { type DecimalU64, type HostId, ModelError, asRecord, parseDecimalU64 } from './ids';
 import type { RendererName } from './render';
 import type { SkippedPanel } from './spawn';
 
@@ -84,13 +84,6 @@ const PANEL_STATES: readonly PanelState[] = [
   'removed',
 ];
 
-function record(value: unknown, what: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ModelError(`${what} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function str(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new ModelError(`${what} must be a string`);
   return value;
@@ -128,7 +121,7 @@ function panelState(value: unknown, what: string): PanelState {
 
 function parseError(value: unknown, what: string): PanelError | null {
   if (value === null) return null;
-  const r = record(value, what);
+  const r = asRecord(value, what);
   return {
     code: str(r['code'], `${what}.code`),
     message: str(r['message'], `${what}.message`),
@@ -140,7 +133,7 @@ function parseError(value: unknown, what: string): PanelError | null {
 
 function parseCreatedBy(value: unknown, what: string): CreatedBy | null {
   if (value === null) return null;
-  const r = record(value, what);
+  const r = asRecord(value, what);
   switch (r['type']) {
     case 'user':
       return { type: 'user' };
@@ -159,7 +152,7 @@ function parseLifetime(value: unknown, what: string): PanelLifetime {
 }
 
 function parseSummary(value: unknown, what: string): PanelSummary {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   return {
     id: str(r['id'], `${what}.id`),
     title: nullableStr(r['title'], `${what}.title`),
@@ -173,12 +166,12 @@ function parseSummary(value: unknown, what: string): PanelSummary {
 }
 
 function parseSkipped(value: unknown, what: string): SkippedPanel {
-  const r = record(value, what);
+  const r = asRecord(value, what);
   return { panel: str(r['panel'], `${what}.panel`), reason: str(r['reason'], `${what}.reason`) };
 }
 
 function parseList(value: unknown): PanelList {
-  const r = record(value, 'panel list');
+  const r = asRecord(value, 'panel list');
   return {
     space: str(r['space'], 'panel list.space'),
     panels: array(r['panels'], 'panel list.panels').map((p, i) =>
@@ -192,7 +185,7 @@ function parseList(value: unknown): PanelList {
 }
 
 function parseContent(value: unknown): PanelContent {
-  const r = record(value, 'panel content');
+  const r = asRecord(value, 'panel content');
   return {
     space: str(r['space'], 'panel content.space'),
     id: str(r['id'], 'panel content.id'),
@@ -205,7 +198,7 @@ function parseContent(value: unknown): PanelContent {
 }
 
 export function parsePanelsChanged(json: unknown): PanelsChanged {
-  const r = record(json, 'panels event');
+  const r = asRecord(json, 'panels event');
   const hostId = str(r['hostId'], 'panels event.hostId');
   switch (r['kind']) {
     case 'list':

@@ -22,7 +22,7 @@ describe('describeConnection', () => {
         kind: 'dropped',
         reason: 'Connection closed by remote host.',
         detail: null,
-        retryInMs: 1500,
+        retryInMs: 1200,
       }),
     ).toBe('Dropped: Connection closed by remote host. Retrying in 2 s.');
   });
