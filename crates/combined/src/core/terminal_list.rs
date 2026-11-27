@@ -47,7 +47,8 @@ impl TerminalList {
     }
 
     /// `Created` and `Changed` replace a known terminal in place and append an unknown one,
-    /// `Exited` keeps it with its exit code and `Lost` removes it. `Restarted` changes nothing.
+    /// `Exited` keeps it with its exit code and `Lost` removes it, whether it ran or had exited
+    /// (the backend removed it, so a pinned tab reads as gone). `Restarted` changes nothing.
     pub fn apply_event(&mut self, event: &TermEvent) {
         self.spaces.apply_event(event);
         match event {

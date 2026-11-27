@@ -209,6 +209,23 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
     .await?;
     attachment.detach().await.map_err(|e| e.to_string())?;
 
+    // An exited terminal the core removes leaves the list: the watch reports it `Lost`.
+    target.checked_status()?;
+    target
+        .probe()
+        .call(
+            "terminal.rm",
+            json!({"terminal": a.0.trim_start_matches("hc:")}),
+        )
+        .map_err(|e| e.to_string())?;
+    wait_for(
+        &mut events,
+        10,
+        "Lost(A) after it was removed",
+        |e| matches!(e, TermEvent::Lost { id } if *id == a),
+    )
+    .await?;
+
     let b = spawn_one(target, backend.as_ref(), "b").await;
     wait_for(
         &mut events,
