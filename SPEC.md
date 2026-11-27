@@ -843,7 +843,7 @@ herdr-core already arbitrates between viewers: the last active viewer to attach,
 
 - The trait and its types carry nothing herdr-specific. Anything only one backend can do is a flag in `capabilities()`, not a method or field.
 - Besides herdr-core, v1 ships an in-memory fake backend that implements the trait for tests. Every daemon and client test that doesn't need a real PTY runs against it. That helps keep the trait backend-neutral, but it can't prove a second real backend needs no trait changes. It lives in `crates/combined/src/testing/` behind the `test-support` feature.
-- `TermId` is `<prefix>:<address>`: a fixed prefix naming the backend (`hc` for herdr-core, `fake` for the fake) and the backend's own address. Outside the adapter it is opaque; the daemon never parses it.
+- `TermId` is `<prefix>:<address>`: a fixed prefix naming the backend (`hc` for herdr-core, `fake` for the fake) and the backend's own address. Outside the adapter it is opaque; the daemon never parses it. The prefix is not the backend's `id()` (`terminals.backend.id`): the fake's are both `fake`, but herdr-core's `id()` is `herdr-core` and its prefix is `hc`.
 - Adapters hide reconnects and emit `Lost` only after giving up.
 - Missing features are reported through `capabilities()`, and the UI hides what isn't supported.
 - Every adapter passes one contract test suite:

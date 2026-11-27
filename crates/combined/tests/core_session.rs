@@ -894,6 +894,114 @@ fn hand_off_skips_members_on_connections_marked_for_disconnect() {
     );
 }
 
+fn bad_attach() -> ClientMessage {
+    ClientMessage::Attach(Attach {
+        request: RequestId(9),
+        terminal: term(1),
+        options: request_options(0, 0, false),
+        instance: None,
+    })
+}
+
+/// Fills the connection's control queue, which holds 3, with errors.
+fn fill_control_queue(rig: &mut Rig, connection: ConnectionId) {
+    for _ in 0..3 {
+        rig.send(connection, bad_attach());
+    }
+    assert!(rig.effects().is_empty());
+}
+
+fn disconnects(effects: &[Effect], connection: ConnectionId) -> usize {
+    effects
+        .iter()
+        .filter(|effect| **effect == Effect::Disconnect(connection))
+        .count()
+}
+
+#[test]
+fn every_entry_point_drops_the_connections_it_overflowed() {
+    let config = CoreConfig {
+        max_control_messages: 3,
+        ..CoreConfig::default()
+    };
+    // `a` on `x` owns terminal 1 and `b` on `y` watches it, so a hand-off away from `a`
+    // announces to `y`, whose queue is full.
+    type Step = fn(&mut Rig, ConnectionId, AttachmentId);
+    let steps: [(&str, Step); 3] = [
+        ("disconnect", |rig, x, _| rig.core.disconnect(x, rig.now())),
+        ("backend_event", |rig, _, a| {
+            rig.event(a, 1, AttachEvent::Lost)
+        }),
+        ("backend_stream_ended", |rig, _, a| {
+            rig.core.backend_stream_ended(a, rig.now())
+        }),
+    ];
+    for (name, step) in steps {
+        let mut rig = Rig::with(config.clone(), caps());
+        let (x, y) = (rig.core.connect(), rig.core.connect());
+        let a = rig.open(x, 1, false);
+        rig.open(y, 1, false);
+        rig.request_ownership(x, a);
+        rig.pull(x);
+        rig.pull(y);
+        rig.effects();
+        fill_control_queue(&mut rig, y);
+
+        step(&mut rig, x, a);
+
+        assert_eq!(rig.owner(1), None, "{name}");
+        assert!(!rig.core.has_output(y), "{name}: y was not dropped");
+        assert_eq!(disconnects(&rig.effects(), y), 1, "{name}");
+    }
+
+    // An `attached` that overflows the queue.
+    let mut rig = Rig::with(config, caps());
+    let y = rig.core.connect();
+    let pending = rig.attach_request(y, 1, 2, false);
+    fill_control_queue(&mut rig, y);
+    rig.core.attach_result(pending, Ok(()), rig.now());
+    assert!(!rig.core.has_output(y), "attach_result: y was not dropped");
+    assert_eq!(rig.effects(), [Effect::Disconnect(y)]);
+}
+
+#[test]
+fn one_tick_disconnects_a_connection_once() {
+    let config = CoreConfig {
+        max_control_messages: 3,
+        log_max_bytes: 8192,
+        credit_reserve: 1024,
+        gap_timeout: Millis(1000),
+        ..CoreConfig::default()
+    };
+    let mut rig = Rig::with(config, caps());
+    let (x, y) = (rig.core.connect(), rig.core.connect());
+    // `a` on `x` owns terminal 1, and `b` on `y` watches it.
+    let a = rig.open(x, 1, false);
+    rig.open(y, 1, false);
+    rig.request_ownership(x, a);
+    rig.pull(x);
+    rig.pull(y);
+    rig.effects();
+    // Both connections leave a final gap unsent.
+    let stuck_x = rig.open(x, 2, false);
+    let stuck_y = rig.open(y, 3, false);
+    rig.event(stuck_x, 1, AttachEvent::Data(vec![0; 9000]));
+    rig.event(stuck_y, 1, AttachEvent::Data(vec![0; 9000]));
+    rig.effects();
+    fill_control_queue(&mut rig, y);
+
+    // Dropping `x` hands terminal 1 off and overflows `y`, which is stuck too.
+    rig.core.tick(Millis(1000));
+
+    let effects = rig.effects();
+    assert_eq!(disconnects(&effects, x), 1, "{effects:?}");
+    assert_eq!(disconnects(&effects, y), 1, "{effects:?}");
+    assert!(!rig.core.has_output(x));
+    assert!(!rig.core.has_output(y));
+    assert!(rig.core.attachment_stats(stuck_x).is_none());
+    assert!(rig.core.attachment_stats(stuck_y).is_none());
+}
+
 #[test]
 fn overflow_during_announce_never_leaves_a_stale_owner() {
     let config = CoreConfig {
@@ -1550,8 +1658,8 @@ fn grants_skip_set_display_without_display_queries() {
 #[test]
 fn hand_off_to_most_recently_focused_or_none() {
     let mut rig = Rig::new();
-    let conns: Vec<_> = (0..5).map(|_| rig.core.connect()).collect();
-    let [ca, cb, cc, cd, ce] = conns.as_slice() else {
+    let conns: Vec<_> = (0..6).map(|_| rig.core.connect()).collect();
+    let [ca, cb, cc, cd, ce, cf] = conns.as_slice() else {
         panic!()
     };
     let a = rig.open(*ca, 1, false);
@@ -1559,8 +1667,13 @@ fn hand_off_to_most_recently_focused_or_none() {
     let c = rig.open(*cc, 1, false);
     let d = rig.open(*cd, 1, true);
     let e = rig.open(*ce, 1, false);
+    let f = rig.open(*cf, 1, false);
     rig.request_ownership(*ca, a);
+    // Focus order is neither ID order nor its reverse: the first heir, `c`, is neither the lowest
+    // nor the highest ID among the focused, so ranking by ID either way fails. `f`, the highest
+    // ID, is never focused, and `d` is focused last but is watch-only.
     rig.focus(*cb, b);
+    rig.focus(*ce, e);
     rig.focus(*cc, c);
     rig.focus(*cd, d);
     rig.effects();
@@ -1596,15 +1709,17 @@ fn hand_off_to_most_recently_focused_or_none() {
     );
 
     rig.send(*cc, ClientMessage::Detach(Detach { attachment: c }));
+    assert_eq!(rig.owner(1), Some(e));
+    rig.send(*ce, ClientMessage::Detach(Detach { attachment: e }));
     assert_eq!(rig.owner(1), Some(b));
     rig.send(*cb, ClientMessage::Detach(Detach { attachment: b }));
     assert_eq!(rig.owner(1), None);
     assert!(rig.generation(1) > after_a);
-    let last = rig.pull(*ce).pop().unwrap();
-    assert_eq!(last, ownership_msg(e, rig.generation(1).0, None));
+    let last = rig.pull(*cf).pop().unwrap();
+    assert_eq!(last, ownership_msg(f, rig.generation(1).0, None));
     rig.effects();
-    rig.input(*ce, e, b"x");
-    assert_eq!(rig.owner(1), Some(e));
+    rig.input(*cf, f, b"x");
+    assert_eq!(rig.owner(1), Some(f));
 }
 
 #[test]
