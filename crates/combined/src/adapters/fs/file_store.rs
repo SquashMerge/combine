@@ -4,21 +4,28 @@
 //! project's folder.
 //!
 //! A pulled repository can put a symlink at `.workspace`, at any directory under it or at the
-//! file itself, so the store never follows one there, and refuses it, dangling or not. Every
-//! call walks the path by descriptor: `<space>/.workspace` is opened as a directory with
+//! file itself, so the file operations (`read`, `write`, `write_project`, `remove_file`,
+//! `remove_dir` and `list_dir`) never follow one there, and refuse it, dangling or not. Each
+//! walks the path by descriptor: `<space>/.workspace` is opened as a directory with
 //! `O_NOFOLLOW | O_DIRECTORY`, each folder below it is opened (and, for a write, created with
 //! `mkdirat`) relative to the descriptor of the one above it, the same way, and the file is
 //! checked with `fstatat(AT_SYMLINK_NOFOLLOW)` and then read, replaced or removed relative to
-//! its parent's descriptor: a read opens it with `O_NOFOLLOW`, a write creates its temp file
-//! beside it with `O_EXCL | O_NOFOLLOW` and `renameat`s it over the name, and a remove
-//! `unlinkat`s it.
+//! its parent's descriptor: a read opens it with `O_NOFOLLOW`, a write publishes a temp file
+//! with `renameat` (see [`write_atomic_at`]), and a remove `unlinkat`s it.
 //!
-//! This confinement is race-free. A process that swaps `.workspace`, a folder or the file for a
-//! symlink while a call runs can make the call fail, but can't make it read, create or replace
-//! anything outside `.workspace`: after the first open, every step resolves a single name
-//! relative to a descriptor already open on a folder inside it, and none follows a symlink in
-//! that name (a rename replaces a symlink at its target name; it doesn't follow it). The
-//! space's own path, above `.workspace`, is followed as given: it is the user's folder, not
+//! What this holds against a concurrent process, and what it doesn't:
+//! - Swapping `.workspace`, a folder or the file for a symlink while a call runs can make the
+//!   call fail, but can't make it follow the symlink: after the first open, every step
+//!   resolves one name relative to a descriptor already open on a folder, and none follows a
+//!   symlink in that name (a rename replaces a symlink at its target name).
+//! - A descriptor pins the folder, not its place. If a process moves a folder the call has
+//!   already opened, `.workspace` included, out of `.workspace`, the call goes on in that
+//!   folder where it now is. Only a process running as the user can do that, and SPEC's
+//!   threat model trusts it.
+//! - `watch` is not part of this: the watcher works by path, and follows a symlink at the
+//!   watch root (`watcher.rs`).
+//!
+//! The space's own path, above `.workspace`, is followed as given: it is the user's folder, not
 //! the repository's. A hard link is an ordinary file in its folder and is read as one; a write
 //! replaces the link, never the file it shares. Each folder on the way is opened for reading,
 //! so one the user can search but not list counts as denied. The fallback copies are in the

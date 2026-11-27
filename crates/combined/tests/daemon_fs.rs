@@ -623,12 +623,12 @@ fn fs_file_store_refuses_to_write_a_symlinked_file() {
 
 // ---- confinement against a concurrent swap (#29) ----
 
-/// What the swapping thread exchanges with a symlink to the outside folder or file.
+/// What is exchanged with a symlink to the outside folder or file.
 #[derive(Clone, Copy, Debug)]
 enum Swapped {
     /// `<space>/.workspace`.
     Workspace,
-    /// `<space>/.workspace/sub`, the folder of the path `sub/victim`.
+    /// `<space>/.workspace/sub`, the folder every path is under.
     Folder,
     /// `<space>/.workspace/victim`.
     File,
@@ -636,124 +636,349 @@ enum Swapped {
 
 const INSIDE: &[u8] = b"inside";
 const OUTSIDE: &[u8] = b"OUTSIDE: never to be read or replaced";
-/// How long each race runs. Every assertion is a safety property that holds for any
-/// interleaving, so a slow or busy machine makes the race shorter, never a failure.
-const RACE: Duration = Duration::from_millis(400);
+/// A file only the outside folder has, so a listing that went outside names it.
+const MARKER: &str = "outside-marker";
 
-/// Reads and writes through the store while another thread keeps exchanging one component of
-/// the path with a symlink to the outside. The exchange is atomic (`RENAME_SWAP` on macOS,
-/// `RENAME_EXCHANGE` on Linux), so the name always exists, as the real entry or the symlink. A
-/// read may be refused or see inside bytes, and a write may be refused or land inside; no read
-/// returns the outside bytes, and the outside folder never changes.
-fn race_against_a_swap(swapped: Swapped) {
-    use std::os::unix::fs::symlink;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Arc;
+/// A space whose one component, [`Swapped`], can be exchanged atomically with a symlink to an
+/// outside folder (or file) of the same shape: `victim`, `gone` (a file to remove), `dir/` (a
+/// folder to list) and `empty/` (a folder to remove). The exchange is `RENAME_SWAP` on macOS
+/// and `RENAME_EXCHANGE` on Linux, so the name always exists, as the real entry or the symlink.
+struct SwapSpace {
+    _scratch: ShortTempDir,
+    space: SpaceId,
+    /// Every store path is this plus a name: `sub/` for [`Swapped::Folder`].
+    prefix: &'static str,
+    outside: PathBuf,
+    /// The swapped name, and the name its symlink starts at.
+    real: PathBuf,
+    decoy: PathBuf,
+}
 
-    let scratch = ShortTempDir::new();
-    let space = scratch.path().join("space");
-    let outside = scratch.path().join("outside");
-    let target = outside.join("victim");
-    fs::create_dir_all(&outside).unwrap();
-    fs::write(&target, OUTSIDE).unwrap();
-    let workspace = space.join(".workspace");
-    let (path, real, decoy) = match swapped {
-        Swapped::Workspace => {
-            fs::create_dir_all(&workspace).unwrap();
-            fs::write(workspace.join("victim"), INSIDE).unwrap();
-            symlink(&outside, space.join("decoy")).unwrap();
-            ("victim", workspace.clone(), space.join("decoy"))
+impl SwapSpace {
+    fn new(swapped: Swapped) -> SwapSpace {
+        use std::os::unix::fs::symlink;
+        let scratch = ShortTempDir::new();
+        let space = scratch.path().join("space");
+        let workspace = space.join(".workspace");
+        let outside = scratch.path().join("outside");
+        let (root, prefix, real, decoy) = match swapped {
+            Swapped::Workspace => (
+                workspace.clone(),
+                "",
+                workspace.clone(),
+                space.join("decoy"),
+            ),
+            Swapped::Folder => {
+                let sub = workspace.join("sub");
+                (sub.clone(), "sub/", sub, workspace.join("decoy"))
+            }
+            Swapped::File => (
+                workspace.clone(),
+                "",
+                workspace.join("victim"),
+                workspace.join("decoy"),
+            ),
+        };
+        for (folder, bytes, listed) in [(&root, INSIDE, "inside"), (&outside, OUTSIDE, MARKER)] {
+            fs::create_dir_all(folder.join("dir")).unwrap();
+            fs::create_dir_all(folder.join("empty")).unwrap();
+            fs::write(folder.join("victim"), bytes).unwrap();
+            fs::write(folder.join("gone"), bytes).unwrap();
+            fs::write(folder.join("dir").join(listed), bytes).unwrap();
         }
-        Swapped::Folder => {
-            fs::create_dir_all(workspace.join("sub")).unwrap();
-            fs::write(workspace.join("sub/victim"), INSIDE).unwrap();
-            symlink(&outside, workspace.join("decoy")).unwrap();
-            ("sub/victim", workspace.join("sub"), workspace.join("decoy"))
+        match swapped {
+            Swapped::File => symlink(outside.join("victim"), &decoy).unwrap(),
+            _ => symlink(&outside, &decoy).unwrap(),
         }
-        Swapped::File => {
-            fs::create_dir_all(&workspace).unwrap();
-            fs::write(workspace.join("victim"), INSIDE).unwrap();
-            symlink(&target, workspace.join("decoy")).unwrap();
-            ("victim", workspace.join("victim"), workspace.join("decoy"))
+        SwapSpace {
+            _scratch: scratch,
+            space: SpaceId(space.to_str().unwrap().to_string()),
+            prefix,
+            outside,
+            real,
+            decoy,
         }
-    };
-    let space = SpaceId(space.to_str().unwrap().to_string());
+    }
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let swaps = Arc::new(AtomicU64::new(0));
-    let swapper = {
-        let (stop, swaps, target) = (Arc::clone(&stop), Arc::clone(&swaps), target.clone());
-        std::thread::spawn(move || {
-            use rustix::fs::{renameat_with, RenameFlags, CWD};
-            while !stop.load(Ordering::Relaxed) {
-                // A write replaces a symlink at the file with a regular file. When neither
-                // name is the symlink any more, make the decoy one again.
-                if let Swapped::File = swapped {
-                    let is_link = |name: &Path| {
-                        fs::symlink_metadata(name)
-                            .map(|meta| meta.file_type().is_symlink())
-                            .unwrap_or(false)
-                    };
-                    if !is_link(&real) && !is_link(&decoy) {
-                        let _ = fs::remove_file(&decoy);
-                        let _ = symlink(&target, &decoy);
-                    }
+    fn path(&self, name: &str) -> String {
+        format!("{}{name}", self.prefix)
+    }
+
+    /// Exchanges the swapped name with the symlink, or back.
+    fn exchange(&self) -> rustix::io::Result<()> {
+        use rustix::fs::{renameat_with, RenameFlags, CWD};
+        renameat_with(CWD, &self.real, CWD, &self.decoy, RenameFlags::EXCHANGE)
+    }
+
+    /// For [`Swapped::File`]: a write replaces the symlink at the file with a regular file.
+    /// When neither name is the symlink any more, makes the decoy one again.
+    fn restore_file_symlink(&self) {
+        let is_link = |name: &Path| {
+            fs::symlink_metadata(name)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+        };
+        if !is_link(&self.real) && !is_link(&self.decoy) {
+            let _ = fs::remove_file(&self.decoy);
+            let _ = std::os::unix::fs::symlink(self.outside.join("victim"), &self.decoy);
+        }
+    }
+
+    /// The outside folder's whole tree: each path and its bytes (empty for a folder).
+    fn outside_tree(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, folder: &Path, tree: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if fs::symlink_metadata(&path).unwrap().is_dir() {
+                    tree.push((relative, Vec::new()));
+                    walk(root, &path, tree);
+                } else {
+                    tree.push((relative, fs::read(&path).unwrap()));
                 }
-                if renameat_with(CWD, &real, CWD, &decoy, RenameFlags::EXCHANGE).is_ok() {
+            }
+        }
+        let mut tree = Vec::new();
+        walk(&self.outside, &self.outside, &mut tree);
+        tree.sort();
+        tree
+    }
+}
+
+/// An outcome the store may give under a swap: done inside, or refused.
+fn refused<T: std::fmt::Debug>(result: &Result<T, StoreError>) -> bool {
+    match result {
+        Ok(_) => false,
+        Err(StoreError::Unavailable(_)) => true,
+        Err(error) => panic!("neither done nor refused: {error:?}"),
+    }
+}
+
+/// Coordinated phases, with no scheduler in the way: with the real entry in place every
+/// operation succeeds inside, with the symlink in place every one is refused, and swapping
+/// back makes them succeed again. The outside tree never changes.
+fn phases(swapped: Swapped) {
+    let s = SwapSpace::new(swapped);
+    let store = FsFileStore::new();
+    let before = s.outside_tree();
+    let (victim, gone, dir, empty) = (
+        s.path("victim"),
+        s.path("gone"),
+        s.path("dir"),
+        s.path("empty"),
+    );
+    // The paths that cross the swapped name: for the file, only the file itself.
+    let crossing: Vec<String> = match swapped {
+        Swapped::File => vec![victim.clone()],
+        _ => vec![victim.clone(), gone.clone(), dir.clone(), empty.clone()],
+    };
+
+    // The real entry is in place.
+    let read = block_on(store.read(&s.space, &victim, ANY_SIZE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.bytes, INSIDE, "{swapped:?}");
+    block_on(store.write(&s.space, &victim, b"written".to_vec())).unwrap();
+    let read = block_on(store.read(&s.space, &victim, ANY_SIZE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.bytes, b"written", "{swapped:?}");
+    let listed = block_on(store.list_dir(&s.space, &dir, 16))
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = listed
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["inside"], "{swapped:?}");
+    block_on(store.remove_file(&s.space, &gone)).unwrap();
+    block_on(store.remove_dir(&s.space, &empty)).unwrap();
+    assert_eq!(
+        block_on(store.read(&s.space, &gone, ANY_SIZE)).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(store.list_dir(&s.space, &empty, 16)).unwrap(),
+        None
+    );
+
+    // The symlink is in place: everything through it is refused.
+    s.exchange().unwrap();
+    for path in &crossing {
+        let read = block_on(store.read(&s.space, path, ANY_SIZE));
+        let wrote = block_on(store.write(&s.space, path, b"escaped".to_vec()));
+        let project = block_on(store.write_project(&s.space, path, b"escaped".to_vec()));
+        let listed = block_on(store.list_dir(&s.space, path, 16));
+        let removed_file = block_on(store.remove_file(&s.space, path));
+        let removed_dir = block_on(store.remove_dir(&s.space, path));
+        assert!(refused(&read), "{swapped:?} read {path}: {read:?}");
+        assert!(refused(&wrote), "{swapped:?} write {path}: {wrote:?}");
+        assert!(
+            refused(&project),
+            "{swapped:?} write_project {path}: {project:?}"
+        );
+        assert!(refused(&listed), "{swapped:?} list_dir {path}: {listed:?}");
+        assert!(
+            refused(&removed_file),
+            "{swapped:?} remove_file {path}: {removed_file:?}"
+        );
+        assert!(
+            refused(&removed_dir),
+            "{swapped:?} remove_dir {path}: {removed_dir:?}"
+        );
+    }
+    assert_eq!(s.outside_tree(), before, "{swapped:?}: the outside changed");
+
+    // Swapped back: inside again.
+    s.exchange().unwrap();
+    let read = block_on(store.read(&s.space, &victim, ANY_SIZE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.bytes, b"written", "{swapped:?}");
+    block_on(store.write(&s.space, &victim, INSIDE.to_vec())).unwrap();
+    assert_eq!(s.outside_tree(), before, "{swapped:?}: the outside changed");
+}
+
+#[test]
+fn fs_file_store_refuses_through_the_workspace_only_while_it_is_swapped_for_a_symlink() {
+    phases(Swapped::Workspace);
+}
+
+#[test]
+fn fs_file_store_refuses_through_a_folder_only_while_it_is_swapped_for_a_symlink() {
+    phases(Swapped::Folder);
+}
+
+#[test]
+fn fs_file_store_refuses_the_file_only_while_it_is_swapped_for_a_symlink() {
+    phases(Swapped::File);
+}
+
+/// Each operation's outcomes in a race.
+#[derive(Debug, Default)]
+struct Tally {
+    done: u64,
+    refused: u64,
+}
+
+impl Tally {
+    fn count<T: std::fmt::Debug>(&mut self, result: &Result<T, StoreError>) {
+        if refused(result) {
+            self.refused += 1;
+        } else {
+            self.done += 1;
+        }
+    }
+}
+
+/// The race runs at least this long, and until reads and writes have each been seen both
+/// done and refused.
+const RACE: Duration = Duration::from_millis(300);
+/// It stops here whatever it has seen, so a test stays under 2 s.
+const RACE_CAP: Duration = Duration::from_millis(1500);
+
+/// Every operation, in turn, while another thread keeps exchanging the swapped name with the
+/// symlink. A read may be refused or see inside bytes, a listing may be refused or list the
+/// inside folder, and a write or a removal may be refused or act inside; no read returns
+/// the outside bytes, no listing names the outside marker, and the outside tree never
+/// changes. Both outcomes of reads and of writes must have been seen, so a store that refuses
+/// everything fails.
+fn race_against_a_swap(swapped: Swapped) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let s = SwapSpace::new(swapped);
+    let before = s.outside_tree();
+    let store = FsFileStore::new();
+    let (victim, gone, dir, empty) = (
+        s.path("victim"),
+        s.path("gone"),
+        s.path("dir"),
+        s.path("empty"),
+    );
+    let stop = AtomicBool::new(false);
+    let swaps = AtomicU64::new(0);
+    let (mut reads, mut writes, mut lists, mut removes) = (
+        Tally::default(),
+        Tally::default(),
+        Tally::default(),
+        Tally::default(),
+    );
+    let mut rounds = 0u64;
+    let mut escape = None;
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                if let Swapped::File = swapped {
+                    s.restore_file_symlink();
+                }
+                if s.exchange().is_ok() {
                     swaps.fetch_add(1, Ordering::Relaxed);
                 }
             }
-        })
-    };
-    // Race only once the swapper runs.
-    let started = Instant::now();
-    while swaps.load(Ordering::Relaxed) == 0 && started.elapsed() < BOUND {
-        std::thread::yield_now();
-    }
-
-    let store = FsFileStore::new();
-    let (mut rounds, mut reads, mut writes, mut refused) = (0u64, 0u64, 0u64, 0u64);
-    let mut escape = None;
-    let deadline = Instant::now() + RACE;
-    while Instant::now() < deadline && escape.is_none() {
-        rounds += 1;
-        match block_on(store.read(&space, path, ANY_SIZE)) {
-            Ok(Some(file)) if file.bytes == OUTSIDE => {
-                escape = Some("a read returned the outside file".to_string());
-            }
-            Ok(_) => reads += 1,
-            Err(StoreError::Unavailable(_)) => refused += 1,
-            Err(error) => escape = Some(format!("unexpected read error {error:?}")),
+        });
+        // Race only once the swapper runs.
+        let started = Instant::now();
+        while swaps.load(Ordering::Relaxed) == 0 && started.elapsed() < BOUND {
+            std::thread::yield_now();
         }
-        // A write syncs to disk, so it is far slower than a read: one in four rounds.
-        if rounds % 4 == 0 {
-            match block_on(store.write(&space, path, INSIDE.to_vec())) {
-                Ok(_) => writes += 1,
-                Err(StoreError::Unavailable(_)) => refused += 1,
-                Err(error) => escape = Some(format!("unexpected write error {error:?}")),
+        let started = Instant::now();
+        let covered = |reads: &Tally, writes: &Tally| {
+            reads.done > 0 && reads.refused > 0 && writes.done > 0 && writes.refused > 0
+        };
+        while escape.is_none()
+            && started.elapsed() < RACE_CAP
+            && (started.elapsed() < RACE || !covered(&reads, &writes))
+        {
+            rounds += 1;
+            let read = block_on(store.read(&s.space, &victim, ANY_SIZE));
+            if let Ok(Some(file)) = &read {
+                if file.bytes == OUTSIDE {
+                    escape = Some("a read returned the outside file".to_string());
+                }
             }
-            if fs::read(&target).unwrap() != OUTSIDE {
-                escape = Some("a write replaced the outside file".to_string());
+            reads.count(&read);
+            // A write syncs to disk, so it is far slower than a read: one round in four
+            // writes, and the others list or remove.
+            match rounds % 4 {
+                0 => writes.count(&block_on(store.write(&s.space, &victim, INSIDE.to_vec()))),
+                1 => {
+                    let listed = block_on(store.list_dir(&s.space, &dir, 16));
+                    if let Ok(Some(listing)) = &listed {
+                        if listing.entries.iter().any(|entry| entry.name == MARKER) {
+                            escape = Some("a listing named the outside folder's file".into());
+                        }
+                    }
+                    lists.count(&listed);
+                }
+                2 => removes.count(&block_on(store.remove_file(&s.space, &gone))),
+                _ => removes.count(&block_on(store.remove_dir(&s.space, &empty))),
+            }
+            if rounds % 4 != 1 && s.outside_tree() != before {
+                escape = Some("an operation changed the outside folder".to_string());
             }
         }
-    }
-    stop.store(true, Ordering::Relaxed);
-    swapper.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+    });
     let swaps = swaps.load(Ordering::Relaxed);
     eprintln!(
-        "{swapped:?}: {swaps} swaps; {rounds} rounds, {reads} reads and {writes} writes done, \
-         {refused} refused"
+        "{swapped:?}: {swaps} swaps, {rounds} rounds; reads {reads:?}, writes {writes:?}, \
+         lists {lists:?}, removes {removes:?}"
     );
 
-    assert!(swaps > 0, "the swapper never ran");
     assert_eq!(escape, None, "{swapped:?}: the store escaped .workspace");
-    let mut names: Vec<_> = fs::read_dir(&outside)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["victim"], "nothing new appears outside");
-    assert_eq!(fs::read(&target).unwrap(), OUTSIDE);
+    assert_eq!(s.outside_tree(), before, "{swapped:?}: the outside changed");
+    assert!(swaps > 0, "{swapped:?}: the swapper never ran");
+    assert!(rounds > 0, "{swapped:?}: the race never ran");
+    assert!(
+        reads.done > 0 && reads.refused > 0,
+        "{swapped:?}: reads {reads:?}"
+    );
+    assert!(
+        writes.done > 0 && writes.refused > 0,
+        "{swapped:?}: writes {writes:?}"
+    );
 }
 
 #[test]
