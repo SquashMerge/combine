@@ -16,7 +16,7 @@ import { type SpaceKey, sameSpace, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort, OpenUrlPort, PanelPort, SpawnPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
-import type { HostsSnapshot, TerminalSummary } from '../model/hosts';
+import { type HostsSnapshot, type TerminalSummary, isConnected } from '../model/hosts';
 import {
   type LayoutNode,
   type LayoutSnapshot,
@@ -367,7 +367,7 @@ export function App({
   const hostConnected =
     selected !== null &&
     snapshot?.hosts.some(
-      (host) => host.hostId === selected.hostId && host.connection.kind === 'connected',
+      (host) => host.hostId === selected.hostId && isConnected(host),
     ) === true;
   const held =
     shownLayout !== null && layout.snapshot === null ? heldReason(hostConnected, layout.error) : null;

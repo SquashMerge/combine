@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LayoutPort, PanelPort } from '../ipc/port';
-import type { HostsSnapshot } from '../model/hosts';
+import { type HostsSnapshot, isConnected } from '../model/hosts';
 import { type DecimalU64, type HostId, compareDecimalU64 } from '../model/ids';
 import type { LayoutEvent, LayoutSnapshot, SplitDirection } from '../model/layout';
 import { LayoutQueue } from '../model/layoutQueue';
@@ -48,10 +48,8 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function isConnected(hosts: HostsSnapshot | null, hostId: HostId): boolean {
-  return (hosts?.hosts ?? []).some(
-    (host) => host.hostId === hostId && host.connection.kind === 'connected',
-  );
+function hostConnected(hosts: HostsSnapshot | null, hostId: HostId): boolean {
+  return (hosts?.hosts ?? []).some((host) => host.hostId === hostId && isConnected(host));
 }
 
 /**
@@ -90,7 +88,7 @@ export function useSpaceLayout(
 
   const ready = listening === port && (panelPort === undefined || panelsListening === panelPort);
   const watchHost =
-    ready && selected !== null && isConnected(hosts, selected.hostId) ? selected.hostId : null;
+    ready && selected !== null && hostConnected(hosts, selected.hostId) ? selected.hostId : null;
   const watchPath = watchHost === null ? null : (selected?.path ?? null);
 
   useEffect(() => {
