@@ -33,6 +33,7 @@ pub fn retry_host(service: State<'_, HostsService>, name: String) -> Result<(), 
     service.retry(&name).map_err(|err| err.to_string())
 }
 
+/// The sink the hosts service publishes through: each snapshot becomes a `hosts-changed` event.
 pub fn sink(handle: AppHandle) -> Arc<dyn SnapshotSink> {
     Arc::new(TauriSink(handle))
 }
