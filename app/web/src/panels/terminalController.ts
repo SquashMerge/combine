@@ -22,13 +22,19 @@ export interface TerminalControllerOptions {
   createAdapter: XtermAdapterFactory;
 }
 
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 function sameCell(a: CellSize, b: CellSize): boolean {
   return a.width === b.width && a.height === b.height;
 }
 
 function sameStatus(a: PanelView['status'], b: PanelView['status']): boolean {
   if (a === null || b === null) return a === b;
-  return a.kind === b.kind && (a.kind !== 'error' || (b.kind === 'error' && a.code === b.code));
+  if (a.kind === 'error') return b.kind === 'error' && a.code === b.code;
+  if (a.kind === 'streamFailed') return b.kind === 'streamFailed' && a.message === b.message;
+  return a.kind === b.kind;
 }
 
 function sameView(a: PanelView, b: PanelView): boolean {
@@ -48,7 +54,8 @@ function sameView(a: PanelView, b: PanelView): boolean {
     a.outputSkipped === b.outputSkipped &&
     a.unorderedResizes === b.unorderedResizes &&
     a.canTakeInput === b.canTakeInput &&
-    a.canReattach === b.canReattach
+    a.canReattach === b.canReattach &&
+    a.canRetry === b.canRetry
   );
 }
 
@@ -69,6 +76,8 @@ export class TerminalController {
   private pendingSeq: number | null = null;
   private draining = false;
   private stopped = false;
+  private opening = false;
+  private attempt = 0;
   private stopping: Promise<void> | null = null;
   private onHidden: (() => void) | null = null;
 
@@ -77,18 +86,16 @@ export class TerminalController {
     this.view = this.machine.view();
   }
 
+  /** Never rejects: a refused stream becomes the `streamFailed` status, and `retryStream` reopens it. */
   async start(host: HTMLElement): Promise<void> {
     this.host = host;
-    const stream = await this.options.port.openStream(this.options.hostId, (event) => {
-      if (this.stream === null) this.early.push(event);
-      else this.dispatch({ kind: 'event', event });
-    });
-    if (this.stopped) {
-      await stream.close().catch(() => undefined);
-      return;
-    }
-    this.stream = stream;
-    for (const event of this.early.splice(0)) this.dispatch({ kind: 'event', event });
+    await this.open();
+  }
+
+  retryStream(): void {
+    if (this.stopped || this.opening || this.stream !== null) return;
+    this.dispatch({ kind: 'retryStream' });
+    void this.open();
   }
 
   /**
@@ -98,6 +105,10 @@ export class TerminalController {
   stop(): Promise<void> {
     this.stopping ??= this.shutDown();
     return this.stopping;
+  }
+
+  setFocused(focused: boolean): void {
+    this.input({ kind: 'focused', focused });
   }
 
   setVisible(visible: boolean): void {
@@ -125,6 +136,33 @@ export class TerminalController {
 
   getView(): PanelView {
     return this.view;
+  }
+
+  /** Opens the panel stream. Callbacks and results of an older attempt are dropped. */
+  private async open(): Promise<void> {
+    this.attempt += 1;
+    const attempt = this.attempt;
+    this.opening = true;
+    this.early.length = 0;
+    try {
+      const stream = await this.options.port.openStream(this.options.hostId, (event) => {
+        if (attempt !== this.attempt) return;
+        if (this.stream === null) this.early.push(event);
+        else this.dispatch({ kind: 'event', event });
+      });
+      if (this.stopped) {
+        await stream.close().catch(() => undefined);
+        return;
+      }
+      this.stream = stream;
+      for (const event of this.early.splice(0)) this.dispatch({ kind: 'event', event });
+    } catch (cause) {
+      this.attempt += 1;
+      this.early.length = 0;
+      if (!this.stopped) this.dispatch({ kind: 'streamFailed', message: errorText(cause) });
+    } finally {
+      this.opening = false;
+    }
   }
 
   private async shutDown(): Promise<void> {

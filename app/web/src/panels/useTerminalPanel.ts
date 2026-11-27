@@ -10,6 +10,7 @@ export interface UseTerminalPanelOptions {
   hostId: HostId;
   termId: TermId;
   visible: boolean;
+  focused: boolean;
   createAdapter: XtermAdapterFactory;
 }
 
@@ -19,6 +20,7 @@ export interface TerminalPanelState {
   onContainerSize: (size: { width: number; height: number }) => void;
   takeInput: () => void;
   reattach: () => void;
+  retry: () => void;
 }
 
 /**
@@ -29,6 +31,7 @@ export function useTerminalPanel({
   hostId,
   termId,
   visible,
+  focused,
   createAdapter,
 }: UseTerminalPanelOptions): TerminalPanelState {
   const controllerRef = useRef<TerminalController | null>(null);
@@ -43,7 +46,7 @@ export function useTerminalPanel({
   useEffect(() => {
     const element = hostElement.current;
     if (element === null) return;
-    controller.start(element).catch(() => undefined);
+    void controller.start(element);
     return () => {
       controller.stop().catch(() => undefined);
     };
@@ -52,6 +55,10 @@ export function useTerminalPanel({
   useEffect(() => {
     controller.setVisible(visible);
   }, [controller, visible]);
+
+  useEffect(() => {
+    controller.setFocused(focused);
+  }, [controller, focused]);
 
   const view = useSyncExternalStore(
     useCallback((listener) => controller.subscribe(listener), [controller]),
@@ -65,6 +72,7 @@ export function useTerminalPanel({
   );
   const takeInput = useCallback(() => controller.takeInput(), [controller]);
   const reattach = useCallback(() => controller.reattach(), [controller]);
+  const retry = useCallback(() => controller.retryStream(), [controller]);
 
-  return { view, hostRef, onContainerSize, takeInput, reattach };
+  return { view, hostRef, onContainerSize, takeInput, reattach, retry };
 }

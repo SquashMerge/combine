@@ -11,6 +11,7 @@ import {
   MemoryTerminalPort,
   attachedEvent,
   closedEvent,
+  connectionEvent,
   cursor,
   dataEvent,
   errorEvent,
@@ -1171,6 +1172,86 @@ describe('terminalController resize guards (test-verifier)', () => {
     expect(t.stream().commands('resize')).toEqual([
       { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
       { op: 'resize', attachment: '8', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
+    ]);
+  });
+});
+
+describe('terminalController stream failure', () => {
+  it('a refused stream shows the failure and retry opens it', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.setVisible(true);
+    expect(t.controller.getView()).toMatchObject({
+      status: { kind: 'streamFailed', message: 'link down' },
+      canRetry: true,
+    });
+    expect(t.port.streams).toEqual([]);
+    t.controller.retryStream();
+    await flush();
+    expect(t.controller.getView()).toMatchObject({ status: null, canRetry: false });
+    expect(t.port.streams).toHaveLength(1);
+    expect(t.ops()).toEqual(['attach']);
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toHaveLength(1);
+  });
+
+  it('retry while the stream is opening does nothing', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.retryStream();
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toHaveLength(1);
+  });
+
+  it('a stopped controller never retries', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    await t.controller.stop();
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toEqual([]);
+  });
+
+  it('events from a refused attempt are dropped', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.setVisible(true);
+    const refused = t.port.refusedListeners[0];
+    if (refused === undefined) throw new Error('no refused attempt');
+    t.controller.retryStream();
+    await flush();
+    expect(t.controller.getView().connected).toBe(true);
+    refused(connectionEvent(false));
+    refused(attachedEvent(9, 99));
+    await flush();
+    expect(t.controller.getView().connected).toBe(true);
+    expect(t.controller.getView().phase).toBe('attaching');
+  });
+});
+
+describe('terminalController claim', () => {
+  it('a focused panel on a terminal with no owner stores its fit, then requests input', async () => {
+    const t = rig();
+    await t.controller.start(t.host);
+    t.controller.setContainerSize(800, 340);
+    t.controller.setFocused(true);
+    t.controller.setVisible(true);
+    t.stream().emit(attachedEvent(1, 7));
+    t.stream().emit(startedEvent(cursor(7, 1, 0)));
+    await Promise.resolve();
+    t.stream().emit(ownershipEvent(7, 3, null));
+    expect(t.stream().sent.map((command) => command.op).filter((op) => op !== 'attach')).toEqual([
+      'resize',
+      'requestOwnership',
+    ]);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '3' },
     ]);
   });
 });

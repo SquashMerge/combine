@@ -163,7 +163,15 @@ export class MemoryTerminalPort implements TerminalPort {
   onCommand: ((stream: MemoryTerminalStream, command: SentCommand) => void) | null = null;
   /** Called after the connection event and before `openStream` resolves. */
   onOpen: ((stream: MemoryTerminalStream) => void) | null = null;
+  /** The listeners of opens that `failNextOpen` refused, for tests that feed them late events. */
+  readonly refusedListeners: TerminalStreamListener[] = [];
   private readonly connected = new Map<HostId, boolean>();
+  private readonly refusals: string[] = [];
+
+  /** The next `openStream` rejects with `message`, after delivering its connection event. */
+  failNextOpen(message: string): void {
+    this.refusals.push(message);
+  }
 
   isConnected(hostId: HostId): boolean {
     return this.connected.get(hostId) ?? true;
@@ -177,6 +185,12 @@ export class MemoryTerminalPort implements TerminalPort {
   }
 
   openStream(hostId: HostId, listener: TerminalStreamListener): Promise<TerminalStream> {
+    const refusal = this.refusals.shift();
+    if (refusal !== undefined) {
+      this.refusedListeners.push(listener);
+      listener(connectionEvent(this.isConnected(hostId)));
+      return Promise.reject(new Error(refusal));
+    }
     const stream = new MemoryTerminalStream(hostId, listener, this);
     this.streams.push(stream);
     stream.emit(connectionEvent(this.isConnected(hostId)));

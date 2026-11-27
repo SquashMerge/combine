@@ -25,7 +25,8 @@ export type PanelStatus =
   | { kind: 'exited' }
   | { kind: 'lost' }
   | { kind: 'closed' }
-  | { kind: 'error'; code: string };
+  | { kind: 'error'; code: string }
+  | { kind: 'streamFailed'; message: string };
 
 export type MachineInput =
   | { kind: 'show' }
@@ -40,6 +41,9 @@ export type MachineInput =
   | { kind: 'containerSize'; width: number; height: number }
   | { kind: 'cellSize'; cell: CellSize }
   | { kind: 'takeInput' }
+  | { kind: 'focused'; focused: boolean }
+  | { kind: 'streamFailed'; message: string }
+  | { kind: 'retryStream' }
   | { kind: 'reattach' }
   | { kind: 'timer'; timer: TimerName };
 
@@ -91,6 +95,7 @@ export interface PanelView {
   unorderedResizes: boolean;
   canTakeInput: boolean;
   canReattach: boolean;
+  canRetry: boolean;
 }
 
 /** A FIFO that never copies on `shift`: replays can queue 16,384 events. */
@@ -145,6 +150,7 @@ const IGNORED_ATTACHMENT_ERRORS = new Set(['stale_generation', 'unknown_attachme
 
 export class AttachmentMachine {
   private visible = false;
+  private focused = false;
   private connected = false;
   private phase: Phase = 'hidden';
   private attachment: DecimalU64 | null = null;
@@ -167,6 +173,7 @@ export class AttachmentMachine {
   private cell: CellSize = DEFAULT_CELL;
   private sentDisplay: Display | null = null;
   private sentResize: SentResize | null = null;
+  private claimedGeneration: DecimalU64 | null = null;
   private effects: MachineEffect[] = [];
 
   constructor(private readonly terminal: TermId) {}
@@ -176,6 +183,7 @@ export class AttachmentMachine {
     this.step(input);
     this.advance();
     this.maybeResume();
+    this.maybeClaim();
     return this.effects;
   }
 
@@ -209,6 +217,7 @@ export class AttachmentMachine {
       unorderedResizes: !this.orderedResizes,
       canTakeInput: this.phase === 'live' && this.connected && !isOwner,
       canReattach: this.phase === 'ended' && this.status?.kind === 'lost',
+      canRetry: this.status?.kind === 'streamFailed',
     };
   }
 
@@ -309,6 +318,15 @@ export class AttachmentMachine {
         return this.onDomFocus();
       case 'takeInput':
         return this.onTakeInput();
+      case 'focused':
+        this.focused = input.focused;
+        return;
+      case 'streamFailed':
+        this.status = { kind: 'streamFailed', message: input.message };
+        return;
+      case 'retryStream':
+        if (this.status?.kind === 'streamFailed') this.status = null;
+        return;
     }
   }
 
@@ -353,8 +371,49 @@ export class AttachmentMachine {
 
   private onTakeInput(): void {
     if (this.phase === 'live' && this.connected && this.attachment !== null && !this.isOwner()) {
-      this.effects.push({ kind: 'requestOwnership', attachment: this.attachment });
+      this.requestInput(this.attachment);
     }
+  }
+
+  /**
+   * Sends the fit as this attachment's resize first, so the daemon stores it and applies it on
+   * the grant, then asks for input.
+   */
+  private requestInput(attachment: DecimalU64): void {
+    if (this.ownership !== null && this.container !== null) {
+      const fit = fitGrid(this.container, this.cell);
+      if (fit !== null) {
+        const generation = this.ownership.generation;
+        this.sentResize = { size: fit, generation };
+        this.effects.push({
+          kind: 'resize',
+          attachment,
+          size: fit,
+          ownershipGeneration: generation,
+        });
+      }
+    }
+    this.effects.push({ kind: 'requestOwnership', attachment });
+  }
+
+  /** A focused live panel claims a terminal that has no owner, once per ownership generation. */
+  private maybeClaim(): void {
+    if (
+      !this.visible ||
+      !this.focused ||
+      this.phase !== 'live' ||
+      !this.connected ||
+      this.attachment === null ||
+      this.instance === null ||
+      this.stale ||
+      this.ownership === null ||
+      this.ownership.owner !== null ||
+      this.claimedGeneration === this.ownership.generation
+    ) {
+      return;
+    }
+    this.claimedGeneration = this.ownership.generation;
+    this.requestInput(this.attachment);
   }
 
   private onResizeTimer(): void {
@@ -393,7 +452,7 @@ export class AttachmentMachine {
   private show(): void {
     if (this.visible) return;
     this.visible = true;
-    this.status = null;
+    if (this.status?.kind !== 'streamFailed') this.status = null;
     if (this.phase === 'hidden') {
       if (this.connected) this.attach();
       else this.phase = 'waiting';
@@ -782,6 +841,7 @@ export class AttachmentMachine {
     this.acked = null;
     this.ownership = null;
     this.sentResize = null;
+    this.claimedGeneration = null;
     this.queue.clear();
     this.applying = null;
   }
