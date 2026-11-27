@@ -205,14 +205,24 @@
       "name": "connection_up",
       "ipc": {
         "type": "connection",
-        "connected": true
+        "connected": true,
+        "instance": "4bcff4a58f4d97d505396e5a43a807e6"
+      }
+    },
+    {
+      "name": "connection_up_without_an_instance",
+      "ipc": {
+        "type": "connection",
+        "connected": true,
+        "instance": null
       }
     },
     {
       "name": "connection_down",
       "ipc": {
         "type": "connection",
-        "connected": false
+        "connected": false,
+        "instance": null
       }
     }
   ],
@@ -249,6 +259,29 @@
     }
   ],
   "rejected_control": [
+    {
+      "name": "connection_without_an_instance",
+      "ipc": {
+        "type": "connection",
+        "connected": true
+      }
+    },
+    {
+      "name": "connection_instance_not_a_string",
+      "ipc": {
+        "type": "connection",
+        "connected": true,
+        "instance": 7
+      }
+    },
+    {
+      "name": "connection_instance_empty",
+      "ipc": {
+        "type": "connection",
+        "connected": true,
+        "instance": ""
+      }
+    },
     {
       "name": "u64_as_number",
       "ipc": {

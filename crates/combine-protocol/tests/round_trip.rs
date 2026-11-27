@@ -498,6 +498,7 @@ fn error_codes_encode_as_snake_case() {
         (ErrorCode::UnknownPanel, "unknown_panel"),
         (ErrorCode::UnknownCaller, "unknown_caller"),
         (ErrorCode::PanelLimit, "panel_limit"),
+        (ErrorCode::BackendMismatch, "backend_mismatch"),
         (ErrorCode::Internal, "internal"),
     ];
     for (code, name) in codes {

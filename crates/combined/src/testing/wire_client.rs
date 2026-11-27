@@ -129,6 +129,7 @@ pub fn attach(client: &mut WireClient, term: &TermId) -> AttachmentId {
             observe: false,
             history: 0,
         },
+        instance: None,
     }));
     let mut attachment = None;
     loop {

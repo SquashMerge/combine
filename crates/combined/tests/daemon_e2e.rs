@@ -34,6 +34,7 @@ fn attach(bridge: &mut BridgeClient, term: &TermId) -> AttachmentId {
         request: RequestId(2),
         terminal: term.clone(),
         options: request_options(80, 24, false),
+        instance: None,
     }));
     let mut attachment = None;
     loop {
@@ -126,6 +127,7 @@ fn attach_replay_and_resume_through_combined_connect() {
     second.send(&ClientMessage::Resume(Resume {
         request: RequestId(3),
         cursor: c1,
+        instance: None,
     }));
     let replay_through = loop {
         match second.recv() {

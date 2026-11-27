@@ -290,6 +290,7 @@ impl<'t, T: Target> Harness<'t, T> {
                 request,
                 terminal: term.clone(),
                 options,
+                instance: None,
             }),
         )
         .await?;
@@ -517,7 +518,11 @@ impl<'t, T: Target> Harness<'t, T> {
             let request = c.next_request();
             self.deliver(
                 connection,
-                ClientMessage::Resume(Resume { request, cursor }),
+                ClientMessage::Resume(Resume {
+                    request,
+                    cursor,
+                    instance: None,
+                }),
             )
             .await;
             requests.push(request);

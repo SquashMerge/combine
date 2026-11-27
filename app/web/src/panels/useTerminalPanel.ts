@@ -9,6 +9,8 @@ export interface UseTerminalPanelOptions {
   port: TerminalPort;
   hostId: HostId;
   termId: TermId;
+  /** The backend instance a pinned panel's terminal belongs to; `null` to follow the active terminal. */
+  instance: string | null;
   visible: boolean;
   focused: boolean;
   createAdapter: XtermAdapterFactory;
@@ -24,18 +26,19 @@ export interface TerminalPanelState {
 }
 
 /**
- * `hostId` and `termId` are fixed for the panel's lifetime: key the panel by them. The controller is created once and `stop()` is permanent, so never run this hook under React.StrictMode or a Fast Refresh double-mount.
+ * `hostId`, `termId` and `instance` are fixed for the panel's lifetime: key the panel by them. The controller is created once and `stop()` is permanent, so never run this hook under React.StrictMode or a Fast Refresh double-mount.
  */
 export function useTerminalPanel({
   port,
   hostId,
   termId,
+  instance,
   visible,
   focused,
   createAdapter,
 }: UseTerminalPanelOptions): TerminalPanelState {
   const controllerRef = useRef<TerminalController | null>(null);
-  controllerRef.current ??= new TerminalController({ port, hostId, termId, createAdapter });
+  controllerRef.current ??= new TerminalController({ port, hostId, termId, instance, createAdapter });
   const controller = controllerRef.current;
   const hostElement = useRef<HTMLDivElement | null>(null);
 

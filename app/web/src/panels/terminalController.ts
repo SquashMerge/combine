@@ -19,6 +19,8 @@ export interface TerminalControllerOptions {
   port: TerminalPort;
   hostId: HostId;
   termId: TermId;
+  /** The backend instance a pinned panel's terminal belongs to; `null` or absent to follow the active terminal. */
+  instance?: string | null;
   createAdapter: XtermAdapterFactory;
 }
 
@@ -34,6 +36,7 @@ function sameStatus(a: PanelView['status'], b: PanelView['status']): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind === 'error') return b.kind === 'error' && a.code === b.code;
   if (a.kind === 'streamFailed') return b.kind === 'streamFailed' && a.message === b.message;
+  if (a.kind === 'gone') return b.kind === 'gone' && a.reason === b.reason;
   return a.kind === b.kind;
 }
 
@@ -82,7 +85,7 @@ export class TerminalController {
   private onHidden: (() => void) | null = null;
 
   constructor(private readonly options: TerminalControllerOptions) {
-    this.machine = new AttachmentMachine(options.termId);
+    this.machine = new AttachmentMachine(options.termId, options.instance ?? null);
     this.view = this.machine.view();
   }
 
@@ -234,9 +237,12 @@ export class TerminalController {
     const stream = this.stream;
     switch (effect.kind) {
       case 'attach':
-        return this.request('attach', stream?.attach(effect.terminal, effect.options));
+        return this.request(
+          'attach',
+          stream?.attach(effect.terminal, effect.options, effect.instance),
+        );
       case 'resume':
-        return this.request('resume', stream?.resume(effect.cursor));
+        return this.request('resume', stream?.resume(effect.cursor, effect.instance));
       case 'detach':
         return this.send(stream?.detach(effect.attachment));
       case 'ack':

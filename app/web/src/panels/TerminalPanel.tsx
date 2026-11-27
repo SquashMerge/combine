@@ -3,7 +3,7 @@ import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import { TerminalView } from '../renderers/terminal/TerminalView';
 import { createXtermAdapter } from '../renderers/terminal/xtermAdapter';
-import { badges, overlayText, ownershipText, statusText } from './panelText';
+import { badges, goneText, overlayText, ownershipText, statusText } from './panelText';
 import { useTerminalPanel } from './useTerminalPanel';
 import './terminalPanel.css';
 
@@ -18,6 +18,8 @@ export interface TerminalPanelProps {
   port: TerminalPort;
   hostId: HostId;
   termId: TermId;
+  /** The backend instance a pinned panel's terminal belongs to; absent or `null` to follow the active terminal. */
+  instance?: string | null;
   visible: boolean;
   label: { name: string; host: string; state: string; backend?: string | null };
   focused?: boolean;
@@ -27,11 +29,12 @@ export interface TerminalPanelProps {
   createAdapter?: XtermAdapterFactory;
 }
 
-/** `hostId` and `termId` are fixed for the panel's lifetime: key it by `${hostId}/${termId}`. */
+/** `hostId`, `termId` and `instance` are fixed for the panel's lifetime: key the panel by all three. */
 export function TerminalPanel({
   port,
   hostId,
   termId,
+  instance = null,
   visible,
   label,
   focused = false,
@@ -44,13 +47,15 @@ export function TerminalPanel({
     port,
     hostId,
     termId,
+    instance,
     visible,
     focused,
     createAdapter,
   });
-  const status = statusText(view);
+  const status = view.status?.kind === 'gone' ? goneText(view.status.reason, termId) : statusText(view);
   const canClose =
-    onClose !== undefined && (label.state === 'exited' || view.status?.kind === 'exited');
+    onClose !== undefined &&
+    (label.state === 'exited' || view.status?.kind === 'exited' || view.status?.kind === 'gone');
 
   return (
     <section className="terminal-panel" hidden={!visible} data-testid="terminal-panel">

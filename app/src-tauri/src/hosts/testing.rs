@@ -616,7 +616,8 @@ impl LayoutSink for RecordingLayoutSink {
 /// What a [`RecordingTerminalSink`] was handed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivered {
-    Connection(bool),
+    /// Whether the session is ready, and the backend instance it named.
+    Connection(bool, Option<String>),
     Message(DaemonMessage),
 }
 
@@ -651,7 +652,10 @@ impl RecordingTerminalSink {
 impl TerminalSink for RecordingTerminalSink {
     fn deliver(&self, stream: StreamId, event: StreamDelivery<'_>) {
         let delivered = match event {
-            StreamDelivery::Connection { connected } => Delivered::Connection(connected),
+            StreamDelivery::Connection {
+                connected,
+                instance,
+            } => Delivered::Connection(connected, instance.map(str::to_string)),
             StreamDelivery::Message(message) => Delivered::Message(message.clone()),
         };
         lock(&self.seen).push((stream, delivered));

@@ -17,6 +17,7 @@ import {
   attachedEvent,
   connectionEvent,
   cursor,
+  errorEvent,
   ownershipEvent,
   startedEvent,
 } from '../support/memoryTerminalPort';
@@ -261,6 +262,85 @@ describe('App terminal tabs', () => {
     expect(screen.getAllByTestId('terminal-panel')).toHaveLength(2);
     expect(terminalPort.streams).toHaveLength(2);
     for (const stream of terminalPort.streams) expect(stream.commands('close')).toHaveLength(0);
+  });
+
+  it('a_pinned_tab_sends_no_attach_to_another_instance_reusing_the_id_before_its_snapshot', async () => {
+    const { hostsPort, layoutPort, terminalPort } = await mountApp({ layout: layoutOf(tile('t1', [PIN_1])) });
+    await screen.findByTestId('terminal-panel');
+    await waitFor(() => expect(terminalPort.streams).toHaveLength(1));
+    const stream = terminalPort.streams[0];
+    if (stream === undefined) throw new Error('stream not open');
+    await waitFor(() => expect(stream.commands('attach')).toHaveLength(1));
+    expect(stream.commands('attach')[0]).toMatchObject({ terminal: 'term-1', instance: INSTANCE });
+
+    // The first attach stays unanswered. The host drops and comes back on another core that
+    // reused term-1; its terminal list hasn't reached the hosts snapshot yet.
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    act(() => terminalPort.setConnected(HOST_A, false));
+    await act(async () => {});
+    act(() => hostsPort.setConnection('mac', { kind: 'connected' }));
+    act(() => terminalPort.setConnected(HOST_A, true, 'core-b'));
+    await act(async () => {});
+    expect(screen.getByTestId('terminal-panel')).toBeTruthy();
+    expect(stream.commands('attach')).toHaveLength(1);
+    expect(stream.commands('resume')).toHaveLength(0);
+    expect(screen.getByTestId('terminal-status').textContent).toBe(
+      'Terminal term-1 is gone. It belonged to a terminal backend this host no longer runs.',
+    );
+
+    act(() => hostsPort.setBackend('mac', { id: 'herdr-core', instance: 'core-b' }));
+    await act(async () => {});
+    expect(screen.queryByTestId('terminal-panel')).toBeNull();
+    expect(screen.getByTestId('gone-terminal')).toBeTruthy();
+    expect(stream.commands('attach')).toHaveLength(1);
+  });
+
+  it('a_pinned_tab_resumes_naming_its_instance_after_a_reconnect_to_the_same_instance', async () => {
+    const { hostsPort, layoutPort, terminalPort } = await mountApp({ layout: layoutOf(tile('t1', [PIN_1])) });
+    await screen.findByTestId('terminal-panel');
+    await waitFor(() => expect(terminalPort.streams).toHaveLength(1));
+    const container = document.querySelector('.terminal-view');
+    if (container === null) throw new Error('no terminal view');
+    act(() => FakeResizeObserver.resize(container, 800, 340));
+    await act(async () => {});
+    const stream = terminalPort.streams[0];
+    if (stream === undefined) throw new Error('stream not open');
+    act(() => {
+      stream.emit(attachedEvent(1, 7));
+      stream.emit(startedEvent(cursor(7, 1, 0)));
+      stream.emit(ownershipEvent(7, 1, 8));
+    });
+    await act(async () => {});
+    act(() => hostsPort.setConnection('mac', { kind: 'reconnecting', attempt: 1 }));
+    act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
+    act(() => terminalPort.setConnected(HOST_A, false));
+    await act(async () => {});
+    act(() => hostsPort.setConnection('mac', { kind: 'connected' }));
+    act(() => terminalPort.setConnected(HOST_A, true, INSTANCE));
+    await act(async () => {});
+    expect(stream.commands('resume')).toEqual([
+      { op: 'resume', cursor: cursor(7, 1, 0), instance: INSTANCE },
+    ]);
+    expect(stream.commands('attach')).toHaveLength(1);
+  });
+
+  it('a_pinned_tab_the_daemon_refuses_as_another_instance_reads_as_gone_and_offers_close', async () => {
+    const { layoutPort, terminalPort } = await mountApp({ layout: layoutOf(tile('t1', [PIN_1])) });
+    await screen.findByTestId('terminal-panel');
+    await waitFor(() => expect(terminalPort.streams).toHaveLength(1));
+    const stream = terminalPort.streams[0];
+    if (stream === undefined) throw new Error('stream not open');
+    await waitFor(() => expect(stream.commands('attach')).toHaveLength(1));
+    act(() => stream.emit(errorEvent({ code: 'backend_mismatch', request: 1 })));
+    await act(async () => {});
+    expect(screen.getByTestId('terminal-status').textContent).toBe(
+      'Terminal term-1 is gone. It belonged to a terminal backend this host no longer runs.',
+    );
+    expect(stream.commands('attach')).toHaveLength(1);
+    fireEvent.click(within(screen.getByTestId('terminal-panel')).getByRole('button', { name: 'Close' }));
+    await act(async () => {});
+    expect(mutations(layoutPort)).toEqual([[{ op: 'remove_panel', panel: PIN_1 }]]);
   });
 
   it('a_pinned_tab_no_longer_listed_reads_as_gone', async () => {

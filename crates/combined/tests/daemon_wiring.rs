@@ -123,6 +123,7 @@ fn issue_ids(id_base: u64) -> u64 {
             request: RequestId(request),
             terminal: TermId(format!("fake:{request}")),
             options: request_options(80, 24, false),
+            instance: None,
         });
         core.client_message(connection, attach, Millis(0));
     }

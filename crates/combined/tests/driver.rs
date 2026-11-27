@@ -349,6 +349,7 @@ impl Env {
             request: RequestId(request),
             terminal: TermId(terminal.to_string()),
             options: request_options(80, 24, false),
+            instance: None,
         })
     }
 
@@ -504,6 +505,7 @@ fn disconnects_are_queued_for_the_caller() {
         request: RequestId(1),
         terminal: TermId("fake:1".into()),
         options: request_options(0, 0, false),
+        instance: None,
     });
     env.send(bad.clone());
     env.send(bad);

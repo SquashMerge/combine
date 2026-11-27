@@ -285,6 +285,7 @@ fn attach(client: &mut WireClient, term: &TermId) -> (AttachmentId, Vec<DaemonMe
         request: RequestId(1),
         terminal: term.clone(),
         options: request_options(80, 24, false),
+        instance: None,
     }));
     let mut seen = Vec::new();
     loop {
@@ -586,6 +587,7 @@ fn client_eof_disconnects_and_keeps_attachments_for_resume() {
     second.send(&ClientMessage::Resume(combine_protocol::Resume {
         request: RequestId(2),
         cursor: last,
+        instance: None,
     }));
     loop {
         match second.recv() {
@@ -673,6 +675,7 @@ fn removed_connection_is_counted_once_and_its_queued_messages_are_dropped() {
         request: RequestId(99),
         terminal: term.clone(),
         options: request_options(80, 24, false),
+        instance: None,
     });
     burst.extend(combine_protocol::WireMessage::encode(&attach).unwrap());
     std::io::Write::write_all(&mut stream, &burst).unwrap();

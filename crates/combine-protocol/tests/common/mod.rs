@@ -147,6 +147,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
                     observe: false,
                     history: 1000,
                 },
+                instance: None,
             }),
             control_frame(&attach),
         ),
@@ -155,6 +156,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
             ClientMessage::Resume(Resume {
                 request: RequestId(2),
                 cursor: cursor(3, 41),
+                instance: None,
             }),
             control_frame(
                 r#"{"type":"resume","request":2,"cursor":{"attachment":7,"epoch":3,"seq":41}}"#,

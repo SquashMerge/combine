@@ -86,11 +86,12 @@ describe('createTauriTerminalPort', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
     const channel = mocks.channels[0]!;
-    channel.onmessage({ type: 'connection', connected: true });
+    channel.onmessage({ type: 'connection', connected: true, instance: 'core-a' });
     channel.onmessage({ type: 'nonsense' });
     channel.onmessage(new ArrayBuffer(3));
-    expect(events).toEqual([{ type: 'connection', connected: true }]);
-    expect(error).toHaveBeenCalledTimes(2);
+    channel.onmessage({ type: 'connection', connected: true, instance: 7 });
+    expect(events).toEqual([{ type: 'connection', connected: true, instance: 'core-a' }]);
+    expect(error).toHaveBeenCalledTimes(3);
     error.mockRestore();
   });
 
@@ -128,11 +129,11 @@ describe('createTauriTerminalPort', () => {
     const events: TerminalStreamEvent[] = [];
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command !== TERMINAL_OPEN_STREAM_COMMAND) return undefined;
-      mocks.channels[0]!.onmessage({ type: 'connection', connected: false });
+      mocks.channels[0]!.onmessage({ type: 'connection', connected: false, instance: null });
       return '7';
     });
     await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
-    expect(events).toEqual([{ type: 'connection', connected: false }]);
+    expect(events).toEqual([{ type: 'connection', connected: false, instance: null }]);
   });
 
   it('turns a bare string rejection into an Error with the same message', async () => {

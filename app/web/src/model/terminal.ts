@@ -72,9 +72,15 @@ export type ControlEvent =
       attachment: DecimalU64 | null;
     };
 
+/**
+ * Whether the host's session is ready for attachments, and the backend instance its daemon
+ * serves: `null` while not connected and for a daemon that names none. A session is ready only
+ * once its daemon has named the instance, so a pinned panel can tell before it attaches.
+ */
 export interface ConnectionEvent {
   type: 'connection';
   connected: boolean;
+  instance: string | null;
 }
 
 export type TerminalStreamEvent = StreamEvent | ControlEvent | ConnectionEvent;
@@ -223,8 +229,17 @@ export function parseTerminalStreamEvent(
         attachment: parseNullableU64(record['attachment']),
       };
     }
-    case 'connection':
-      return { type: 'connection', connected: parseBoolean(record['connected'], 'connected') };
+    case 'connection': {
+      const instance = record['instance'];
+      if (instance !== null && (typeof instance !== 'string' || instance === '')) {
+        throw new ModelError('connection instance must be a non-empty string or null');
+      }
+      return {
+        type: 'connection',
+        connected: parseBoolean(record['connected'], 'connected'),
+        instance,
+      };
+    }
     default:
       throw new ModelError(`unknown terminal stream event type: ${JSON.stringify(record['type'])}`);
   }

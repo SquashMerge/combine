@@ -261,8 +261,15 @@ pub async fn detach_ends_with_a_final_closed<T: Target>(t: &mut T) -> Outcome {
         .view(att)
         .and_then(|view| view.last_applied)
         .ok_or_else(|| crate::contract::Failure::new("harness", "nothing was applied"))?;
-    h.send(&mut c, ClientMessage::Resume(Resume { request, cursor }))
-        .await?;
+    h.send(
+        &mut c,
+        ClientMessage::Resume(Resume {
+            request,
+            cursor,
+            instance: None,
+        }),
+    )
+    .await?;
     h.settle(&mut [&mut c]).await?;
     ensure!(
         "resume-gap",

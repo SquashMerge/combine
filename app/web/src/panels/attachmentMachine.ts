@@ -22,6 +22,8 @@ export const DISPLAY_DEBOUNCE_MS = 250;
 export type Phase = 'hidden' | 'waiting' | 'attaching' | 'resuming' | 'live' | 'detaching' | 'ended';
 export type TimerName = 'ack' | 'resize' | 'display';
 export type PanelStatus =
+  /** A pinned panel's terminal belongs to a backend instance the host no longer serves. */
+  | { kind: 'gone'; reason: 'backendGone' }
   | { kind: 'exited' }
   | { kind: 'lost' }
   | { kind: 'closed' }
@@ -48,8 +50,8 @@ export type MachineInput =
   | { kind: 'timer'; timer: TimerName };
 
 export type MachineEffect =
-  | { kind: 'attach'; terminal: TermId; options: AttachRequestOptions }
-  | { kind: 'resume'; cursor: Cursor }
+  | { kind: 'attach'; terminal: TermId; options: AttachRequestOptions; instance: string | null }
+  | { kind: 'resume'; cursor: Cursor; instance: string | null }
   | { kind: 'detach'; attachment: DecimalU64 }
   | { kind: 'ack'; cursor: Cursor }
   | { kind: 'input'; attachment: DecimalU64; bytes: Uint8Array }
@@ -148,6 +150,10 @@ interface SentResize {
 /** Codes of `error{attachment}` that are not failures: the owner re-sends after the next ownership. */
 const IGNORED_ATTACHMENT_ERRORS = new Set(['stale_generation', 'unknown_attachment']);
 
+/** The daemon's refusal of an attach or resume that names another backend instance. */
+const BACKEND_MISMATCH = 'backend_mismatch';
+const BACKEND_GONE: PanelStatus = { kind: 'gone', reason: 'backendGone' };
+
 export class AttachmentMachine {
   private visible = false;
   private focused = false;
@@ -176,7 +182,17 @@ export class AttachmentMachine {
   private claimedGeneration: DecimalU64 | null = null;
   private effects: MachineEffect[] = [];
 
-  constructor(private readonly terminal: TermId) {}
+  /**
+   * `backendInstance` is the backend instance a pinned panel's terminal belongs to, or `null` for a
+   * panel that follows the active terminal. A pinned panel counts as connected only while the
+   * session's daemon serves that instance, so it never attaches or resumes on another core's
+   * terminal that reuses the ID; its attach and resume also name the instance, for the daemon
+   * to check.
+   */
+  constructor(
+    private readonly terminal: TermId,
+    private readonly backendInstance: string | null = null,
+  ) {}
 
   handle(input: MachineInput): MachineEffect[] {
     this.effects = [];
@@ -452,7 +468,10 @@ export class AttachmentMachine {
   private show(): void {
     if (this.visible) return;
     this.visible = true;
-    if (this.status?.kind !== 'streamFailed') this.status = null;
+    // A stream failure stays until Retry, and a session of another backend instance until one
+    // of the pinned instance connects.
+    const kept = this.status?.kind === 'streamFailed' || (this.status?.kind === 'gone' && !this.connected);
+    if (!kept) this.status = null;
     if (this.phase === 'hidden') {
       if (this.connected) this.attach();
       else this.phase = 'waiting';
@@ -504,9 +523,7 @@ export class AttachmentMachine {
   private onEvent(event: TerminalStreamEvent): void {
     switch (event.type) {
       case 'connection':
-        if (event.connected) this.onConnected();
-        else this.onDisconnected();
-        return;
+        return this.onConnection(event.connected, event.instance);
       case 'attached':
         return this.onAttached(event.attachment);
       case 'gap':
@@ -524,6 +541,22 @@ export class AttachmentMachine {
       default:
         this.onStreamEvent(event);
     }
+  }
+
+  /** A pinned panel treats a session that serves another backend instance as no connection. */
+  private onConnection(connected: boolean, instance: string | null): void {
+    const otherInstance =
+      connected && this.backendInstance !== null && instance !== this.backendInstance;
+    if (!connected || otherInstance) {
+      this.onDisconnected();
+      if (otherInstance) this.status = BACKEND_GONE;
+      return;
+    }
+    if (this.status?.kind === 'gone') {
+      this.status = null;
+      if (this.phase === 'ended') this.phase = this.visible ? 'waiting' : 'hidden';
+    }
+    this.onConnected();
   }
 
   private onConnected(): void {
@@ -603,7 +636,17 @@ export class AttachmentMachine {
 
   /** `gap{request}` and `error{request}`, which answer an attach or a resume. */
   private onRequestAnswerFailed(code?: string): void {
-    if (this.phase === 'detaching' && this.detachWhenNamed) {
+    if (code === BACKEND_MISMATCH && (this.phase === 'resuming' || this.phase === 'attaching')) {
+      // The daemon serves another backend instance: the pinned terminal is gone from it. The
+      // screen stays, dimmed, and nothing is sent until a session of the right instance returns.
+      this.cancelTimer('ack');
+      this.ackScheduled = false;
+      this.resetStream();
+      this.attachment = null;
+      this.stale = this.instance !== null;
+      this.status = BACKEND_GONE;
+      this.phase = 'ended';
+    } else if (this.phase === 'detaching' && this.detachWhenNamed) {
       this.afterDetach();
     } else if (this.phase === 'resuming') {
       this.finish();
@@ -749,7 +792,7 @@ export class AttachmentMachine {
     ) {
       return;
     }
-    this.effects.push({ kind: 'resume', cursor: this.applied });
+    this.effects.push({ kind: 'resume', cursor: this.applied, instance: this.backendInstance });
     this.phase = 'resuming';
     this.received = this.applied;
     this.replayThrough = null;
@@ -788,6 +831,7 @@ export class AttachmentMachine {
         observe: false,
         history: TERMINAL_HISTORY_LINES,
       },
+      instance: this.backendInstance,
     });
     this.sentDisplay = display;
     this.phase = 'attaching';

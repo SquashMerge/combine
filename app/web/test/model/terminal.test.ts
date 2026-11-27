@@ -52,7 +52,7 @@ function cursor(attachment: string, epoch: string, seq: string): Cursor {
 
 describe('terminal stream events', () => {
   it('parses every control event in the fixture', () => {
-    expect(fixture.control).toHaveLength(20);
+    expect(fixture.control).toHaveLength(21);
     for (const entry of fixture.control) {
       expect(parseTerminalStreamEvent(entry.ipc), entry.name).toEqual(entry.ipc);
     }

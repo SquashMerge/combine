@@ -162,13 +162,17 @@ function TerminalTabBody({
     const next = instance === null ? null : terminalTabId(instance, id as TermId);
     if (next !== null) onRepinTerminal?.(tabId, next, tile);
   };
+  // A pinned panel names its backend instance, so it never attaches to another core's terminal
+  // that reuses the ID; the follow-active tab names none.
+  const panelInstance = pinned ? instance : null;
   // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
   return (
     <TerminalPanel
-      key={`${ctx.hostId}/${terminal.id}`}
+      key={`${ctx.hostId}/${panelInstance ?? ''}/${terminal.id}`}
       port={terminalPort}
       hostId={ctx.hostId}
       termId={terminal.id}
+      instance={panelInstance}
       visible
       label={{ name: terminal.name, host: ctx.hostName, state: terminal.state, backend: ctx.backend?.id ?? null }}
       focused={focused}

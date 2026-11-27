@@ -17,8 +17,13 @@ export type TerminalStreamListener = (event: TerminalStreamEvent) => void;
  * Any other rejection is a transport fault.
  */
 export interface TerminalStream {
-  attach(terminal: TermId, options: AttachRequestOptions): Promise<void>;
-  resume(cursor: Cursor): Promise<void>;
+  /**
+   * `instance` is the backend instance a pinned panel expects its terminal to belong to; the
+   * daemon refuses with `backend_mismatch` when its own differs. `null` for a panel that follows
+   * the active terminal.
+   */
+  attach(terminal: TermId, options: AttachRequestOptions, instance: string | null): Promise<void>;
+  resume(cursor: Cursor, instance: string | null): Promise<void>;
   detach(attachment: DecimalU64): Promise<void>;
   ack(cursor: Cursor): Promise<void>;
   input(attachment: DecimalU64, bytes: Uint8Array): Promise<void>;

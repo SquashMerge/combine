@@ -42,6 +42,7 @@ const REFUSED_INPUT: &str = "the backend refused input for this attachment";
 const REFUSED_RESIZE: &str = "the backend refused the resize for this attachment";
 const REFUSED_FOCUS: &str = "the backend refused the focus for this attachment";
 const REFUSED_DISPLAY: &str = "the backend refused the display change for this attachment";
+const BACKEND_MISMATCH: &str = "the terminal belongs to another backend instance";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -90,6 +91,9 @@ pub struct Core {
     connections: BTreeMap<ConnectionId, Connection>,
     attachments: BTreeMap<AttachmentId, Attachment>,
     ownerships: BTreeMap<String, TerminalOwnership>,
+    /// The backend instance that owns the terminals, when the backend can say. An `attach` or
+    /// `resume` that names another one is refused.
+    backend_instance: Option<String>,
     effects: Vec<Effect>,
     /// Connections whose control queue overflowed during the current call. They are dropped when
     /// it finishes, so a hand-off never announces in the middle of another announce.
@@ -141,9 +145,41 @@ impl Core {
             connections: BTreeMap::new(),
             attachments: BTreeMap::new(),
             ownerships: BTreeMap::new(),
+            backend_instance: None,
             effects: Vec::new(),
             overflowed: BTreeSet::new(),
         })
+    }
+
+    /// Names the backend instance whose terminals the attachments open. It doesn't change while
+    /// the daemon runs; `None` for a backend that can't say.
+    pub fn set_backend_instance(&mut self, instance: Option<String>) {
+        self.backend_instance = instance;
+    }
+
+    /// Whether a request that names `expected` may go on: one that names none always may, and
+    /// one that names an instance needs this daemon's to be the same. A refusal is answered with
+    /// `backend_mismatch` for `request`.
+    fn same_backend(
+        &mut self,
+        connection: ConnectionId,
+        request: RequestId,
+        expected: Option<&str>,
+    ) -> bool {
+        let Some(expected) = expected else {
+            return true;
+        };
+        if self.backend_instance.as_deref() == Some(expected) {
+            return true;
+        }
+        self.send_error(
+            connection,
+            ErrorCode::BackendMismatch,
+            BACKEND_MISMATCH,
+            Some(request),
+            None,
+        );
+        false
     }
 
     pub fn config(&self) -> &CoreConfig {
@@ -470,7 +506,9 @@ impl Core {
             ),
             ClientMessage::Attach(attach) => self.on_attach(connection, attach),
             ClientMessage::Resume(resume) => {
-                self.on_resume(connection, resume.request, resume.cursor)
+                if self.same_backend(connection, resume.request, resume.instance.as_deref()) {
+                    self.on_resume(connection, resume.request, resume.cursor)
+                }
             }
             ClientMessage::Detach(detach) => self.on_detach(connection, detach.attachment, now),
             ClientMessage::Ack(ack) => self.on_ack(connection, ack.cursor),
@@ -539,7 +577,11 @@ impl Core {
             request,
             terminal,
             options,
+            instance,
         } = attach;
+        if !self.same_backend(connection, request, instance.as_deref()) {
+            return;
+        }
         if options.cols == 0 || options.rows == 0 {
             self.send_error(
                 connection,

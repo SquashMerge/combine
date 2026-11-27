@@ -213,10 +213,23 @@ fn start_daemon(target: &HerdrCoreTarget, scratch: &ShortTempDir) -> DaemonProce
 }
 
 fn attach(bridge: &mut BridgeClient, request: u64, term: &TermId, cols: u16, rows: u16) {
+    attach_pinned(bridge, request, term, cols, rows, None);
+}
+
+/// An attach that names the backend instance a pinned panel expects.
+fn attach_pinned(
+    bridge: &mut BridgeClient,
+    request: u64,
+    term: &TermId,
+    cols: u16,
+    rows: u16,
+    instance: Option<String>,
+) {
     bridge.send(&ClientMessage::Attach(Attach {
         request: RequestId(request),
         terminal: term.clone(),
         options: request_options(cols, rows, false),
+        instance,
     }));
 }
 
@@ -249,8 +262,15 @@ pub fn connect_attach_replay_resume(
         true,
         |inbox| inbox.listed.iter().any(|ids| ids.contains(&term)),
     )?;
+    // Attach and resume as a pinned panel does, naming the core the daemon reported.
+    let instance = inbox
+        .instances
+        .last()
+        .cloned()
+        .flatten()
+        .ok_or("the daemon named no backend instance")?;
 
-    attach(&mut bridge, 2, &term, 80, 24);
+    attach_pinned(&mut bridge, 2, &term, 80, 24, Some(instance.clone()));
     pump_until(
         &mut bridge,
         &mut inbox,
@@ -316,6 +336,7 @@ pub fn connect_attach_replay_resume(
     bridge.send(&ClientMessage::Resume(Resume {
         request: RequestId(3),
         cursor: c1,
+        instance: Some(instance),
     }));
     pump_until(
         &mut bridge,

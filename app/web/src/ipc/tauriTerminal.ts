@@ -39,11 +39,11 @@ function decodeMessage(message: unknown) {
 
 function createStream(stream: string): TerminalStream {
   return {
-    async attach(terminal, options) {
-      await invoke(TERMINAL_ATTACH_COMMAND, { stream, terminal, options });
+    async attach(terminal, options, instance) {
+      await invoke(TERMINAL_ATTACH_COMMAND, { stream, terminal, options, instance });
     },
-    async resume(cursor) {
-      await invoke(TERMINAL_RESUME_COMMAND, { stream, cursor });
+    async resume(cursor, instance) {
+      await invoke(TERMINAL_RESUME_COMMAND, { stream, cursor, instance });
     },
     async detach(attachment) {
       await invoke(TERMINAL_DETACH_COMMAND, { stream, attachment });

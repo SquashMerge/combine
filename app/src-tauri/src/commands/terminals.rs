@@ -32,8 +32,11 @@ const DATA_HEADER_LEN: usize = 24;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcTerminalEvent {
+    /// `instance` is the backend instance the connected session's daemon serves, or `null`
+    /// while not connected and for a daemon that names none.
     Connection {
         connected: bool,
+        instance: Option<String>,
     },
     Attached {
         request: DecimalU64,
@@ -171,8 +174,12 @@ fn data_frame(cursor: Cursor, bytes: &[u8]) -> Vec<u8> {
 
 fn body(delivery: &StreamDelivery<'_>) -> Option<InvokeResponseBody> {
     let event = match delivery {
-        StreamDelivery::Connection { connected } => IpcTerminalEvent::Connection {
+        StreamDelivery::Connection {
+            connected,
+            instance,
+        } => IpcTerminalEvent::Connection {
             connected: *connected,
+            instance: instance.map(str::to_string),
         },
         StreamDelivery::Message(DaemonMessage::Data(Data { cursor, bytes })) => {
             return Some(InvokeResponseBody::Raw(data_frame(*cursor, bytes)));
@@ -345,18 +352,27 @@ pub fn terminal_close_stream(
     Ok(())
 }
 
+/// `instance` names the backend instance a pinned panel expects, and is `null` for a panel
+/// that follows the active terminal.
 #[tauri::command]
 pub fn terminal_attach(
     service: State<'_, HostsService>,
     stream: String,
     terminal: String,
     options: Value,
+    instance: Option<String>,
 ) -> Result<(), String> {
     let stream = stream_id(&stream)?;
     let options: AttachRequestOptions = structured(options)?;
     service
         .attachments()
-        .attach(&service.outbound(), stream, TermId(terminal), options)
+        .attach(
+            &service.outbound(),
+            stream,
+            TermId(terminal),
+            options,
+            instance,
+        )
         .map_err(forward_error)
 }
 
@@ -365,12 +381,13 @@ pub fn terminal_resume(
     service: State<'_, HostsService>,
     stream: String,
     cursor: Value,
+    instance: Option<String>,
 ) -> Result<(), String> {
     let stream = stream_id(&stream)?;
     let cursor: IpcCursor = structured(cursor)?;
     service
         .attachments()
-        .resume(&service.outbound(), stream, cursor.into())
+        .resume(&service.outbound(), stream, cursor.into(), instance)
         .map_err(forward_error)
 }
 
@@ -548,6 +565,7 @@ mod tests {
                 Some(message) => StreamDelivery::Message(message),
                 None => StreamDelivery::Connection {
                     connected: ipc["connected"].as_bool().expect("connected"),
+                    instance: ipc["instance"].as_str(),
                 },
             };
             let body = body(&delivery).expect("a body");
@@ -627,16 +645,26 @@ mod tests {
             Ok(())
         });
         sink.channels().insert(5, channel);
-        sink.deliver(StreamId(6), StreamDelivery::Connection { connected: true });
+        let up = || StreamDelivery::Connection {
+            connected: true,
+            instance: Some("core-a"),
+        };
+        sink.deliver(StreamId(6), up());
         assert!(rx.try_recv().is_err());
-        sink.deliver(StreamId(5), StreamDelivery::Connection { connected: true });
+        sink.deliver(StreamId(5), up());
         let received = rx.try_recv().expect("delivered");
         assert_eq!(
             json_of(received),
-            json!({"type": "connection", "connected": true})
+            json!({"type": "connection", "connected": true, "instance": "core-a"})
         );
         sink.clear();
-        sink.deliver(StreamId(5), StreamDelivery::Connection { connected: false });
+        sink.deliver(
+            StreamId(5),
+            StreamDelivery::Connection {
+                connected: false,
+                instance: None,
+            },
+        );
         assert!(rx.try_recv().is_err());
     }
 

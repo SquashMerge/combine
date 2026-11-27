@@ -109,6 +109,7 @@ describe('terminalController attach and detach', () => {
           observe: false,
           history: TERMINAL_HISTORY_LINES,
         },
+        instance: null,
       },
     ]);
     expect(t.controller.getView().phase).toBe('attaching');
@@ -512,7 +513,7 @@ describe('terminalController status and lifetime', () => {
 
   it('events delivered before openStream resolves are handled in order', async () => {
     const t = rig();
-    t.port.onOpen = (stream) => stream.emit({ type: 'connection', connected: false });
+    t.port.onOpen = (stream) => stream.emit(connectionEvent(false));
     const starting = t.controller.start(t.host);
     t.controller.setVisible(true);
     await starting;
@@ -548,7 +549,7 @@ describe('terminalController resume', () => {
   it('resumes from the last applied cursor after a drop', async () => {
     const t = rig();
     await resumeAfterDrop(t, 2);
-    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2), instance: null }]);
     expect(t.stream().commands('attach')).toHaveLength(1);
     expect(t.controller.getView()).toMatchObject({ phase: 'resuming', hasInstance: true, stale: false });
     t.stream().emit(resumedEvent(2, 7, null));
@@ -568,7 +569,7 @@ describe('terminalController resume', () => {
     t.fake.instances[0]?.completeWrite();
     expect(t.stream().commands('resume')).toEqual([]);
     t.fake.instances[0]?.completeWrite();
-    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2), instance: null }]);
     expect(t.controller.getView().phase).toBe('resuming');
     expect(t.stream().commands('attach')).toHaveLength(1);
   });
@@ -702,11 +703,11 @@ describe('terminalController resume', () => {
     const machine = new AttachmentMachine(TERM);
     const events = [attachedEvent(1, 7), startedEvent(cursor(7, 1, 0))];
     machine.handle({ kind: 'show' });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     for (const event of events) machine.handle({ kind: 'event', event });
     machine.handle({ kind: 'applied', cursor: cursor(7, 1, 0) });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: false } });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(false) });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     expect(machine.view().phase).toBe('resuming');
     expect(machine.isReplay(cursor(7, 1, 1))).toBe(false);
     machine.handle({ kind: 'event', event: resumedEvent(2, 7, cursor(7, 1, 2)) });
@@ -966,7 +967,7 @@ describe('terminalController ownership and resize', () => {
     const timerStarts = (effects: ReturnType<AttachmentMachine['handle']>): number =>
       effects.filter((effect) => effect.kind === 'startTimer' && effect.timer === 'resize').length;
     machine.handle({ kind: 'show' });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     machine.handle({ kind: 'event', event: attachedEvent(1, 7) });
     expect(timerStarts(machine.handle({ kind: 'event', event: ownershipEvent(7, 1, 7) }))).toBe(0);
     machine.handle({ kind: 'event', event: startedEvent(cursor(7, 1, 0)) });
@@ -982,7 +983,7 @@ describe('terminalController display facts', () => {
     const machine = new AttachmentMachine(TERM);
     machine.handle({ kind: 'cellSize', cell: { width: 9.4, height: 18.2 } });
     machine.handle({ kind: 'containerSize', width: 940, height: 364 });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     const effects = machine.handle({ kind: 'show' });
     expect(effects).toContainEqual({
       kind: 'attach',
@@ -994,6 +995,7 @@ describe('terminalController display facts', () => {
         observe: false,
         history: TERMINAL_HISTORY_LINES,
       },
+      instance: null,
     });
   });
 
@@ -1022,7 +1024,7 @@ describe('terminalController display facts', () => {
     machine.handle({ kind: 'cellSize', cell: { width: 9, height: 18 } });
     expect(machine.view().phase).toBe('waiting');
     expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     expect(machine.view().phase).toBe('attaching');
     machine.handle({ kind: 'cellSize', cell: { width: 10, height: 18 } });
     expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);

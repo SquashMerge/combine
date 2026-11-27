@@ -62,6 +62,7 @@ impl Env {
             request: RequestId(1),
             terminal: self.term.clone(),
             options: request_options(80, 24, false),
+            instance: None,
         }));
         self.pump();
         let messages = self.pull();

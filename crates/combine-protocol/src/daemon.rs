@@ -105,6 +105,9 @@ pub enum ErrorCode {
     UnknownCaller,
     /// Creating a panel would take its space past the panel limit.
     PanelLimit,
+    /// An `attach` or `resume` named a backend instance that isn't the daemon's. Sent in place
+    /// of `attached` or `resumed`; nothing was opened.
+    BackendMismatch,
     /// Anything else.
     Internal,
 }

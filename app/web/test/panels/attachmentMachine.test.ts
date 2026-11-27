@@ -5,6 +5,7 @@ import {
   attachedEvent,
   connectionEvent,
   cursor,
+  errorEvent,
   gapEvent,
   ownershipEvent,
   startedEvent,
@@ -150,5 +151,115 @@ describe('attachmentMachine stream failure', () => {
     expect(machine.view().canRetry).toBe(true);
     machine.handle({ kind: 'retryStream' });
     expect(machine.view()).toMatchObject({ status: null, canRetry: false });
+  });
+});
+
+const opsOf = (effects: MachineEffect[]) =>
+  effects.filter((effect) => effect.kind === 'attach' || effect.kind === 'resume');
+
+/** A visible pinned machine for backend instance `core-a`, live as attachment 7 with a screen. */
+function livePinned(): Rig {
+  const machine = new AttachmentMachine(TERM, 'core-a');
+  const feed: Rig['feed'] = (input) => machine.handle(input);
+  feed({ kind: 'containerSize', width: 800, height: 340 });
+  feed({ kind: 'show' });
+  feed({ kind: 'event', event: connectionEvent(true, 'core-a') });
+  feed({ kind: 'event', event: attachedEvent(1, 7) });
+  feed({ kind: 'event', event: startedEvent(cursor(7, 1, 0)) });
+  feed({ kind: 'applied', cursor: cursor(7, 1, 0) });
+  return {
+    machine,
+    feed,
+    ownership: (generation, owner) =>
+      feed({ kind: 'event', event: ownershipEvent(7, generation, owner) }),
+  };
+}
+
+describe('attachmentMachine pinned backend instance', () => {
+  it('a pinned panel attaches naming its instance once a session of that instance is up', () => {
+    const machine = new AttachmentMachine(TERM, 'core-a');
+    machine.handle({ kind: 'show' });
+    const effects = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    expect(opsOf(effects)).toMatchObject([{ kind: 'attach', terminal: TERM, instance: 'core-a' }]);
+  });
+
+  it('a pinned panel sends nothing to a session of another instance and reads as gone', () => {
+    const machine = new AttachmentMachine(TERM, 'core-a');
+    machine.handle({ kind: 'show' });
+    expect(opsOf(machine.handle({ kind: 'event', event: connectionEvent(true, 'core-b') }))).toEqual([]);
+    expect(opsOf(machine.handle({ kind: 'event', event: connectionEvent(true, null) }))).toEqual([]);
+    expect(machine.view()).toMatchObject({
+      phase: 'waiting',
+      connected: false,
+      status: { kind: 'gone', reason: 'backendGone' },
+    });
+    machine.handle({ kind: 'hide' });
+    machine.handle({ kind: 'show' });
+    expect(machine.view().status).toEqual({ kind: 'gone', reason: 'backendGone' });
+    machine.handle({ kind: 'event', event: connectionEvent(false) });
+    const effects = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    expect(opsOf(effects)).toMatchObject([{ kind: 'attach', instance: 'core-a' }]);
+    expect(machine.view().status).toBeNull();
+  });
+
+  it('a live pinned panel resumes naming its instance after a reconnect to the same instance', () => {
+    const t = livePinned();
+    t.feed({ kind: 'event', event: connectionEvent(false) });
+    const effects = t.feed({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    expect(opsOf(effects)).toEqual([{ kind: 'resume', cursor: cursor(7, 1, 0), instance: 'core-a' }]);
+  });
+
+  it('a live pinned panel keeps its screen and sends nothing after a reconnect to another instance', () => {
+    const t = livePinned();
+    t.feed({ kind: 'event', event: connectionEvent(false) });
+    const effects = t.feed({ kind: 'event', event: connectionEvent(true, 'core-b') });
+    expect(opsOf(effects)).toEqual([]);
+    expect(effects.filter((effect) => effect.kind === 'disposeInstance')).toEqual([]);
+    expect(t.machine.view()).toMatchObject({
+      hasInstance: true,
+      status: { kind: 'gone', reason: 'backendGone' },
+    });
+  });
+
+  it('backend_mismatch answering an attach ends the panel as gone, without another attach', () => {
+    const machine = new AttachmentMachine(TERM, 'core-a');
+    machine.handle({ kind: 'show' });
+    machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    const effects = machine.handle({
+      kind: 'event',
+      event: errorEvent({ code: 'backend_mismatch', request: 1 }),
+    });
+    expect(opsOf(effects)).toEqual([]);
+    expect(machine.view()).toMatchObject({
+      phase: 'ended',
+      status: { kind: 'gone', reason: 'backendGone' },
+    });
+    machine.handle({ kind: 'event', event: connectionEvent(false) });
+    const again = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    expect(opsOf(again)).toMatchObject([{ kind: 'attach', instance: 'core-a' }]);
+  });
+
+  it('backend_mismatch answering a resume keeps the screen and does not attach fresh', () => {
+    const t = livePinned();
+    t.feed({ kind: 'event', event: connectionEvent(false) });
+    t.feed({ kind: 'event', event: connectionEvent(true, 'core-a') });
+    const effects = t.feed({
+      kind: 'event',
+      event: errorEvent({ code: 'backend_mismatch', request: 2 }),
+    });
+    expect(opsOf(effects)).toEqual([]);
+    expect(t.machine.view()).toMatchObject({
+      phase: 'ended',
+      hasInstance: true,
+      stale: true,
+      status: { kind: 'gone', reason: 'backendGone' },
+    });
+  });
+
+  it('a panel that follows the active terminal names no instance and attaches on any session', () => {
+    const machine = new AttachmentMachine(TERM);
+    machine.handle({ kind: 'show' });
+    const effects = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-b') });
+    expect(opsOf(effects)).toMatchObject([{ kind: 'attach', instance: null }]);
   });
 });

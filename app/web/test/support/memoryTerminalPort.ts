@@ -19,8 +19,8 @@ import {
 } from '../../src/model/terminal';
 
 export type SentCommand =
-  | { op: 'attach'; terminal: TermId; options: AttachRequestOptions }
-  | { op: 'resume'; cursor: Cursor }
+  | { op: 'attach'; terminal: TermId; options: AttachRequestOptions; instance: string | null }
+  | { op: 'resume'; cursor: Cursor; instance: string | null }
   | { op: 'detach'; attachment: DecimalU64 }
   | { op: 'ack'; cursor: Cursor }
   | { op: 'input'; attachment: DecimalU64; bytes: Uint8Array }
@@ -88,11 +88,11 @@ export class MemoryTerminalStream implements TerminalStream {
     return this.sent.filter((command) => command.op === op);
   }
 
-  attach(terminal: TermId, options: AttachRequestOptions): Promise<void> {
-    return this.record({ op: 'attach', terminal, options });
+  attach(terminal: TermId, options: AttachRequestOptions, instance: string | null): Promise<void> {
+    return this.record({ op: 'attach', terminal, options, instance });
   }
-  resume(cursor: Cursor): Promise<void> {
-    return this.record({ op: 'resume', cursor });
+  resume(cursor: Cursor, instance: string | null): Promise<void> {
+    return this.record({ op: 'resume', cursor, instance });
   }
   detach(attachment: DecimalU64): Promise<void> {
     return this.record({ op: 'detach', attachment });
@@ -166,7 +166,11 @@ export class MemoryTerminalPort implements TerminalPort {
   /** The listeners of opens that `failNextOpen` refused, for tests that feed them late events. */
   readonly refusedListeners: TerminalStreamListener[] = [];
   private readonly connected = new Map<HostId, boolean>();
+  private readonly instances = new Map<HostId, string | null>();
   private readonly refusals: string[] = [];
+
+  /** `instance` is the backend instance every host's session serves unless `setConnected` names another. */
+  constructor(private readonly defaultInstance: string | null = DEFAULT_INSTANCE) {}
 
   /** The next `openStream` rejects with `message`, after delivering its connection event. */
   failNextOpen(message: string): void {
@@ -177,29 +181,44 @@ export class MemoryTerminalPort implements TerminalPort {
     return this.connected.get(hostId) ?? true;
   }
 
-  setConnected(hostId: HostId, connected: boolean): void {
+  /** The backend instance the host's session serves while connected. */
+  instanceOf(hostId: HostId): string | null {
+    return this.instances.has(hostId) ? (this.instances.get(hostId) ?? null) : this.defaultInstance;
+  }
+
+  /** A reconnect may name another backend `instance`; leaving it out keeps the host's. */
+  setConnected(hostId: HostId, connected: boolean, instance?: string | null): void {
     this.connected.set(hostId, connected);
+    if (instance !== undefined) this.instances.set(hostId, instance);
     for (const stream of this.streams) {
-      if (stream.hostId === hostId) stream.emit(connectionEvent(connected));
+      if (stream.hostId === hostId) stream.emit(this.connectionOf(hostId));
     }
+  }
+
+  private connectionOf(hostId: HostId): TerminalStreamEvent {
+    const connected = this.isConnected(hostId);
+    return connectionEvent(connected, connected ? this.instanceOf(hostId) : null);
   }
 
   openStream(hostId: HostId, listener: TerminalStreamListener): Promise<TerminalStream> {
     const refusal = this.refusals.shift();
     if (refusal !== undefined) {
       this.refusedListeners.push(listener);
-      listener(connectionEvent(this.isConnected(hostId)));
+      listener(this.connectionOf(hostId));
       return Promise.reject(new Error(refusal));
     }
     const stream = new MemoryTerminalStream(hostId, listener, this);
     this.streams.push(stream);
-    stream.emit(connectionEvent(this.isConnected(hostId)));
+    stream.emit(this.connectionOf(hostId));
     this.onOpen?.(stream);
     return Promise.resolve(stream);
   }
 }
 
 export const HOST_ID: HostId = parseHostId('11111111-1111-4111-8111-111111111111');
+
+/** The backend instance a memory host serves unless a test names another. */
+export const DEFAULT_INSTANCE = 'core-a';
 
 type U64Input = number | string;
 
@@ -334,6 +353,9 @@ export function errorEvent(options: {
   });
 }
 
-export function connectionEvent(connected: boolean): TerminalStreamEvent {
-  return parseTerminalStreamEvent({ type: 'connection', connected });
+export function connectionEvent(
+  connected: boolean,
+  instance: string | null = connected ? DEFAULT_INSTANCE : null,
+): TerminalStreamEvent {
+  return parseTerminalStreamEvent({ type: 'connection', connected, instance });
 }
