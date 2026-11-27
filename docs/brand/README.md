@@ -23,7 +23,7 @@ Both gradients run top to bottom.
 
 ## Small sizes
 
-At 32 px and below the ring holes close up and the mark turns muddy. Use a `-small` file there: its branches end in solid dots. The app icon's `.icns` already does: its 16 px and 32 px slots, and their @2x, come from `combine-app-icon-small.svg`, and the 128 px slots and up come from `combine-app-icon.svg`.
+At 32 px and below the ring holes close up and the mark turns muddy. Use a `-small` file there: its branches end in solid dots. The app icon's `.icns` already does: the slots of 32 physical pixels or less (`16x16`, `16x16@2x` and `32x32`) come from `combine-app-icon-small.svg`, and the rest, from `32x32@2x` (64 px) up, come from `combine-app-icon.svg`.
 
 ## Gradient IDs
 
@@ -31,4 +31,4 @@ Each file's gradient IDs start with its own prefix (`cm`, `ci`, `cs`, `ca`, `ct`
 
 ## The app icon
 
-`app/src-tauri/icons/icon.png` (1024 px) and `icon.icns` are the two files `app/src-tauri/tauri.conf.json` lists. `icon.png` and the `.icns` slots from 128 px up are renders of `combine-app-icon.svg`; the 16 px and 32 px slots (and @2x) are renders of `combine-app-icon-small.svg`. To rebuild the `.icns`, render each slot into an `icon.iconset` folder (`icon_16x16.png`, `icon_16x16@2x.png`, … `icon_512x512@2x.png`) and run `iconutil -c icns icon.iconset`. `app/web/node_modules/.bin/tauri icon <svg>` renders one SVG at every size, so it can't mix the two files by itself.
+`app/src-tauri/icons/icon.png` (1024 px) and `icon.icns` are the two files `app/src-tauri/tauri.conf.json` lists. `icon.png` and the `.icns` slots from `32x32@2x` (64 px) up are renders of `combine-app-icon.svg`; the `16x16`, `16x16@2x` and `32x32` slots are renders of `combine-app-icon-small.svg`. To rebuild the `.icns`, render each slot into an `icon.iconset` folder (`icon_16x16.png`, `icon_16x16@2x.png`, … `icon_512x512@2x.png`) and run `iconutil -c icns icon.iconset`. `app/web/node_modules/.bin/tauri icon <svg>` renders one SVG at every size, so it can't mix the two files by itself.
