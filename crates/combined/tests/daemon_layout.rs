@@ -19,7 +19,7 @@ use combine_protocol::{
 use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{encode_layout, parse_layout, LayoutTiming, LAYOUT_FILE};
 use combined::model::{SpaceId, SpaceLayout, SplitDir, SplitNode, Tile, TileId};
-use combined::testing::MemoryFileStore;
+use combined::testing::{MemoryFileStore, RECV_TIMEOUT};
 use daemon_support::{
     layout_server, refuse_default_herdr_core, seed_project_terminal, wait_until, LayoutServer,
     ShortTempDir, WireClient,
@@ -37,11 +37,11 @@ const QUIET: Duration = Duration::from_millis(300);
 /// heavier load (#88).
 const REPLY_WAIT: Duration = Duration::from_secs(30);
 
-/// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
-/// only on a client that has sent `watch_layout`.
-fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
+/// The next message within `wait`, skipping the `panels` frames a client that watches a space is
+/// sent. Use it only on a client that has sent `watch_layout`.
+fn recv_skipping_panels(client: &WireClient, wait: Duration) -> DaemonMessage {
     loop {
-        match client.recv_waiting(REPLY_WAIT) {
+        match client.recv_waiting(wait) {
             DaemonMessage::Panels(_) => {}
             other => return other,
         }
@@ -161,9 +161,15 @@ fn send_mutate(client: &mut WireClient, space: &str, request: u64, base: u64, op
     }));
 }
 
-/// The next message, which must be a `layout` answering `request` (`None` for a push).
+/// The next message, which must be a `layout` answering `request` (`None` for a push). A reply
+/// gets [`REPLY_WAIT`]; a push gets the client's usual bound.
 fn expect_layout(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
-    match recv_skipping_panels(client) {
+    let wait = if request.is_some() {
+        REPLY_WAIT
+    } else {
+        RECV_TIMEOUT
+    };
+    match recv_skipping_panels(client, wait) {
         DaemonMessage::Layout(layout) => {
             assert_eq!(layout.request, request.map(RequestId));
             layout.layout
@@ -173,7 +179,7 @@ fn expect_layout(client: &WireClient, request: Option<u64>) -> LayoutSnapshot {
 }
 
 fn expect_error(client: &WireClient, code: ErrorCode, request: u64) -> String {
-    error_of(recv_skipping_panels(client), code, request)
+    error_of(recv_skipping_panels(client, REPLY_WAIT), code, request)
 }
 
 /// [`expect_error`] for a client that never watched a space, so it reads its frames raw and a
@@ -576,7 +582,7 @@ fn closing_connection_gets_no_layout_push_and_is_unwatched() {
     garbage.push(1);
     garbage.extend_from_slice(b"not json!");
     closing.send_bytes(&garbage);
-    match recv_skipping_panels(&closing) {
+    match recv_skipping_panels(&closing, REPLY_WAIT) {
         DaemonMessage::Error(error) => assert_eq!(error.code, ErrorCode::Malformed),
         other => panic!("expected the malformed error, got {other:?}"),
     }

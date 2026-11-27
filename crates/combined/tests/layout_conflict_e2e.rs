@@ -414,6 +414,10 @@ fn mutate_at_latest(
         // The push that moved the revision can come after the refusal.
         if base == sent {
             base = layout_reply(client, None).layout_revision;
+            assert!(
+                base > sent,
+                "a stale refusal at {sent} was followed by a push at {base}"
+            );
         }
     }
 }
