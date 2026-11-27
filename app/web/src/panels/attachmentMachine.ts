@@ -23,7 +23,7 @@ export type Phase = 'hidden' | 'waiting' | 'attaching' | 'resuming' | 'live' | '
 export type TimerName = 'ack' | 'resize' | 'display';
 export type PanelStatus =
   /** A pinned panel's terminal belongs to a backend instance the host no longer serves. */
-  | { kind: 'gone'; reason: 'backendGone' }
+  | { kind: 'gone'; why: 'other-instance' }
   | { kind: 'exited' }
   | { kind: 'lost' }
   | { kind: 'closed' }
@@ -156,7 +156,7 @@ const IGNORED_ATTACHMENT_ERRORS = new Set(['stale_generation', 'unknown_attachme
 
 /** The daemon's refusal of an attach or resume that names another backend instance. */
 const BACKEND_MISMATCH = 'backend_mismatch';
-const BACKEND_GONE: PanelStatus = { kind: 'gone', reason: 'backendGone' };
+const BACKEND_GONE: PanelStatus = { kind: 'gone', why: 'other-instance' };
 
 export class AttachmentMachine {
   private visible = false;
@@ -576,6 +576,9 @@ export class AttachmentMachine {
     if (!this.connected) return;
     this.connected = false;
     this.ownership = null;
+    // A claim in flight may have been lost with the connection. The resumed attachment reports
+    // its ownership again, and a vacant one is claimed again under that generation.
+    this.claimedGeneration = null;
     this.cancelTimer('ack');
     this.cancelTimer('resize');
     this.cancelTimer('display');

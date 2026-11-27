@@ -254,6 +254,11 @@ impl HerdrCoreTarget {
         &self.control
     }
 
+    /// The core id the lane pinned at start, which every status reply is checked against.
+    pub fn pinned_core_id(&self) -> &str {
+        &self.lane.core_id
+    }
+
     /// The lane core's socket, for a daemon that is to use the same core.
     pub fn lane_socket(&self) -> &Path {
         &self.lane.socket

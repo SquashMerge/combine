@@ -1,3 +1,4 @@
+import type { GoneWhy } from '../model/terminalTabs';
 import type { PanelView } from './attachmentMachine';
 
 export function statusText(view: PanelView): string | null {
@@ -43,15 +44,13 @@ export function badges(view: PanelView): string[] {
   return result;
 }
 
-export type GoneReason = 'unlisted' | 'backendGone' | 'noInstance';
-
-export function goneText(reason: GoneReason, termId: string): string {
-  switch (reason) {
+export function goneText(why: GoneWhy, termId: string): string {
+  switch (why) {
     case 'unlisted':
       return `Terminal ${termId} is gone. The host no longer lists it.`;
-    case 'backendGone':
+    case 'other-instance':
       return `Terminal ${termId} is gone. It belonged to a terminal backend this host no longer runs.`;
-    case 'noInstance':
+    case 'no-instance':
       return `Terminal ${termId} can't be shown: the host doesn't say which terminal backend instance it runs.`;
   }
 }

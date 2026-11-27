@@ -8,10 +8,9 @@ import { useTerminalPanel } from './useTerminalPanel';
 import './terminalPanel.css';
 
 export interface TerminalSwitcher {
-  options: { id: string; label: string; disabled: boolean }[];
+  /** `title` is the tooltip of a disabled option: why it can't be picked. */
+  options: { id: string; label: string; disabled: boolean; title?: string }[];
   onSwitch: (id: string) => void;
-  /** Shown as the tooltip of each disabled option. */
-  disabledTitle?: string;
 }
 
 export interface TerminalPanelProps {
@@ -19,7 +18,7 @@ export interface TerminalPanelProps {
   hostId: HostId;
   termId: TermId;
   /** The backend instance a pinned panel's terminal belongs to; absent or `null` to follow the active terminal. */
-  instance?: string | null;
+  backendInstance?: string | null;
   visible: boolean;
   label: { name: string; host: string; state: string; backend?: string | null };
   focused?: boolean;
@@ -29,12 +28,12 @@ export interface TerminalPanelProps {
   createAdapter?: XtermAdapterFactory;
 }
 
-/** `hostId`, `termId` and `instance` are fixed for the panel's lifetime: key the panel by all three. */
+/** `hostId`, `termId` and `backendInstance` are fixed for the panel's lifetime: key the panel by all three. */
 export function TerminalPanel({
   port,
   hostId,
   termId,
-  instance = null,
+  backendInstance = null,
   visible,
   label,
   focused = false,
@@ -47,12 +46,12 @@ export function TerminalPanel({
     port,
     hostId,
     termId,
-    instance,
+    backendInstance,
     visible,
     focused,
     createAdapter,
   });
-  const status = view.status?.kind === 'gone' ? goneText(view.status.reason, termId) : statusText(view);
+  const status = view.status?.kind === 'gone' ? goneText(view.status.why, termId) : statusText(view);
   const canClose =
     onClose !== undefined &&
     (label.state === 'exited' || view.status?.kind === 'exited' || view.status?.kind === 'gone');
@@ -82,7 +81,7 @@ export function TerminalPanel({
                   key={option.id}
                   value={option.id}
                   disabled={option.disabled}
-                  title={option.disabled ? switcher.disabledTitle : undefined}
+                  title={option.disabled ? option.title : undefined}
                 >
                   {option.label}
                 </option>

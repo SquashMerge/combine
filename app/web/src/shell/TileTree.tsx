@@ -7,7 +7,6 @@ import type { TerminalPort } from '../ipc/terminalPort';
 import { type SpaceKey } from '../model/space';
 import { type SpacePanelsView, panelEntry, tabLabel } from '../model/panels';
 import {
-  type GoneWhy,
   type TerminalTabEntry,
   type TerminalTabsContext,
   isTerminalTab,
@@ -27,13 +26,7 @@ const NO_ACTIVE_TERMINAL = 'No active terminal. Pick one in the navigator.';
 const PENDING_TERMINALS = "Waiting for the host's terminal list…";
 const ALREADY_OPEN_TITLE = 'Already open in this layout';
 const UNPINNABLE_TITLE = "This terminal can't be pinned: its ID is invalid or too long";
-const UNAVAILABLE_TITLE = "Already open, or can't be pinned";
 
-const GONE_REASON = {
-  unlisted: 'unlisted',
-  'other-instance': 'backendGone',
-  'no-instance': 'noInstance',
-} as const satisfies Record<GoneWhy, Parameters<typeof goneText>[0]>;
 
 interface TileTreeProps {
   layout: LayoutSnapshot;
@@ -119,7 +112,7 @@ function TerminalTabBody({
     case 'gone':
       return (
         <GoneTerminal
-          message={goneText(GONE_REASON[entry.why], entry.terminal)}
+          message={goneText(entry.why, entry.terminal)}
           onClose={() => onCloseTab?.(tile, tabId)}
           {...(heldTitle === undefined ? {} : { disabledTitle: heldTitle })}
         />
@@ -137,7 +130,7 @@ function TerminalTabBody({
     );
   }
   const pinned = entry.kind === 'pinned';
-  const instance = ctx.backend?.instance ?? null;
+  const backendInstance = ctx.backend?.instance ?? null;
   // A pin is host-wide, so its terminal may sit in another space: it is still the current
   // option, so the select always has an option matching its value.
   const candidates = ctx.spaceTerminals.some((candidate) => candidate.id === terminal.id)
@@ -146,30 +139,28 @@ function TerminalTabBody({
   const options = candidates.map((candidate) => {
     const label = `${candidate.name} (${candidate.state})`;
     if (!pinned) return { id: candidate.id, label, disabled: false };
-    const candidateTab = instance === null ? null : terminalTabId(instance, candidate.id);
+    const candidateTab = backendInstance === null ? null : terminalTabId(backendInstance, candidate.id);
     const open = candidateTab !== null && candidate.id !== terminal.id && openTabs.has(candidateTab);
+    // A held layout disables every option, and its reason comes first.
+    const title = heldTitle ?? (candidateTab === null ? UNPINNABLE_TITLE : open ? ALREADY_OPEN_TITLE : undefined);
     return {
       id: candidate.id,
       label: open ? `${candidate.name} (already open)` : candidateTab === null ? `${candidate.name} (can't be pinned)` : label,
       disabled: held !== null || open || candidateTab === null,
-      reason: open ? ('open' as const) : candidateTab === null ? ('unpinnable' as const) : null,
+      ...(title === undefined ? {} : { title }),
     };
   });
-  const reasons = new Set(options.flatMap((option) => ('reason' in option && option.reason !== null ? [option.reason] : [])));
-  // The switcher has one tooltip for all its disabled options, so name a reason only when they share it.
-  const optionTitle =
-    reasons.size > 1 ? UNAVAILABLE_TITLE : reasons.has('unpinnable') ? UNPINNABLE_TITLE : ALREADY_OPEN_TITLE;
   const onSwitch = (id: string): void => {
     if (!pinned) {
       onSelectActiveTerminal?.(id);
       return;
     }
-    const next = instance === null ? null : terminalTabId(instance, id as TermId);
+    const next = backendInstance === null ? null : terminalTabId(backendInstance, id as TermId);
     if (next !== null) onRepinTerminal?.(tabId, next, tile);
   };
   // A pinned panel names its backend instance, so it never attaches to another core's terminal
   // that reuses the ID; the follow-active tab names none.
-  const panelInstance = pinned ? instance : null;
+  const panelInstance = pinned ? backendInstance : null;
   // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
   return (
     <TerminalPanel
@@ -177,11 +168,11 @@ function TerminalTabBody({
       port={terminalPort}
       hostId={ctx.hostId}
       termId={terminal.id}
-      instance={panelInstance}
+      backendInstance={panelInstance}
       visible
       label={{ name: terminal.name, host: ctx.hostName, state: terminal.state, backend: ctx.backend?.id ?? null }}
       focused={focused}
-      switcher={{ options, onSwitch, disabledTitle: heldTitle ?? optionTitle }}
+      switcher={{ options, onSwitch }}
       {...(pinned
         ? {
             onClose: () => onCloseTab?.(tile, tabId),
