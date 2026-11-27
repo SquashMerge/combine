@@ -3,7 +3,14 @@ import type { PanelView } from './attachmentMachine';
 export function statusText(view: PanelView): string | null {
   const { status } = view;
   if (status === null) return null;
-  return status.kind === 'error' ? status.code : status.kind;
+  switch (status.kind) {
+    case 'error':
+      return status.code;
+    case 'streamFailed':
+      return `Couldn't open the terminal stream: ${status.message}`;
+    default:
+      return status.kind;
+  }
 }
 
 export function overlayText(view: PanelView): string | null {
@@ -34,4 +41,17 @@ export function badges(view: PanelView): string[] {
   if (view.outputSkipped) result.push('output skipped');
   if (view.unorderedResizes) result.push('resizes may be out of order');
   return result;
+}
+
+export type GoneReason = 'unlisted' | 'backendGone' | 'noInstance';
+
+export function goneText(reason: GoneReason, termId: string): string {
+  switch (reason) {
+    case 'unlisted':
+      return `Terminal ${termId} is gone. The host no longer lists it.`;
+    case 'backendGone':
+      return `Terminal ${termId} is gone. It belonged to a terminal backend this host no longer runs.`;
+    case 'noInstance':
+      return `Terminal ${termId} can't be shown: the host doesn't say which terminal backend instance it runs.`;
+  }
 }

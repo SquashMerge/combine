@@ -211,4 +211,20 @@ describe('two panels over a scripted daemon', () => {
     expect(daemon.ownerOf(TERM)).toBe('4');
     expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['other', 'self']);
   });
+
+  it('only the focused panel claims', async () => {
+    const port = new MemoryTerminalPort();
+    const daemon = new ScriptedDaemon(port);
+    daemon.setScreen(TERM, 'prompt$ ');
+    const a = await openPanel(port, { width: 805, height: 349 });
+    const b = await openPanel(port, { width: 400, height: 170 });
+    b.controller.setFocused(true);
+    await settle(a, b);
+    expect(daemon.ownerOf(TERM)).toBe('2');
+    expect(daemon.ptySize(TERM)).toEqual({ cols: 50, rows: 10 });
+    expect(a.stream.commands('requestOwnership')).toEqual([]);
+    expect(a.stream.commands('resize')).toEqual([]);
+    expect(b.stream.commands('requestOwnership')).toHaveLength(1);
+    expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['other', 'self']);
+  });
 });
