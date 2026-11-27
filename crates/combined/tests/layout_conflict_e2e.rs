@@ -12,8 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use combine_protocol::{
-    ClientMessage, DaemonMessage, LayoutNode, LayoutOp, LayoutSnapshot, MutateLayout, Ratio,
-    RequestId, SplitDirection, UnwatchLayout, WatchLayout,
+    ClientMessage, DaemonMessage, ErrorCode, LayoutNode, LayoutOp, LayoutSnapshot, MutateLayout,
+    Ratio, RequestId, SplitDirection, UnwatchLayout, WatchLayout,
 };
 use combined::adapters::fs::file_store::FsFileStore;
 use combined::core::{parse_layout, LayoutTiming, LAYOUT_FILE};
@@ -32,11 +32,18 @@ const HOUR: LayoutTiming = LayoutTiming {
 /// FSEvents can be slow, so a push caused by an outside edit gets the bound `fs_watcher.rs` uses.
 const PUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a test waits for the answer to a request: longer than `RECV_TIMEOUT`, because the
+/// answer to the first `watch_layout` of a space waits while the server loop has
+/// `FsFileStore::watch` set up its FSEvents streams, and a request sent after it waits too.
+/// That took up to 2 s with 32 of these test binaries running at once, and past 5 s under
+/// heavier load (#88).
+const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
 /// only on a client that has sent `watch_layout`.
 fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
     loop {
-        match client.recv() {
+        match client.recv_waiting(REPLY_WAIT) {
             DaemonMessage::Panels(_) => {}
             other => return other,
         }
@@ -356,7 +363,7 @@ fn spawn_in(backend: &Arc<combined::testing::FakeBackend>, cwd: &Path) {
 /// The answer to `request`, skipping any pushes before it.
 fn answer(client: &WireClient, request: u64) -> LayoutSnapshot {
     loop {
-        match client.recv() {
+        match client.recv_waiting(REPLY_WAIT) {
             DaemonMessage::Panels(_) => continue,
             DaemonMessage::Layout(layout) if layout.request.is_none() => continue,
             DaemonMessage::Layout(layout) => {
@@ -364,6 +371,53 @@ fn answer(client: &WireClient, request: u64) -> LayoutSnapshot {
                 return layout.layout;
             }
             other => panic!("expected a layout, got {other:?}"),
+        }
+    }
+}
+
+/// Sends `ops` against `base` and returns the reply. A `stale_layout` refusal is sent again
+/// against the revision of the push that moved it, for a test whose revision can move without
+/// the test doing anything.
+fn mutate_at_latest(
+    client: &mut WireClient,
+    space: &str,
+    request: u64,
+    mut base: u64,
+    ops: Vec<LayoutOp>,
+) -> LayoutSnapshot {
+    loop {
+        let sent = base;
+        client.send(&ClientMessage::MutateLayout(MutateLayout {
+            request: RequestId(request),
+            space: space.to_string(),
+            base_layout_revision: sent,
+            ops: ops.clone(),
+        }));
+        loop {
+            match recv_skipping_panels(client) {
+                DaemonMessage::Layout(push) if push.request.is_none() => {
+                    base = base.max(push.layout.layout_revision);
+                }
+                DaemonMessage::Layout(reply) => {
+                    assert_eq!(reply.request, Some(RequestId(request)));
+                    return reply.layout;
+                }
+                DaemonMessage::Error(error)
+                    if error.code == ErrorCode::StaleLayout
+                        && error.request == Some(RequestId(request)) =>
+                {
+                    break;
+                }
+                other => panic!("expected a layout, got {other:?}"),
+            }
+        }
+        // The push that moved the revision can come after the refusal.
+        if base == sent {
+            base = layout_reply(client, None).layout_revision;
+            assert!(
+                base > sent,
+                "a stale refusal at {sent} was followed by a push at {base}"
+            );
         }
     }
 }
@@ -520,27 +574,34 @@ fn oversized_layout_file_is_invalid_and_never_replaced() {
     let size: u64 = 8 << 20;
     fs::File::create(&file).unwrap().set_len(size).unwrap();
 
+    let too_large = "layout.json can't be used: the layout is 8388608 bytes; the limit is 262144. \
+                     Showing the last good layout. Changes made now aren't saved, and are lost if \
+                     the daemon restarts, until layout.json is fixed.";
+
+    // No exact revisions: FSEvents can deliver the events of the file written above late, and
+    // every re-read of an oversized file counts as a change, so the revision can move at any
+    // point below (#88).
     let mut client = WireClient::open(&server.socket).0;
     let snapshot = watch(&mut client, &space, 1);
-    assert_eq!(
-        snapshot.error.as_deref(),
-        Some(
-            "layout.json can't be used: the layout is 8388608 bytes; the limit is 262144. \
-             Showing the last good layout. Changes made now aren't saved, and are lost if the \
-             daemon restarts, until layout.json is fixed."
-        )
+    assert_eq!(snapshot.error.as_deref(), Some(too_large));
+    let reply = mutate_at_latest(
+        &mut client,
+        &space,
+        2,
+        snapshot.layout_revision,
+        split_main(),
     );
-    assert_eq!(
-        mutate(&mut client, &space, 2, 0, split_main()).layout_revision,
-        1
-    );
+    assert_eq!(ratio_of(&reply.root), 0.5, "the change is held in memory");
+    assert_eq!(reply.error.as_deref(), Some(too_large));
     std::thread::sleep(std::time::Duration::from_millis(300));
     client.send(&ClientMessage::UnwatchLayout(UnwatchLayout {}));
     client.send(&ClientMessage::WatchLayout(WatchLayout {
         request: RequestId(3),
         space: space.clone(),
     }));
-    answer(&client, 3);
+    let held = answer(&client, 3);
+    assert_eq!(ratio_of(&held.root), 0.5, "the held change was dropped");
+    assert_eq!(held.error.as_deref(), Some(too_large));
     assert!(server.server.shutdown().is_none());
 
     assert_eq!(fs::metadata(&file).unwrap().len(), size);
