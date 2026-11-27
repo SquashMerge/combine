@@ -100,6 +100,16 @@ describe('AddTerminalMenu', () => {
     expect(code?.textContent).not.toContain('…');
   });
 
+  it('the_approval_line_orders_env_by_code_point', async () => {
+    const port = new MemorySpawnPort();
+    const env = { b: '1', '10': '2', '2': '3', a: '4' } as TerminalTemplate['env'];
+    port.setList(list({ templates: [template({ argv: ['run', 'k=v'], env })] }));
+    mount(port);
+    await open();
+    const code = screen.getByRole('menu').querySelector('code.command');
+    expect(code?.textContent).toBe('10=2 2=3 a=4 b=1 run "k=v"');
+  });
+
   it('shows_skipped_panels_with_reasons', async () => {
     const port = new MemorySpawnPort();
     port.setList(list({ skipped: [{ panel: 'notes', reason: 'not a terminal panel' }] }));

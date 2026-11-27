@@ -143,8 +143,9 @@ export function parseSpawnEvent(json: unknown): SpawnEvent {
   }
 }
 
-const NEEDS_QUOTES = /[\s"'\\$`\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/u;
-const SPECIAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/u;
+const NEEDS_QUOTES =
+  /[\s"'\\$`=\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}\p{M}\p{Co}\u115F\u1160\u3164\uFFA0\u2800]/u;
+const SPECIAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}\p{M}\p{Co}\u115F\u1160\u3164\uFFA0\u2800]/u;
 
 const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
   '\\': '\\\\',
@@ -175,11 +176,25 @@ export function quoteWord(s: string): string {
   return `"${out}"`;
 }
 
+/** Orders strings by code point, the byte order of the daemon's env map, not by UTF-16 unit. */
+export function compareCodePoints(a: string, b: string): number {
+  const left = Array.from(a, (ch) => ch.codePointAt(0) ?? 0);
+  const right = Array.from(b, (ch) => ch.codePointAt(0) ?? 0);
+  const n = Math.min(left.length, right.length);
+  for (let i = 0; i < n; i += 1) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return left.length - right.length;
+}
+
 export function formatCommandLine(t: {
   argv: readonly string[];
   env: Readonly<Dict<string>>;
 }): string {
-  const words = Object.entries(t.env).map(([k, v]) => `${quoteWord(k)}=${quoteWord(v)}`);
+  const words = Object.entries(t.env)
+    .sort(([a], [b]) => compareCodePoints(a, b))
+    .map(([k, v]) => `${quoteWord(k)}=${quoteWord(v)}`);
   for (const a of t.argv) words.push(quoteWord(a));
   return words.join(' ');
 }

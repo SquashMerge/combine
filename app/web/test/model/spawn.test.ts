@@ -8,6 +8,7 @@ import {
   SpawnError,
   type SpawnSource,
   SpawnReplies,
+  compareCodePoints,
   formatCommandLine,
   parseSpawnEvent,
   quoteWord,
@@ -175,7 +176,7 @@ describe('parseSpawnEvent', () => {
 
 describe('quoteWord', () => {
   it('quoteWord_leaves_plain_words', () => {
-    for (const word of ['claude', '--resume', 'a/b.c-d_e=f', 'ünï', '中文']) {
+    for (const word of ['claude', '--resume', 'a/b.c-d_e', 'ünï', '中文']) {
       expect(quoteWord(word)).toBe(word);
     }
   });
@@ -215,7 +216,45 @@ describe('quoteWord', () => {
   });
 });
 
+describe('quoteWord approval-line hardening', () => {
+  it('quoteWord_quotes_words_with_equals', () => {
+    expect(quoteWord('--flag=value')).toBe('"--flag=value"');
+    expect(quoteWord('A=B')).toBe('"A=B"');
+  });
+
+  it('quoteWord_escapes_each_added_invisible_class', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['\u0301', '\\u{0301}'],
+      ['\uE000', '\\u{E000}'],
+      ['\u115F', '\\u{115F}'],
+      ['\u1160', '\\u{1160}'],
+      ['\u3164', '\\u{3164}'],
+      ['\uFFA0', '\\u{FFA0}'],
+      ['\u2800', '\\u{2800}'],
+    ];
+    for (const [ch, escaped] of cases) {
+      expect(quoteWord(`a${ch}b`)).toBe(`"a${escaped}b"`);
+    }
+  });
+});
+
+describe('compareCodePoints', () => {
+  it('compareCodePoints_orders_by_code_point_not_utf16_unit', () => {
+    expect(compareCodePoints('\u{1F600}', '\uFF5E')).toBeGreaterThan(0);
+    expect(compareCodePoints('\uFF5E', '\u{1F600}')).toBeLessThan(0);
+    expect(compareCodePoints('a', 'ab')).toBeLessThan(0);
+    expect(compareCodePoints('ab', 'ab')).toBe(0);
+  });
+});
+
 describe('formatCommandLine', () => {
+  it('formatCommandLine_orders_env_by_code_point_with_integer_like_keys', () => {
+    const env = { b: '1', '10': '2', '2': '3', '\u{1F600}': '4', '\uFF5E': '5', a: '6' };
+    expect(formatCommandLine({ argv: [], env })).toBe(
+      '10=2 2=3 a=6 b=1 \uFF5E=5 \u{1F600}=4',
+    );
+  });
+
   it('formatCommandLine_never_truncates', () => {
     const long = 'x'.repeat(10_000);
     const line = formatCommandLine({ argv: ['run', long, `${long} y`], env: {} });
