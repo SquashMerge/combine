@@ -3,7 +3,8 @@
 
 use combine_protocol::{DaemonMessage, Epoch, ErrorCode, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
-use combined::testing::{Half, LATE_DATA, LATE_RESIZED};
+use combined::ports::Half;
+use combined::testing::{LATE_DATA, LATE_RESIZED};
 use futures::FutureExt;
 
 use crate::common::{display, request_options};

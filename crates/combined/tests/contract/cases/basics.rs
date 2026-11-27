@@ -3,7 +3,7 @@
 use combine_protocol::{ClientMessage, CloseReason, Epoch, ErrorCode, Fidelity, Resume, Seq};
 use combined::core::CoreConfig;
 use combined::model::TermState;
-use combined::testing::Half;
+use combined::ports::Half;
 use futures::FutureExt;
 
 use crate::common::{display, request_options};

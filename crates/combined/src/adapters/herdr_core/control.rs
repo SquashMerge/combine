@@ -18,7 +18,7 @@ use combine_protocol::BackendGeneration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::attachment;
-use crate::ports::AttachEvent;
+use crate::ports::{AttachEvent, Half};
 
 type EventTx = UnboundedSender<(BackendGeneration, AttachEvent)>;
 
@@ -27,13 +27,6 @@ const RAW_SIZE_EVENTS: usize = 40;
 
 /// How long after a RESIZE, FOCUS or FACTS frame the adapter still counts as busy.
 const BUSY_WINDOW: Duration = Duration::from_millis(50);
-
-/// One of an attachment's two viewers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairHalf {
-    Display,
-    Input,
-}
 
 /// A pair's state, as `pairs()` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,7 +298,7 @@ impl HerdrCoreControl {
 
     /// Fails one half of the `index`th attachment on the terminal, as if its connection broke.
     /// False when there is no such attachment or it is closed.
-    pub fn fail_half(&self, address: &str, index: usize, half: PairHalf) -> bool {
+    pub fn fail_half(&self, address: &str, index: usize, half: Half) -> bool {
         let attachment = {
             let inner = self.shared.lock();
             inner

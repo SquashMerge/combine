@@ -65,13 +65,6 @@ pub enum Mutation {
     DropByte,
 }
 
-/// One of an attachment's two backend halves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Half {
-    Display,
-    Input,
-}
-
 /// Names one attachment the fake opened. Refs count up from 1 across the whole backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FakeAttachmentRef(pub u64);

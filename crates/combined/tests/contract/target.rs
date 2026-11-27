@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use combine_protocol::TermId;
 use combined::model::SpawnSpec;
-use combined::ports::TerminalBackend;
-use combined::testing::Half;
+use combined::ports::{Half, TerminalBackend};
 
 /// Why a target can't do something. Cases declare what they need, so a case that gets this
 /// has found a gap in its own `needs`.

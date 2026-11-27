@@ -64,6 +64,16 @@ pub struct Capabilities {
     pub agent_state: bool,
 }
 
+/// One of the two halves behind an attachment: the display half carries its output, the input
+/// half takes its input (SPEC.md, "Terminal backends"). A watch-only attachment has only the
+/// display half. Test support names a half to fail it; production code never does.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    Display,
+    Input,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachOptions {
     pub cols: u16,
@@ -142,8 +152,10 @@ pub trait TerminalBackend: Send + Sync {
 /// - After `detach()` the stream ends. It may yield `Closed(Detached)` first; the daemon
 ///   ignores it.
 /// - `Facts(d)` follows a `set_display(d)` once applied, only with `display_queries`.
-/// - On a watch-only attachment, `write`, `write_automatic`, `resize` and `focus` are `Ok`
-///   no-ops.
+/// - On a watch-only attachment, `write`, `write_automatic`, `resize`, `focus` and
+///   `set_display` are `Ok` no-ops: it has no input half, so nothing is sent, its latest
+///   requested size and display stay as attached, no `Facts` follows and the terminal's highest
+///   ownership generation doesn't move.
 /// - While a pair reopens, `write`, `resize`, `focus` and `set_display` are queued and applied
 ///   in order once it is ready. `write_automatic` and `credit` are dropped. The queue is
 ///   bounded by the adapter; a request beyond the bound returns `Err(BackendError::Failed(..))`
