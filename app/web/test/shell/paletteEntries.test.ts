@@ -118,6 +118,7 @@ describe('paletteEntries', () => {
       expect(kinds).toEqual([
         'close-panel',
         'pin-panel',
+        'show-active-terminal',
         'switch-space',
         'switch-space',
         'focus-terminal',
@@ -154,6 +155,37 @@ describe('paletteEntries', () => {
       expect(kinds).not.toContain('close-panel');
       expect(kinds).not.toContain('pin-panel');
       expect(entries.filter((e) => e.action.kind === 'show-panel').map((e) => e.label)).toEqual(['Notes', 'Wip']);
+    });
+
+    it('show_the_active_terminal_here', () => {
+      const find = (p: PalettePanels) =>
+        buildPaletteEntries(sample(), p).find((e) => e.action.kind === 'show-active-terminal');
+      expect(find(panels())).toMatchObject({
+        label: 'Show the active terminal here',
+        detail: 'in alpha',
+        action: { kind: 'show-active-terminal', space: alpha, tile: 'tile-1' },
+      });
+      expect(find(panels({ focused: { tile: 'tile-1', panel: '.active-terminal' } }))).toBeUndefined();
+      expect(find(panels({ editable: false }))).toBeUndefined();
+      expect(find(panels({ focused: null, focusedTile: 'tile-2' }))?.action).toMatchObject({ tile: 'tile-2' });
+    });
+
+    it('names a focused terminal tab by its label in the Close panel detail', () => {
+      const entries = buildPaletteEntries(
+        sample(),
+        panels({ focused: { tile: 'tile-1', panel: '.active-terminal', label: 'Active: build' } }),
+      );
+      expect(entries[0]).toMatchObject({ label: 'Close panel', detail: 'Active: build in alpha' });
+    });
+
+    it('runs the show-active-terminal handler', () => {
+      const calls: string[] = [];
+      const entry = buildPaletteEntries(sample(), panels()).find((e) => e.action.kind === 'show-active-terminal');
+      const base = { onSelectSpace: () => {}, onSelectTerminal: () => {}, onRetryHost: () => {} };
+      if (entry === undefined) throw new Error('no entry');
+      runPaletteAction(entry.action, { ...base, onShowActiveTerminal: (_s, tile) => calls.push(tile) });
+      runPaletteAction(entry.action, base);
+      expect(calls).toEqual(['tile-1']);
     });
 
     it('lists what it listed before with no panels argument', () => {

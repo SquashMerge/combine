@@ -1,20 +1,37 @@
-import { type Dict, dictGet } from '../model/dict';
-import type { HostId, TermId } from '../model/ids';
-import type { LayoutNode, LayoutSnapshot, SplitDirection } from '../model/layout';
+import { useMemo } from 'react';
+import type { Dict } from '../model/dict';
+import type { TermId } from '../model/ids';
+import { type LayoutNode, type LayoutSnapshot, type SplitDirection, layoutTiles, shownTab } from '../model/layout';
 import type { OpenUrlPort, PanelPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import { type SpaceKey } from '../model/space';
 import { type SpacePanelsView, panelEntry, tabLabel } from '../model/panels';
+import {
+  type GoneWhy,
+  type TerminalTabEntry,
+  type TerminalTabsContext,
+  isTerminalTab,
+  terminalTabEntry,
+  terminalTabId,
+  terminalTabKind,
+  terminalTabLabel,
+} from '../model/terminalTabs';
 import { HELD_NOTICE, HELD_TITLE, type HeldReason } from './heldLayout';
+import { GoneTerminal } from '../panels/GoneTerminal';
+import { goneText } from '../panels/panelText';
 import { TerminalPanel } from '../panels/TerminalPanel';
 import { ViewPanel } from '../panels/ViewPanel';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 
-export interface TerminalMount {
-  hostId: HostId;
-  termId: TermId;
-  label: { name: string; host: string; state: string };
-}
+const NO_ACTIVE_TERMINAL = 'No active terminal. Pick one in the navigator.';
+const PENDING_TERMINALS = "Waiting for the host's terminal list…";
+const ALREADY_OPEN_TITLE = 'Already open in this layout';
+
+const GONE_REASON = {
+  unlisted: 'unlisted',
+  'other-instance': 'backendGone',
+  'no-instance': 'noInstance',
+} as const satisfies Record<GoneWhy, Parameters<typeof goneText>[0]>;
 
 interface TileTreeProps {
   layout: LayoutSnapshot;
@@ -27,7 +44,12 @@ interface TileTreeProps {
   onSplit: (tile: string, dir: SplitDirection) => void;
   onClose: (tile: string) => void;
   terminalPort: TerminalPort;
-  terminal: TerminalMount | null;
+  /** What the terminal tabs of this space resolve against; null when the host isn't known. */
+  terminalTabs?: TerminalTabsContext | null;
+  /** Picks the terminal the follow-active tab shows. */
+  onSelectActiveTerminal?: (terminal: string) => void;
+  /** Re-pins a pinned terminal tab of a tile to another terminal. */
+  onRepinTerminal?: (previous: string, terminal: string, tile: string) => void;
   createAdapter?: XtermAdapterFactory;
   space?: SpaceKey | null;
   panels?: SpacePanelsView | null;
@@ -45,17 +67,125 @@ interface TileTreeProps {
 type NodeProps = Omit<TileTreeProps, 'layout' | 'notice' | 'error' | 'actionError'> & {
   node: LayoutNode;
   closable: boolean;
+  /** Every tab the layout holds. */
+  openTabs: ReadonlySet<string>;
 };
 
-function Node({ node, closable, ...rest }: NodeProps) {
+interface TerminalTabBodyProps {
+  tabId: string;
+  tile: string;
+  entry: TerminalTabEntry;
+  ctx: TerminalTabsContext;
+  focused: boolean;
+  held: HeldReason | null;
+  openTabs: ReadonlySet<string>;
+  terminalPort: TerminalPort;
+  onCloseTab?: ((tile: string, panel: string) => void) | undefined;
+  onSelectActiveTerminal?: ((terminal: string) => void) | undefined;
+  onRepinTerminal?: ((previous: string, terminal: string, tile: string) => void) | undefined;
+  createAdapter?: XtermAdapterFactory;
+}
+
+function TerminalTabBody({
+  tabId,
+  tile,
+  entry,
+  ctx,
+  focused,
+  held,
+  openTabs,
+  terminalPort,
+  onCloseTab,
+  onSelectActiveTerminal,
+  onRepinTerminal,
+  createAdapter,
+}: TerminalTabBodyProps) {
+  const heldTitle = held === null ? undefined : HELD_TITLE[held];
+  switch (entry.kind) {
+    case 'unknown':
+      return (
+        <p className="view-panel-status" role="status">
+          Panel {tabId} is missing
+        </p>
+      );
+    case 'pending':
+      return (
+        <p className="view-panel-status" role="status">
+          {PENDING_TERMINALS}
+        </p>
+      );
+    case 'gone':
+      return (
+        <GoneTerminal
+          message={goneText(GONE_REASON[entry.why], entry.terminal)}
+          onClose={() => onCloseTab?.(tile, tabId)}
+          {...(heldTitle === undefined ? {} : { disabledTitle: heldTitle })}
+        />
+      );
+    case 'follow-active':
+    case 'pinned':
+      break;
+  }
+  const { terminal } = entry;
+  if (terminal === null) {
+    return (
+      <p className="view-panel-status" role="status">
+        {NO_ACTIVE_TERMINAL}
+      </p>
+    );
+  }
+  const pinned = entry.kind === 'pinned';
+  const instance = ctx.backend?.instance ?? null;
+  const options = ctx.spaceTerminals.map((candidate) => {
+    const label = `${candidate.name} (${candidate.state})`;
+    if (!pinned) return { id: candidate.id, label, disabled: false };
+    const candidateTab = instance === null ? null : terminalTabId(instance, candidate.id);
+    const open = candidateTab !== null && candidate.id !== terminal.id && openTabs.has(candidateTab);
+    return {
+      id: candidate.id,
+      label: open ? `${candidate.name} (already open)` : label,
+      disabled: held !== null || open || candidateTab === null,
+    };
+  });
+  const onSwitch = (id: string): void => {
+    if (!pinned) {
+      onSelectActiveTerminal?.(id);
+      return;
+    }
+    const next = instance === null ? null : terminalTabId(instance, id as TermId);
+    if (next !== null) onRepinTerminal?.(tabId, next, tile);
+  };
+  // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
+  return (
+    <TerminalPanel
+      key={`${ctx.hostId}/${terminal.id}`}
+      port={terminalPort}
+      hostId={ctx.hostId}
+      termId={terminal.id}
+      visible
+      label={{ name: terminal.name, host: ctx.hostName, state: terminal.state, backend: ctx.backend?.id ?? null }}
+      focused={focused}
+      switcher={{ options, onSwitch, disabledTitle: heldTitle ?? ALREADY_OPEN_TITLE }}
+      {...(pinned
+        ? {
+            onClose: () => onCloseTab?.(tile, tabId),
+            ...(heldTitle === undefined ? {} : { closeDisabledTitle: heldTitle }),
+          }
+        : {})}
+      {...(createAdapter === undefined ? {} : { createAdapter })}
+    />
+  );
+}
+
+function Node({ node, closable, openTabs, ...rest }: NodeProps) {
   if (node.type === 'split') {
     return (
       <div className="split" data-dir={node.dir}>
         <div className="split-pane" style={{ flex: `${node.ratio} 1 0px` }}>
-          <Node node={node.a} closable={closable} {...rest} />
+          <Node node={node.a} closable={closable} openTabs={openTabs} {...rest} />
         </div>
         <div className="split-pane" style={{ flex: `${1 - node.ratio} 1 0px` }}>
-          <Node node={node.b} closable={closable} {...rest} />
+          <Node node={node.b} closable={closable} openTabs={openTabs} {...rest} />
         </div>
       </div>
     );
@@ -68,7 +198,9 @@ function Node({ node, closable, ...rest }: NodeProps) {
     onSplit,
     onClose,
     terminalPort,
-    terminal,
+    terminalTabs = null,
+    onSelectActiveTerminal,
+    onRepinTerminal,
     createAdapter,
     space = null,
     panels = null,
@@ -80,14 +212,17 @@ function Node({ node, closable, ...rest }: NodeProps) {
     held = null,
   } = rest;
   const heldTitle = held === null ? undefined : HELD_TITLE[held];
-  const active = dictGet(activeTabs, node.id) ?? node.active ?? node.panels[0] ?? null;
+  const active = shownTab(node, activeTabs);
   const focused = focusedTile === node.id;
   const list = panels?.list ?? null;
-  const entry = active === null || panels === null ? null : panelEntry(list, active);
-  // A listed or skipped panel takes the focused tile; a dangling or loading one leaves the terminal.
-  const viewWins = entry?.kind === 'listed' || entry?.kind === 'skipped';
-  // The panel fills the whole body: a placeholder beside it would overflow the container the PTY is sized from.
-  const hasTerminal = focused && terminal !== null && !viewWins;
+  // A tab ID that starts with `.` is a terminal tab, whatever the panel list says.
+  const terminalEntry = (id: string): TerminalTabEntry | null =>
+    terminalTabs === null
+      ? isTerminalTab(id)
+        ? { kind: 'unknown' }
+        : null
+      : terminalTabEntry(id, terminalTabs);
+  const activeEntry = active === null ? null : terminalEntry(active);
   return (
     <div
       className="tile"
@@ -98,6 +233,37 @@ function Node({ node, closable, ...rest }: NodeProps) {
       <div className="tile-bar">
         <div role="tablist" aria-label={`Panels of ${node.id}`}>
           {node.panels.map((panel) => {
+            const terminalTab = terminalEntry(panel);
+            if (terminalTab !== null) {
+              const label = terminalTabLabel(panel, terminalTab);
+              const pending = terminalTab.kind === 'pending';
+              return (
+                <span key={panel} role="presentation" className="tab-wrap">
+                  <button
+                    type="button"
+                    role="tab"
+                    data-panel-id={panel}
+                    data-panel-entry={terminalTabKind(terminalTab)}
+                    aria-selected={panel === active}
+                    onClick={() => onSelectTab(node.id, panel)}
+                  >
+                    {label}
+                  </button>
+                  {onCloseTab !== undefined && (
+                    <button
+                      type="button"
+                      className="tab-close"
+                      aria-label={`Close panel ${label}`}
+                      title={heldTitle ?? (pending ? 'Loading…' : 'Close panel')}
+                      disabled={held !== null || pending}
+                      onClick={() => onCloseTab(node.id, panel)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              );
+            }
             const tabEntry = panelEntry(list, panel);
             const label = panelPort === undefined ? panel : tabLabel(list, panel);
             const busy = busyPanels?.has(panel) ?? false;
@@ -163,35 +329,41 @@ function Node({ node, closable, ...rest }: NodeProps) {
         </button>
       </div>
       <div className="tile-body" role="tabpanel">
-        {!hasTerminal &&
-          (active === null ? (
-            'No panels'
-          ) : panelPort === undefined || space === null ? (
-            active
-          ) : (
-            <ViewPanel
-              key={`${space.hostId}/${space.path}/${active}`}
-              hostId={space.hostId}
-              space={space.path}
-              panelId={active}
-              focused={focused}
-              entry={panelEntry(list, active)}
-              session={panels?.session ?? 0}
-              connected={panels?.connected ?? false}
-              port={panelPort}
-              {...(openUrlPort === undefined ? {} : { openUrlPort })}
-            />
-          ))}
-        {hasTerminal && (
-          // Never render under React.StrictMode: a panel's controller is created once and stop() is permanent.
-          <TerminalPanel
-            key={`${terminal.hostId}/${terminal.termId}`}
-            port={terminalPort}
-            hostId={terminal.hostId}
-            termId={terminal.termId}
-            visible
-            label={terminal.label}
+        {active === null ? (
+          'No panels'
+        ) : activeEntry !== null && terminalTabs !== null ? (
+          <TerminalTabBody
+            tabId={active}
+            tile={node.id}
+            entry={activeEntry}
+            ctx={terminalTabs}
+            focused={focused}
+            held={held}
+            openTabs={openTabs}
+            terminalPort={terminalPort}
+            onCloseTab={onCloseTab}
+            onSelectActiveTerminal={onSelectActiveTerminal}
+            onRepinTerminal={onRepinTerminal}
             {...(createAdapter === undefined ? {} : { createAdapter })}
+          />
+        ) : activeEntry !== null ? (
+          <p className="view-panel-status" role="status">
+            Panel {active} is missing
+          </p>
+        ) : panelPort === undefined || space === null ? (
+          active
+        ) : (
+          <ViewPanel
+            key={`${space.hostId}/${space.path}/${active}`}
+            hostId={space.hostId}
+            space={space.path}
+            panelId={active}
+            focused={focused}
+            entry={panelEntry(list, active)}
+            session={panels?.session ?? 0}
+            connected={panels?.connected ?? false}
+            port={panelPort}
+            {...(openUrlPort === undefined ? {} : { openUrlPort })}
           />
         )}
       </div>
@@ -202,6 +374,10 @@ function Node({ node, closable, ...rest }: NodeProps) {
 export function TileTree({ layout, notice, error, actionError = null, ...rest }: TileTreeProps) {
   const dropped = layout.dropped?.message ?? null;
   const held = rest.held ?? null;
+  const openTabs = useMemo(
+    () => new Set([...layoutTiles(layout.root).values()].flatMap((tile) => tile.panels)),
+    [layout.root],
+  );
   return (
     <main
       className="layout"
@@ -240,7 +416,12 @@ export function TileTree({ layout, notice, error, actionError = null, ...rest }:
           {notice}
         </p>
       )}
-      <Node node={layout.root} closable={layout.root.type === 'split'} {...rest} />
+      <Node
+        node={layout.root}
+        closable={layout.root.type === 'split'}
+        openTabs={openTabs}
+        {...rest}
+      />
     </main>
   );
 }

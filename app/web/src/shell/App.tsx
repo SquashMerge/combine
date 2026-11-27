@@ -12,27 +12,36 @@ import {
 } from '../model/clientState';
 import { dictGet, dictWith, emptyDict } from '../model/dict';
 import { type DecimalU64, type HostId, type TermId, decimalU64FromBigInt } from '../model/ids';
-import { type SpaceKey, spaceKeyId } from '../model/space';
+import { type SpaceKey, sameSpace, spaceKeyId } from '../model/space';
 import type { ClientStatePort, HostsPort, LayoutPort, OpenUrlPort, PanelPort, SpawnPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
-import type { HostsSnapshot } from '../model/hosts';
+import type { HostsSnapshot, TerminalSummary } from '../model/hosts';
 import {
   type LayoutNode,
   type LayoutSnapshot,
   firstTileId,
   layoutTiles,
   newlyActiveTiles,
+  shownTab,
   tileHolding,
 } from '../model/layout';
 import { type PanelLifetime, panelEntry, tabLabel } from '../model/panels';
+import {
+  ACTIVE_TERMINAL_TAB,
+  type TerminalTabsContext,
+  isTerminalTab,
+  terminalTabEntry,
+  terminalTabId,
+  terminalTabLabel,
+} from '../model/terminalTabs';
 import { AddTerminalMenu } from './AddTerminalMenu';
 import { CommandPalette } from './CommandPalette';
 import { ConfirmClosePanel } from './ConfirmClosePanel';
 import { heldReason } from './heldLayout';
 import type { PalettePanels } from './paletteEntries';
 import { SpaceRail } from './SpaceRail';
-import { type TerminalMount, TileTree } from './TileTree';
+import { TileTree } from './TileTree';
 import { type ActiveTerminals, TerminalNavigator } from './TerminalNavigator';
 import { useSpaceLayout } from './useSpaceLayout';
 import { useAutoOpenTerminal } from './useAutoOpenTerminal';
@@ -293,18 +302,23 @@ export function App({
     return { ...result, focusedTile: result.focusedTile ?? firstTileId(root) };
   }, [shownLayout, selected, snapshot, states]);
 
-  const mountedTerminal = useMemo<TerminalMount | null>(() => {
+  const terminalTabs = useMemo<TerminalTabsContext | null>(() => {
     if (selected === null) return null;
     const hostView = snapshot?.hosts.find((candidate) => candidate.hostId === selected.hostId);
-    const termId = activeTerminals.get(spaceKeyId(selected));
-    const summary = hostView?.spaces
-      .find((candidate) => candidate.key.path === selected.path)
-      ?.terminals.find((terminal) => terminal.id === termId);
-    if (hostView === undefined || summary === undefined) return null;
+    if (hostView === undefined) return null;
+    const terminals = new Map<TermId, TerminalSummary>();
+    for (const hostSpace of hostView.spaces) {
+      for (const terminal of hostSpace.terminals) terminals.set(terminal.id, terminal);
+    }
+    const spaceTerminals =
+      hostView.spaces.find((candidate) => candidate.key.path === selected.path)?.terminals ?? [];
     return {
       hostId: selected.hostId,
-      termId: summary.id,
-      label: { name: summary.name, host: hostView.name, state: summary.state },
+      hostName: hostView.name,
+      backend: hostView.backend ?? null,
+      terminals,
+      spaceTerminals,
+      activeTerminal: activeTerminals.get(spaceKeyId(selected)) ?? null,
     };
   }, [activeTerminals, selected, snapshot]);
 
@@ -313,7 +327,9 @@ export function App({
       const { hostId, path } = space;
       const current = statesRef.current.get(hostId);
       if (current === undefined) return;
-      const next = change(dictGet(current.spaces, path) ?? emptySpaceState(path));
+      const base = dictGet(current.spaces, path) ?? emptySpaceState(path);
+      const next = change(base);
+      if (next === base) return;
       updateStates((all) =>
         new Map(all).set(hostId, { ...current, spaces: dictWith(current.spaces, path, next) }),
       );
@@ -337,10 +353,11 @@ export function App({
   const selectTab = useCallback(
     (tile: string, panel: string) => {
       if (selected === null) return;
-      changeSpaceState(selected, (state) => ({
-        ...state,
-        activeTabs: dictWith(state.activeTabs, tile, panel),
-      }));
+      changeSpaceState(selected, (state) =>
+        dictGet(state.activeTabs, tile) === panel
+          ? state
+          : { ...state, activeTabs: dictWith(state.activeTabs, tile, panel) },
+      );
     },
     [changeSpaceState, selected],
   );
@@ -420,6 +437,12 @@ export function App({
 
   const closePanel = useCallback(
     (space: SpaceKey, panel: string) => {
+      if (isTerminalTab(panel)) {
+        // A terminal tab is only ever taken out of the layout; the terminal itself is never closed.
+        if (terminalTabs !== null && terminalTabEntry(panel, terminalTabs)?.kind === 'pending') return;
+        layout.removePanel(panel);
+        return;
+      }
       const entry = panelEntry(panelList, panel);
       const label = tabLabel(panelList, panel);
       if (entry.kind === 'missing' || entry.kind === 'skipped') {
@@ -431,7 +454,7 @@ export function App({
       if (lifetime === 'persistent') sendPanelAction('close', space, panel, label);
       else setConfirmClose({ space, panel, label, lifetime });
     },
-    [layout, panelList, sendPanelAction],
+    [layout, panelList, sendPanelAction, terminalTabs],
   );
 
   const pinPanel = useCallback(
@@ -460,6 +483,63 @@ export function App({
     [changeSpaceState, layout, selectSpace, selectedId],
   );
 
+  const openTerminal = useCallback(
+    (space: SpaceKey, id: TermId) => {
+      recordSelection(space, id);
+      const live = layout.snapshot;
+      if (selected === null || !sameSpace(space, selected) || live === null || live.readOnly) return;
+      if (held !== null || restoredTiles === null) return;
+      const instance = terminalTabs?.backend?.instance ?? null;
+      const tab = instance === null ? null : terminalTabId(instance, id);
+      if (tab === null) return;
+      const focusedId = restoredTiles.focusedTile;
+      const focusedData = layoutTiles(live.root).get(focusedId);
+      if (focusedData === undefined) return;
+      const shown = shownTab({ id: focusedId, ...focusedData }, restoredTiles.activeTabs);
+      if (shown === ACTIVE_TERMINAL_TAB) return;
+      const holder = tileHolding(live.root, tab);
+      if (holder !== null) {
+        changeSpaceState(space, (state) => ({
+          ...state,
+          focusedTile: holder,
+          activeTabs: dictWith(state.activeTabs, holder, tab),
+        }));
+        return;
+      }
+      pendingFocus.current = { space: spaceKeyId(space), panel: tab };
+      if (focusedData.panels.length === 0) layout.addPanelTo(tab, focusedId);
+      else layout.openBeside(focusedId, tab);
+    },
+    [changeSpaceState, held, layout, recordSelection, restoredTiles, selected, terminalTabs],
+  );
+
+  const repinTerminal = useCallback(
+    (previous: string, next: string, tile: string) => layout.replacePanel(previous, next, tile),
+    [layout],
+  );
+
+  const selectActiveTerminal = useCallback(
+    (id: string) => {
+      if (selected !== null) selectTerminal(selected, id as TermId);
+    },
+    [selectTerminal, selected],
+  );
+
+  const showActiveTerminalHere = useCallback(
+    (space: SpaceKey, tile: string) => {
+      if (shownLayout === null || selectedId === null || spaceKeyId(space) !== selectedId) return;
+      const holder = tileHolding(shownLayout.root, ACTIVE_TERMINAL_TAB);
+      if (holder === null) layout.addPanelTo(ACTIVE_TERMINAL_TAB, tile);
+      else layout.movePanelTo(ACTIVE_TERMINAL_TAB, tile, layoutTiles(shownLayout.root).get(tile)?.panels.length ?? 0);
+      changeSpaceState(space, (state) => ({
+        ...state,
+        focusedTile: tile,
+        activeTabs: dictWith(state.activeTabs, tile, ACTIVE_TERMINAL_TAB),
+      }));
+    },
+    [changeSpaceState, layout, selectedId, shownLayout],
+  );
+
   const busyPanels = useMemo(() => {
     const prefix = `${selectedId}:`;
     return new Set([...busyActions].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)));
@@ -478,16 +558,27 @@ export function App({
     const panel =
       focusedId === null || focusedTileData === undefined
         ? null
-        : (dictGet(restoredTiles?.activeTabs ?? NO_TABS, focusedId) ?? focusedTileData.panels[0] ?? null);
+        : shownTab({ id: focusedId, ...focusedTileData }, restoredTiles?.activeTabs ?? NO_TABS);
+    const terminalEntry =
+      panel === null || terminalTabs === null ? null : terminalTabEntry(panel, terminalTabs);
     return {
       space: selected,
       hostName: findHostName(snapshot, selected.hostId),
       panels: panelList.panels,
       tiles,
-      focused: focusedId === null || panel === null ? null : { tile: focusedId, panel },
+      focused:
+        focusedId === null || panel === null
+          ? null
+          : {
+              tile: focusedId,
+              panel,
+              ...(terminalEntry === null ? {} : { label: terminalTabLabel(panel, terminalEntry) }),
+            },
+      focusedTile: focusedTileData === undefined ? null : focusedId,
+      activeTerminalTile: tileHolding(shownLayout.root, ACTIVE_TERMINAL_TAB),
       editable: held === null && layout.snapshot !== null && !layout.snapshot.readOnly,
     };
-  }, [selected, shownLayout, hostConnected, layout.panels, layout.snapshot, panelList, restoredTiles, snapshot, held]);
+  }, [selected, shownLayout, hostConnected, layout.panels, layout.snapshot, panelList, restoredTiles, snapshot, held, terminalTabs]);
 
   const retry = useCallback((name: string) => void port.retryHost(name), [port]);
 
@@ -513,7 +604,7 @@ export function App({
         snapshot={snapshot}
         selected={selected}
         active={activeTerminals}
-        onSelectTerminal={selectTerminal}
+        onSelectTerminal={openTerminal}
         allSpaces={allSpaces}
         onToggleAllSpaces={() => setAllSpaces((on) => !on)}
         actions={
@@ -544,7 +635,9 @@ export function App({
           onSplit={layout.split}
           onClose={layout.close}
           terminalPort={terminalPort}
-          terminal={mountedTerminal}
+          terminalTabs={terminalTabs}
+          onSelectActiveTerminal={selectActiveTerminal}
+          onRepinTerminal={repinTerminal}
           space={selected}
           panels={layout.panels}
           held={held}
@@ -560,12 +653,13 @@ export function App({
       <CommandPalette
         snapshot={snapshot}
         onSelectSpace={selectSpace}
-        onSelectTerminal={selectTerminal}
+        onSelectTerminal={openTerminal}
         onRetryHost={retry}
         panels={palettePanels}
         onShowPanel={showPanel}
         onClosePanel={closePanel}
         onPinPanel={pinPanel}
+        onShowActiveTerminal={showActiveTerminalHere}
       />
       {confirmClose !== null && (
         <ConfirmClosePanel

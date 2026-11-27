@@ -1,9 +1,12 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseTermId } from '../../src/model/ids';
-import type { LayoutSnapshot } from '../../src/model/layout';
-import { TileTree, type TerminalMount } from '../../src/shell/TileTree';
+import type { BackendView } from '../../src/model/hosts';
+import type { LayoutNode, LayoutSnapshot } from '../../src/model/layout';
+import type { DecimalU64, TermId } from '../../src/model/ids';
+import { ACTIVE_TERMINAL_TAB, type TerminalTabsContext } from '../../src/model/terminalTabs';
+import { TileTree } from '../../src/shell/TileTree';
 import { fakeXtermFactory } from '../support/fakeXterm';
+import { MemoryPanelPort } from '../support/memoryPanelPort';
 import {
   HOST_ID,
   MemoryTerminalPort,
@@ -13,30 +16,111 @@ import {
   ownershipEvent,
   startedEvent,
 } from '../support/memoryTerminalPort';
+import { terminal } from '../support/snapshots';
 import { FakeResizeObserver, installTerminalDom } from '../support/terminalDom';
 
-const TERM = parseTermId('term-1');
-const MOUNT: TerminalMount = {
-  hostId: HOST_ID,
-  termId: TERM,
-  label: { name: 'build', host: 'mini', state: 'running' },
-};
+const INSTANCE = 'core-a';
+const BACKEND: BackendView = { id: 'herdr-core', instance: INSTANCE };
+const BUILD = terminal('term-1', 'build', 'make', 'running');
+const DEPLOY = terminal('term-2', 'deploy', 'ship', 'idle');
+const DONE = terminal('term-3', 'done', 'true', 'exited');
+const PIN_1 = `.terminal/${INSTANCE}/term-1`;
+const PIN_2 = `.terminal/${INSTANCE}/term-2`;
+const PIN_3 = `.terminal/${INSTANCE}/term-3`;
 
-function layout(): LayoutSnapshot {
+function context(over: Partial<TerminalTabsContext> = {}): TerminalTabsContext {
+  const terminals = [BUILD, DEPLOY, DONE];
+  return {
+    hostId: HOST_ID,
+    hostName: 'mini',
+    backend: BACKEND,
+    terminals: new Map(terminals.map((t) => [t.id, t])),
+    spaceTerminals: terminals,
+    activeTerminal: BUILD.id,
+    ...over,
+  };
+}
+
+function tile(id: string, panels: string[], active: string | null = panels[0] ?? null): LayoutNode {
+  return { type: 'tile', id, panels, active };
+}
+
+function layout(a: LayoutNode, b: LayoutNode | null = null): LayoutSnapshot {
   return {
     space: '/work',
     layoutRevision: '1' as LayoutSnapshot['layoutRevision'],
-    root: {
-      type: 'split',
-      dir: 'h',
-      ratio: 0.5,
-      a: { type: 'tile', id: 't1', panels: ['p1'], active: 'p1' },
-      b: { type: 'tile', id: 't2', panels: [], active: null },
-    },
+    root: b === null ? a : { type: 'split', dir: 'h', ratio: 0.5, a, b },
     readOnly: false,
     error: null,
     dropped: null,
   };
+}
+
+interface Options {
+  focused?: string;
+  ctx?: TerminalTabsContext | null;
+  held?: 'disconnected' | null;
+  panels?: boolean;
+}
+
+interface Handlers {
+  onCloseTab?: (tile: string, panel: string) => void;
+  onSelectActiveTerminal?: (terminal: string) => void;
+  onRepinTerminal?: (previous: string, terminal: string, tile: string) => void;
+}
+
+function tree(
+  port: MemoryTerminalPort,
+  fake: ReturnType<typeof fakeXtermFactory>,
+  snapshot: LayoutSnapshot,
+  handlers: Handlers = {},
+  { focused = 't1', ctx = context(), held = null, panels = false }: Options = {},
+) {
+  return (
+    <TileTree
+      layout={snapshot}
+      notice={null}
+      error={null}
+      focusedTile={focused}
+      activeTabs={{}}
+      onFocus={vi.fn()}
+      onSelectTab={vi.fn()}
+      onSplit={vi.fn()}
+      onClose={vi.fn()}
+      terminalPort={port}
+      terminalTabs={ctx}
+      held={held}
+      createAdapter={fake.factory}
+      space={{ hostId: HOST_ID, path: '/work' }}
+      {...(panels
+        ? {
+            panelPort: new MemoryPanelPort(),
+            panels: {
+              session: 1,
+              connected: true,
+              list: {
+                space: '/work',
+                panels: [
+                  {
+                    id: PIN_1,
+                    title: 'A listed lookalike',
+                    renderer: 'markdown',
+                    revision: '1' as DecimalU64,
+                    state: 'validated',
+                    error: null,
+                    createdBy: null,
+                    lifetime: 'persistent',
+                  },
+                ],
+                skipped: [],
+                error: null,
+              },
+            },
+          }
+        : {})}
+      {...handlers}
+    />
+  );
 }
 
 async function flush(): Promise<void> {
@@ -46,71 +130,232 @@ async function flush(): Promise<void> {
   });
 }
 
-function tree(port: MemoryTerminalPort, fake: ReturnType<typeof fakeXtermFactory>, focusedTile: string, terminal: TerminalMount | null) {
-  return (
-    <TileTree
-      layout={layout()}
-      notice={null}
-      error={null}
-      focusedTile={focusedTile}
-      activeTabs={{}}
-      onFocus={vi.fn()}
-      onSelectTab={vi.fn()}
-      onSplit={vi.fn()}
-      onClose={vi.fn()}
-      terminalPort={port}
-      terminal={terminal}
-      createAdapter={fake.factory}
-    />
-  );
-}
+const tabButton = (id: string) => document.querySelector(`[role="tab"][data-panel-id="${id}"]`) as HTMLElement;
+const closeButton = (label: string) => screen.getByRole('button', { name: `Close panel ${label}` });
+const bodyOf = (id: string) => document.querySelector(`[data-tile-id="${id}"] .tile-body`) as HTMLElement;
 
 beforeEach(() => {
   installTerminalDom();
 });
 
-describe('TileTree terminal mount', () => {
-  it('the active terminal renders a visible TerminalPanel in the focused tile', async () => {
+describe('TileTree terminal tabs', () => {
+  it('terminal_panels_show_in_unfocused_tiles', async () => {
     const port = new MemoryTerminalPort();
     const fake = fakeXtermFactory();
-    render(tree(port, fake, 't1', MOUNT));
+    render(tree(port, fake, layout(tile('t1', ['p1']), tile('t2', [ACTIVE_TERMINAL_TAB])), {}, { focused: 't1' }));
     await flush();
-    const panel = screen.getByTestId('terminal-panel');
-    expect(panel.hidden).toBe(false);
-    expect(document.querySelector('[data-tile-id="t1"]')?.contains(panel)).toBe(true);
-    expect(screen.getByText('build')).toBeTruthy();
-    expect(screen.getByText('mini')).toBeTruthy();
+    const panel = document.querySelector('[data-tile-id="t2"] [data-testid="terminal-panel"]');
+    expect(panel).not.toBeNull();
+    expect(screen.getAllByTestId('terminal-panel')).toHaveLength(1);
+    expect(bodyOf('t2').textContent).toContain('build');
     expect(port.streams).toHaveLength(1);
   });
 
-  it("the focused tile's body holds only the panel, and other tiles keep the placeholder", async () => {
+  it('two_pinned_terminal_tabs_show_side_by_side', async () => {
     const port = new MemoryTerminalPort();
-    render(tree(port, fakeXtermFactory(), 't1', MOUNT));
+    render(tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_1]), tile('t2', [PIN_2]))));
     await flush();
-    const body = document.querySelector('[data-tile-id="t1"] .tile-body');
-    if (body === null) throw new Error('no tile body');
-    expect(body.childNodes).toHaveLength(1);
-    expect(body.firstElementChild).toBe(screen.getByTestId('terminal-panel'));
-    expect(body.textContent).not.toContain('p1');
-    expect(document.querySelector('[data-tile-id="t2"] .tile-body')?.textContent).toBe('No panels');
+    expect(screen.getAllByTestId('terminal-panel')).toHaveLength(2);
+    expect(bodyOf('t1').textContent).toContain('build');
+    expect(bodyOf('t2').textContent).toContain('deploy');
+    expect(port.streams).toHaveLength(2);
   });
 
-  it('renders no panel in an unfocused tile or without an active terminal', async () => {
+  it('only the shown tab of a tile is mounted', async () => {
     const port = new MemoryTerminalPort();
-    const fake = fakeXtermFactory();
-    const view = render(tree(port, fake, 't1', null));
+    render(tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_1, PIN_2], PIN_1))));
+    await flush();
+    expect(screen.getAllByTestId('terminal-panel')).toHaveLength(1);
+    expect(port.streams).toHaveLength(1);
+  });
+
+  it('labels the tabs and marks their entry kinds', async () => {
+    const ctx = context({ activeTerminal: DEPLOY.id });
+    render(
+      tree(
+        new MemoryTerminalPort(),
+        fakeXtermFactory(),
+        layout(tile('t1', [ACTIVE_TERMINAL_TAB, PIN_1, '.terminal/core-a/gone-1', '.terminal/zzz', '.bogus'], '.bogus')),
+        {},
+        { ctx },
+      ),
+    );
+    await flush();
+    const seen = [ACTIVE_TERMINAL_TAB, PIN_1, '.terminal/core-a/gone-1', '.terminal/zzz', '.bogus'].map((id) => [
+      tabButton(id).textContent,
+      tabButton(id).getAttribute('data-panel-entry'),
+    ]);
+    expect(seen).toEqual([
+      ['Active: deploy', 'active-terminal'],
+      ['build', 'terminal'],
+      ['gone-1', 'terminal-gone'],
+      ['.terminal/zzz', 'missing'],
+      ['.bogus', 'missing'],
+    ]);
+  });
+
+  it('the follow-active tab with no active terminal says to pick one and attaches nothing', async () => {
+    const port = new MemoryTerminalPort();
+    render(tree(port, fakeXtermFactory(), layout(tile('t1', [ACTIVE_TERMINAL_TAB])), {}, { ctx: context({ activeTerminal: null }) }));
+    await flush();
+    expect(tabButton(ACTIVE_TERMINAL_TAB).textContent).toBe('Active terminal');
+    expect(bodyOf('t1').textContent).toBe('No active terminal. Pick one in the navigator.');
+    expect(port.streams).toHaveLength(0);
+  });
+
+  it('a_missing_view_tab_shows_missing_not_the_terminal', async () => {
+    const port = new MemoryTerminalPort();
+    render(
+      tree(port, fakeXtermFactory(), layout(tile('t1', ['ghost'])), {}, { focused: 't1', panels: true }),
+    );
     await flush();
     expect(screen.queryByTestId('terminal-panel')).toBeNull();
-    view.rerender(tree(port, fake, 't2', MOUNT));
+    expect(bodyOf('t1').textContent).toContain('Panel ghost is missing');
+    expect(port.streams).toHaveLength(0);
+  });
+
+  it('an unknown terminal tab shows missing, and a listed panel cannot take a reserved ID', async () => {
+    const port = new MemoryTerminalPort();
+    const view = render(
+      tree(port, fakeXtermFactory(), layout(tile('t1', ['.bogus'])), {}, { panels: true }),
+    );
     await flush();
-    expect(document.querySelector('[data-tile-id="t2"]')?.querySelector('[data-testid="terminal-panel"]')).not.toBeNull();
-    expect(document.querySelector('[data-tile-id="t1"]')?.querySelector('[data-testid="terminal-panel"]')).toBeNull();
+    expect(bodyOf('t1').textContent).toBe('Panel .bogus is missing');
+    expect(tabButton('.bogus').getAttribute('data-panel-entry')).toBe('missing');
+    view.rerender(tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_1])), {}, { panels: true }));
+    await flush();
+    expect(tabButton(PIN_1).getAttribute('data-panel-entry')).toBe('terminal');
+    expect(tabButton(PIN_1).textContent).toBe('build');
+    expect(screen.getByTestId('terminal-panel')).not.toBeNull();
+    expect(document.querySelector('.view-panel')).toBeNull();
+  });
+
+  it('a pinned tab before the first terminal list is pending: no attach, × disabled and titled Loading', async () => {
+    const port = new MemoryTerminalPort();
+    render(
+      tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_1])), { onCloseTab: vi.fn() }, { ctx: context({ backend: null }) }),
+    );
+    await flush();
+    expect(bodyOf('t1').textContent).toBe("Waiting for the host's terminal list…");
+    expect(tabButton(PIN_1).getAttribute('data-panel-entry')).toBe('terminal-pending');
+    const close = closeButton('term-1') as HTMLButtonElement;
+    expect(close.disabled).toBe(true);
+    expect(close.title).toBe('Loading…');
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+    expect(port.streams).toHaveLength(0);
+  });
+
+  it('a_gone_pinned_tab_offers_close_only', async () => {
+    const port = new MemoryTerminalPort();
+    const onCloseTab = vi.fn();
+    const texts: string[] = [];
+    const cases: [TerminalTabsContext, string, string][] = [
+      [context(), '.terminal/core-a/term-9', 'Terminal term-9 is gone. The host no longer lists it.'],
+      [
+        context({ backend: { id: 'herdr-core', instance: 'core-b' } }),
+        PIN_1,
+        'Terminal term-1 is gone. It belonged to a terminal backend this host no longer runs.',
+      ],
+      [
+        context({ backend: { id: 'herdr-core', instance: null } }),
+        PIN_1,
+        "Terminal term-1 can't be shown: the host doesn't say which terminal backend instance it runs.",
+      ],
+    ];
+    for (const [ctx, tab, text] of cases) {
+      const view = render(tree(port, fakeXtermFactory(), layout(tile('t1', [tab])), { onCloseTab }, { ctx }));
+      await flush();
+      texts.push(screen.getByTestId('gone-terminal-message').textContent ?? '');
+      expect(text).toBe(texts.at(-1));
+      expect(screen.queryByTestId('terminal-panel')).toBeNull();
+      expect(screen.queryByTestId('terminal-switcher')).toBeNull();
+      fireEvent.click(within(document.querySelector('[data-testid="gone-terminal"]') as HTMLElement).getByRole('button', { name: 'Close' }));
+      view.unmount();
+    }
+    expect(onCloseTab.mock.calls.map((call) => call[1])).toEqual(['.terminal/core-a/term-9', PIN_1, PIN_1]);
+    expect(port.streams).toHaveLength(0);
+  });
+
+  it('an_exited_pinned_tab_keeps_its_screen_and_offers_close', async () => {
+    const port = new MemoryTerminalPort();
+    const onCloseTab = vi.fn();
+    render(tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_3])), { onCloseTab }));
+    await flush();
+    expect(screen.getByTestId('terminal-panel')).not.toBeNull();
+    const close = within(screen.getByTestId('terminal-panel')).getByRole('button', { name: 'Close' });
+    fireEvent.click(close);
+    expect(onCloseTab).toHaveBeenCalledWith('t1', PIN_3);
+  });
+
+  it('the follow-active tab offers no Close in its panel', async () => {
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [ACTIVE_TERMINAL_TAB])), { onCloseTab: vi.fn() }, { ctx: context({ activeTerminal: DONE.id }) }));
+    await flush();
+    expect(within(screen.getByTestId('terminal-panel')).queryByRole('button', { name: 'Close' })).toBeNull();
+  });
+
+  it('terminal_tab_controls_are_disabled_while_held', async () => {
+    const port = new MemoryTerminalPort();
+    render(
+      tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_3, '.terminal/core-a/term-9'], PIN_3), tile('t2', ['.terminal/core-a/term-9'])), { onCloseTab: vi.fn() }, { held: 'disconnected' }),
+    );
+    await flush();
+    for (const button of screen.getAllByRole('button', { name: /^Close panel / })) {
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+      expect(button.title).toBe('Host disconnected');
+    }
+    const panel = screen.getByTestId('terminal-panel');
+    const close = within(panel).getByRole('button', { name: 'Close' }) as HTMLButtonElement;
+    expect(close.disabled).toBe(true);
+    expect(close.title).toBe('Host disconnected');
+    const gone = within(bodyOf('t2')).getByRole('button', { name: 'Close' }) as HTMLButtonElement;
+    expect(gone.disabled).toBe(true);
+    for (const option of within(panel).getAllByRole('option')) {
+      expect((option as HTMLOptionElement).disabled).toBe(true);
+    }
+  });
+
+  it('the follow-active dropdown lists the space terminals and picks without a layout change', async () => {
+    const onSelectActiveTerminal = vi.fn();
+    render(
+      tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [ACTIVE_TERMINAL_TAB])), { onSelectActiveTerminal }, { held: 'disconnected' }),
+    );
+    await flush();
+    const select = screen.getByTestId('terminal-switcher') as HTMLSelectElement;
+    expect([...select.options].map((o) => [o.textContent, o.disabled])).toEqual([
+      ['build (running)', false],
+      ['deploy (idle)', false],
+      ['done (exited)', false],
+    ]);
+    fireEvent.change(select, { target: { value: 'term-2' } });
+    expect(onSelectActiveTerminal).toHaveBeenCalledWith('term-2');
+  });
+
+  it('the pinned dropdown re-pins, and disables a terminal already open elsewhere', async () => {
+    const onRepinTerminal = vi.fn();
+    render(
+      tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1]), tile('t2', [PIN_2])), { onRepinTerminal }),
+    );
+    await flush();
+    const select = within(bodyOf('t1')).getByTestId('terminal-switcher') as HTMLSelectElement;
+    expect([...select.options].map((o) => [o.textContent, o.disabled])).toEqual([
+      ['build (running)', false],
+      ['deploy (already open)', true],
+      ['done (exited)', false],
+    ]);
+    fireEvent.change(select, { target: { value: 'term-3' } });
+    expect(onRepinTerminal).toHaveBeenCalledWith(PIN_1, PIN_3, 't1');
+  });
+
+  it('shows the backend id in the header', async () => {
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1]))));
+    await flush();
+    expect(screen.getByTestId('terminal-backend').textContent).toBe('herdr-core');
   });
 
   it('unmounting a panel stops its controller: detach is sent and its stream closed', async () => {
     const port = new MemoryTerminalPort();
     const fake = fakeXtermFactory();
-    const view = render(tree(port, fake, 't1', MOUNT));
+    const view = render(tree(port, fake, layout(tile('t1', [ACTIVE_TERMINAL_TAB]))));
     await flush();
     const container = document.querySelector('.terminal-view');
     if (container === null) throw new Error('no terminal view');
@@ -125,10 +370,8 @@ describe('TileTree terminal mount', () => {
     });
     await flush();
     expect(stream.commands('detach')).toHaveLength(0);
-    expect(stream.commands('close')).toHaveLength(0);
-    view.rerender(tree(port, fake, 't1', null));
+    view.rerender(tree(port, fake, layout(tile('t1', [ACTIVE_TERMINAL_TAB])), {}, { ctx: context({ activeTerminal: null }) }));
     await flush();
-    expect(stream.commands('close')).toHaveLength(0);
     act(() => stream.emit(closedEvent(cursor(7, 1, 1), 'detached')));
     await flush();
     expect(screen.queryByTestId('terminal-panel')).toBeNull();
@@ -140,7 +383,8 @@ describe('TileTree terminal mount', () => {
   it('switching the active terminal remounts the panel: term-1 is detached and term-2 attached', async () => {
     const port = new MemoryTerminalPort();
     const fake = fakeXtermFactory();
-    const view = render(tree(port, fake, 't1', MOUNT));
+    const one = layout(tile('t1', [ACTIVE_TERMINAL_TAB]));
+    const view = render(tree(port, fake, one));
     await flush();
     const resize = () => {
       const container = document.querySelector('.terminal-view');
@@ -157,20 +401,17 @@ describe('TileTree terminal mount', () => {
       first.emit(ownershipEvent(7, 1, 8));
     });
     await flush();
-
-    const second = { ...MOUNT, termId: parseTermId('term-2'), label: { name: 'deploy', host: 'mini', state: 'idle' } };
-    view.rerender(tree(port, fake, 't1', second));
+    view.rerender(tree(port, fake, one, {}, { ctx: context({ activeTerminal: DEPLOY.id }) }));
     await flush();
     act(() => first.emit(closedEvent(cursor(7, 1, 1), 'detached')));
     await flush();
     resize();
     await flush();
-
     expect(first.commands('detach')).toEqual([{ op: 'detach', attachment: '7' }]);
-    expect(first.commands('close')).toHaveLength(1);
     expect(port.streams).toHaveLength(2);
-    expect(port.streams[1]?.commands('attach').flatMap((command) => (command.op === 'attach' ? [command.terminal] : []))).toEqual([second.termId]);
+    expect(
+      port.streams[1]?.commands('attach').flatMap((command) => (command.op === 'attach' ? [command.terminal] : [])),
+    ).toEqual(['term-2' as TermId]);
     expect(screen.getAllByTestId('terminal-panel')).toHaveLength(1);
-    expect(screen.getByText('deploy')).toBeTruthy();
   });
 });

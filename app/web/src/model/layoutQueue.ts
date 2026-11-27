@@ -82,6 +82,32 @@ export class LayoutQueue {
     this.enqueue([{ op: 'add_panel', panel, tile: null }]);
   }
 
+  /** Puts the panel in the named tile. */
+  addPanelTo(panel: string, tile: string): void {
+    this.enqueue([{ op: 'add_panel', panel, tile }]);
+  }
+
+  /** Splits `tile` to the right and puts the panel in the new tile, as one batch. */
+  openBeside(tile: string, panel: string): void {
+    const newTile = this.newTileId();
+    this.enqueue([
+      { op: 'split_tile', tile, dir: 'h', newTile, ratio: SPLIT_RATIO, panel: null },
+      { op: 'add_panel', panel, tile: newTile },
+    ]);
+  }
+
+  /** Adds `next` to the tile, then removes `previous`. */
+  replacePanel(previous: string, next: string, tile: string): void {
+    this.enqueue([
+      { op: 'add_panel', panel: next, tile },
+      { op: 'remove_panel', panel: previous },
+    ]);
+  }
+
+  movePanelTo(panel: string, toTile: string, index: number): void {
+    this.enqueue([{ op: 'move_panel', panel, toTile, index }]);
+  }
+
   removePanel(panel: string): void {
     this.enqueue([{ op: 'remove_panel', panel }]);
   }
