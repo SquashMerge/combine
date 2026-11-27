@@ -8,12 +8,13 @@ Rules live in tools/arch-guard/guard.toml; SPEC.md ("Repository layout and archi
 rules") says which rows of the architecture table this covers. It reads files only: it
 never runs Cargo, npm or the code it checks. Standard library only.
 
-It reads what git shows: in a git work tree, the tracked files and the untracked ones that
-aren't ignored (`git ls-files -co --exclude-standard`), so ignored scratch such as
-feature-factory's `.factory/` and `.factory-sandboxes/` is never read, while a new file is read
-before it is ever added. Production code that reaches an ignored path is a `guard-skip`. Where
-git can't list the files (no git, or a root that isn't a work tree's top) it walks every file,
-ignored ones included, and says so on stderr.
+It reads every file under the root, git-ignored ones included, except `skip` globs and nested
+checkouts: a directory below the root holding a `.git` entry (a clone's `.git/`, or a
+worktree's `.git` file, as feature-factory's sandboxes and slice worktrees have) is another
+checkout, never this one's source, so it is not read. It fails closed: a nested checkout that
+holds or sits above production source, or that production code reaches (a `mod`, `#[path]` or
+`include!`, a relative import with its extensions and `index.*` resolved, a Cargo path
+dependency, a symlink), is a `guard-skip`.
 
 It tokenizes Rust and TypeScript/JavaScript, but it is not a compiler. What it does:
 - Rust: comments and literals are tokens, never code; raw identifiers (`r#fs`) are
@@ -251,58 +252,35 @@ def load_config(path: Path) -> Config:
 @dataclass
 class Listing:
     """What [`walk`] found: (checkout-relative path, full path) of every file read, the
-    directories a `skip` glob hid, every symlink (to a file or a directory; directory links
-    aren't followed), and the paths git ignores, which are never read. `note` says why the
-    listing is the filesystem's rather than git's."""
+    directories a `skip` glob hid, the nested checkouts it didn't enter, and every symlink (to a
+    file or a directory; directory links aren't followed)."""
 
     files: list[tuple[str, Path]] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    nested: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
-    ignored: list[str] = field(default_factory=list)
-    note: str | None = None
 
 
-def _git_paths(root: Path, *args: str) -> list[str]:
-    done = subprocess.run(["git", "-C", str(root), "ls-files", "-z", *args],
-                          capture_output=True, check=True)
-    return [p.decode("utf-8", "surrogateescape") for p in done.stdout.split(b"\0") if p]
-
-
-def git_listing(root: Path) -> tuple[list[str], list[str]] | str:
-    """(the git-visible paths: tracked, and untracked but not ignored; the ignored entries, a
-    wholly ignored directory as one entry) when `root` is the top of a git work tree, or why
-    git can't list them."""
-    try:
-        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, check=True).stdout.strip()
-        if os.path.realpath(top) != os.path.realpath(root):
-            return f"{root} is not the top of a git work tree"
-        visible = _git_paths(root, "--cached", "--others", "--exclude-standard")
-        ignored = _git_paths(root, "--others", "--ignored", "--exclude-standard", "--directory")
-    except OSError as e:
-        return f"git can't run ({e})"
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or b"").strip()
-        detail = detail.decode("utf-8", "replace") if isinstance(detail, bytes) else detail
-        return f"git can't list {root} ({detail or f'exit status {e.returncode}'})"
-    return sorted(set(visible)), sorted({p.rstrip("/") for p in ignored})
-
-
-def _walk_fs(root: Path, start: Path, skip: Globs, out: Listing) -> None:
-    """Every file under `start`, as the filesystem has them, into `out`."""
-    for dirpath, dirnames, filenames in os.walk(start):
+def walk(root: Path, skip: Globs) -> Listing:
+    """Every file under `root`, git-ignored or not, but for `skip` globs and nested checkouts."""
+    out = Listing()
+    for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
         keep = []
         for d in sorted(dirnames):
             rel = f"{rel_dir}/{d}" if rel_dir else d
+            full = Path(dirpath) / d
             if d == ".git":
                 continue
             if skip.match(rel + "/"):
                 out.skipped.append(rel)
                 continue
-            if (Path(dirpath) / d).is_symlink():
+            if full.is_symlink():
                 out.links.append(rel)
+            elif os.path.lexists(full / ".git"):
+                out.nested.append(rel)
+                continue
             keep.append(d)
         dirnames[:] = keep
         for name in sorted(filenames):
@@ -310,51 +288,6 @@ def _walk_fs(root: Path, start: Path, skip: Globs, out: Listing) -> None:
             rel = full.relative_to(root).as_posix()
             if full.is_symlink():
                 out.links.append(rel)
-            out.files.append((rel, full))
-
-
-def walk(root: Path, skip: Globs) -> Listing:
-    """The files to read. In a git work tree, only what git shows: tracked files and untracked
-    ones that aren't ignored, so scratch state such as `.factory/` is never read. Anything
-    else (git missing, or `root` not a work tree's top) walks every file, with a note."""
-    out = Listing()
-    listed = git_listing(root)
-    if isinstance(listed, str):
-        out.note = f"{listed}; walking every file under {root}, git-ignored ones included"
-        _walk_fs(root, root, skip, out)
-        return out
-    visible, out.ignored = listed
-    hidden: list[str] = []  # skipped directories, outermost first
-
-    def is_hidden(rel: str) -> bool:
-        return any(rel == d or rel.startswith(d + "/") for d in hidden)
-
-    dirs = set()
-    for path in visible:
-        parts = path.rstrip("/").split("/")
-        dirs.update("/".join(parts[:k]) for k in range(1, len(parts)))
-    for d in sorted(dirs, key=lambda d: (d.count("/"), d)):
-        if not is_hidden(d) and skip.match(d + "/"):
-            hidden.append(d)
-            out.skipped.append(d)
-    for rel in visible:
-        rel = rel.rstrip("/")
-        full = root / rel
-        if is_hidden(rel) or not os.path.lexists(full):
-            continue  # a skipped directory, or a tracked file deleted from the work tree
-        if full.is_symlink():
-            if full.is_dir() and skip.match(rel + "/"):
-                out.skipped.append(rel)
-                continue
-            out.links.append(rel)
-            if not full.is_dir():
-                out.files.append((rel, full))
-        elif full.is_dir():  # a submodule or a nested repository: git lists only its root
-            if skip.match(rel + "/"):
-                out.skipped.append(rel)
-            else:
-                _walk_fs(root, full, skip, out)
-        else:
             out.files.append((rel, full))
     return out
 
@@ -768,6 +701,20 @@ def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], r
             for rule in cfg.of("path_ban"):
                 if Globs(rule.data["to"]).reaches(target):
                     found.append(Violation(rule.id, rel, lines.line(t.start), f"reaches non-production path {target}"))
+
+    # An out-of-line `mod name;` loads `name.rs` or `name/mod.rs` (unless `#[path]`, above, says) from the
+    # module's directory: next to `main.rs`, `lib.rs` or `mod.rs`, else in a folder named for
+    # the file. Recorded as reaches only, so a skipped directory can't hide one.
+    if reached is not None:
+        here = PurePosixPath(rel)
+        mod_dir = here.parent if here.name in ("main.rs", "lib.rs", "mod.rs") else here.parent / here.stem
+        for k, t in enumerate(live):
+            if t.is_("ident", "mod") and tok(k + 1).kind == "ident" and tok(k + 2).is_("punct", ";"):
+                name = tok(k + 1).text.removeprefix("r#")
+                for candidate in (mod_dir / f"{name}.rs", mod_dir / name / "mod.rs"):
+                    target = normalize(str(candidate))
+                    if target is not None:
+                        reached.update(reach_targets(root, target))
 
     # The enclosing `{` of every token, so an `extern crate x as y;` alias applies only
     # inside its own block or module, and the innermost alias wins.
@@ -1478,7 +1425,14 @@ def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None,
                     found.append(Violation(rule.id, rel, line, "import or require with a non-literal specifier"))
             continue
         if spec.startswith("."):
-            for target in reach_targets(root, normalize(str(PurePosixPath(rel).parent / spec))):
+            spelled = normalize(str(PurePosixPath(rel).parent / spec))
+            if reached is not None and spelled is not None:
+                # What a resolver may load for it: the file with each extension, or the folder's
+                # `index.*`. Reaches only; the path bans below read the spelling.
+                for candidate in [spelled] + [f"{spelled}{e}" for e in sorted(JS_EXT)] + [
+                        f"{spelled}/index{e}" for e in sorted(JS_EXT)]:
+                    reached.update(reach_targets(root, candidate))
+            for target in reach_targets(root, spelled):
                 if reached is not None:
                     reached.add(target)
                 for rule in cfg.of("path_ban"):
@@ -1595,7 +1549,8 @@ def workspace_packages(root: Path, found: list[Violation]) -> tuple[list[Package
     return packages, ws_deps
 
 
-def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict) -> list[Violation]:
+def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict,
+                reached: set[str] | None = None) -> list[Violation]:
     found: list[Violation] = []
     for pkg in packages:
         if cfg.non_production.match(pkg.rel_manifest):
@@ -1615,6 +1570,8 @@ def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict)
                                            f"{pkg.name} depends on {real}; only {', '.join(rule.data['packages'])} may"))
             if path is not None:
                 for target in reach_targets(root, _rel(root, path)):
+                    if reached is not None:
+                        reached.add(target)
                     for rule in cfg.of("path_ban"):
                         if Globs(rule.data["to"]).reaches(target):
                             found.append(Violation(rule.id, pkg.rel_manifest, line, f"{pkg.name} depends on path {target}"))
@@ -1631,21 +1588,18 @@ def _owner(rel: str, packages: list[Package]) -> Package | None:
 
 # --------------------------------------------------------------------------- run
 
-def run(root: Path, config: Path, notes: list[str] | None = None) -> list[Violation]:
-    """The violations under `root`. How the files were listed, when not by git, is appended
-    to `notes`."""
+def run(root: Path, config: Path) -> list[Violation]:
     cfg = load_config(config)
     found: list[Violation] = []
     packages, ws_deps = workspace_packages(root, found)
-    found += check_cargo(root, cfg, packages, ws_deps)
+    # Every destination production code reaches (a `mod`, `#[path]` or `include!`, a relative
+    # import, a Cargo path dependency, a symlink): neither a skip nor a nested checkout may hide
+    # one, or the guard would pass code it never read.
+    reached: set[str] = set()
+    found += check_cargo(root, cfg, packages, ws_deps, reached)
 
     listing = walk(root, cfg.skip)
-    if notes is not None and listing.note:
-        notes.append(listing.note)
     files, skipped, links = listing.files, listing.skipped, listing.links
-    # Every literal destination production code reaches (`#[path]`, `include!`, a relative
-    # import, a symlink): a skip must not hide one, or the guard would pass code it never read.
-    reached: set[str] = set()
 
     for rel in links:  # a production path that is really a non-production one
         if cfg.non_production.match(rel):
@@ -1678,11 +1632,14 @@ def run(root: Path, config: Path, notes: list[str] | None = None) -> list[Violat
         sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
         if sources:
             found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which production code reaches ({', '.join(sources)})"))
-    # Git hides what it ignores the same way: production code must not reach any of it.
-    for entry in listing.ignored:
-        sources = sorted(t for t in reached if t == entry or t.startswith(entry + "/"))
+    # A nested checkout is never read either, so the same two rules hold for it.
+    for d in listing.nested:
+        hidden = sorted({p for p in protected if (d + "/").startswith(p) or p.startswith(d + "/")})
+        if hidden:
+            found.append(Violation(SKIP_RULE, d, 1, f"a nested checkout (it has its own .git) is never read, and this one holds production source ({', '.join(hidden)})"))
+        sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
         if sources:
-            found.append(Violation(SKIP_RULE, entry, 1, f"git ignores this path, so the guard never reads it, but production code reaches it ({', '.join(sources)})"))
+            found.append(Violation(SKIP_RULE, d, 1, f"a nested checkout (it has its own .git) is never read, but production code reaches it ({', '.join(sources)})"))
     return sorted(set(found), key=lambda v: (v.path, v.line, v.rule, v.message))
 
 
@@ -1702,14 +1659,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = (args.root or default_root()).resolve()
     config = args.config or root / "tools" / "arch-guard" / "guard.toml"
-    notes: list[str] = []
     try:
-        found = run(root, config, notes)
+        found = run(root, config)
     except ConfigError as e:
         print(f"arch-guard: {e}", file=sys.stderr)
         return 2
-    for note in notes:
-        print(f"arch-guard: note: {note}", file=sys.stderr)
     if args.json:
         print(json.dumps({"violations": [asdict(v) for v in found]}, indent=2))
     else:
