@@ -44,12 +44,13 @@ fn layer_sources() -> Vec<PathBuf> {
 }
 
 /// Removes `//` and `/* */` comments, leaving string, raw string and char literals untouched so
-/// that a `//` inside one doesn't hide code after it.
+/// that a `//` inside one doesn't hide code after it. A lifetime or label tick (`'a`,
+/// `&'static str`, `'outer:`) is code, not the start of a char literal.
 fn strip_comments(text: &str) -> String {
-    let bytes = text.as_bytes();
     let mut out = String::new();
     let mut i = 0;
-    while i < bytes.len() {
+    let mut after_ident = false;
+    while i < text.len() {
         let rest = &text[i..];
         let skip = if rest.starts_with("//") {
             rest.find('\n').unwrap_or(rest.len())
@@ -72,26 +73,32 @@ fn strip_comments(text: &str) -> String {
             }
             j
         } else {
-            let literal = literal_len(rest);
+            let literal = literal_len(rest, after_ident);
             if literal > 0 {
                 out.push_str(&rest[..literal]);
                 i += literal;
+                after_ident = false;
                 continue;
             }
             let ch = rest.chars().next().unwrap();
             out.push(ch);
             i += ch.len_utf8();
+            after_ident = ch.is_alphanumeric() || ch == '_';
             continue;
         };
         i += skip;
+        after_ident = false;
     }
     out
 }
 
-/// The length of the string, raw string or char literal at the start of `rest`, or 0.
-fn literal_len(rest: &str) -> usize {
+/// The length of the string, raw string, char or byte literal at the start of `rest`, or 0 when
+/// none starts there. `after_ident` says an identifier character came just before, so an `r` or
+/// `b` there ends that identifier instead of prefixing a literal.
+fn literal_len(rest: &str, after_ident: bool) -> usize {
     let bytes = rest.as_bytes();
     let (prefix, raw) = match bytes[0] {
+        b'r' | b'b' if after_ident => return 0,
         b'r' => (1, true),
         b'b' if bytes.get(1) == Some(&b'r') => (2, true),
         b'b' => (1, false),
@@ -108,23 +115,79 @@ fn literal_len(rest: &str) -> usize {
             .find(&close)
             .map_or(rest.len(), |end| body + end + close.len());
     }
-    let quote = match bytes.get(prefix) {
-        Some(&q @ (b'"' | b'\'')) => q,
-        _ => return 0,
-    };
-    if prefix == 1 && bytes[0] == b'r' {
-        return 0;
+    match bytes.get(prefix) {
+        Some(b'"') => string_len(rest, prefix),
+        Some(b'\'') => char_len(rest, prefix),
+        _ => 0,
     }
-    let mut j = prefix + 1;
+}
+
+/// The length of the string literal whose opening quote is at `rest[open]`. One left open runs
+/// to the end of the text.
+fn string_len(rest: &str, open: usize) -> usize {
+    let bytes = rest.as_bytes();
+    let mut j = open + 1;
     while j < bytes.len() {
         match bytes[j] {
             b'\\' => j += 2,
-            b if b == quote => return j + 1,
-            b'\n' if quote == b'\'' => return 0,
+            b'"' => return j + 1,
             _ => j += 1,
         }
     }
-    0
+    rest.len()
+}
+
+/// The length of the char literal whose opening tick is at `rest[tick]`, or 0 when the tick
+/// starts a lifetime or a label instead. A char literal is one character, or one escape (`\n`,
+/// `\'`, `\x7f`, `\u{..}`), then a closing tick; anything else after a tick is a lifetime.
+fn char_len(rest: &str, tick: usize) -> usize {
+    let body = &rest[tick + 1..];
+    let Some(first) = body.chars().next() else {
+        return 0;
+    };
+    let end = match first {
+        '\\' => {
+            let Some(escaped) = body[1..].chars().next() else {
+                return 0;
+            };
+            match escaped {
+                'u' => match body.find('}') {
+                    Some(close) if body[..close].bytes().all(|b| b != b'\n') => close + 1,
+                    _ => return 0,
+                },
+                'x' => 4,
+                _ => 1 + escaped.len_utf8(),
+            }
+        }
+        '\'' | '\n' => return 0,
+        _ => first.len_utf8(),
+    };
+    if body.get(end..).is_some_and(|after| after.starts_with('\'')) {
+        tick + 1 + end + 1
+    } else {
+        0
+    }
+}
+
+/// The calls the layers may not make: no I/O, no threads, no environment and no clock.
+const BANNED: [&str; 8] = [
+    "tokio",
+    "std::thread",
+    "std::env",
+    "SystemTime",
+    "Instant",
+    "std::fs",
+    "std::net",
+    "std::process",
+];
+
+/// The [`BANNED`] spellings left in `source` once its comments are stripped.
+fn banned_in(source: &str) -> Vec<&'static str> {
+    let code = strip_comments(source);
+    BANNED
+        .into_iter()
+        .filter(|banned| code.contains(banned))
+        .collect()
 }
 
 #[test]
@@ -141,6 +204,67 @@ fn strip_comments_keeps_literals_and_drops_comments() {
     assert!(!code.contains("block"));
     assert!(!code.contains("nested"));
     assert!(!code.contains("still"));
+}
+
+/// The #18 case: read as a char literal, the tick of `&'static` ran to the `'` inside the first
+/// string, so the quotes paired up wrongly, the `//` inside the second string read as a comment,
+/// and the banned call after it was stripped unseen.
+#[test]
+fn a_lifetime_tick_cannot_hide_a_banned_call_behind_a_string() {
+    let source = "let s: &'static str = \"'\"; let u = \"//\"; std::env::var(\"X\");\n";
+    assert_eq!(banned_in(source), ["std::env"]);
+    assert_eq!(strip_comments(source), source);
+
+    let generic = "fn f<'a>(x: &'a str) -> &'a str { let _ = \"it's\"; \"//\"; tokio::spawn(x) }";
+    assert_eq!(banned_in(generic), ["tokio"]);
+    assert_eq!(strip_comments(generic), generic);
+}
+
+#[test]
+fn lifetimes_and_labels_are_code_and_their_comments_still_go() {
+    let source = "impl<'a, 'b: 'a> T<'a> for &'b str {} // alpha\n'outer: loop { break 'outer; } /* beta */ done";
+    let code = strip_comments(source);
+    assert!(code.contains("impl<'a, 'b: 'a> T<'a> for &'b str {}"));
+    assert!(code.contains("'outer: loop { break 'outer; }"));
+    assert!(code.contains("done"));
+    assert!(!code.contains("alpha"));
+    assert!(!code.contains("beta"));
+}
+
+#[test]
+fn char_and_byte_literals_are_still_literals() {
+    for literal in [
+        "'x'",
+        "'\\n'",
+        "'\\''",
+        "'\\\\'",
+        "'\\x7f'",
+        "'\\u{1F600}'",
+        "'\u{e9}'",
+        "'\"'",
+        "'/'",
+        "b'x'",
+        "b'\\''",
+        "b'\"'",
+    ] {
+        let rest = format!("{literal} rest");
+        assert_eq!(literal_len(&rest, false), literal.len(), "{literal}");
+        // A `//` or `"` inside the literal neither opens a comment nor a string.
+        let source = format!("let c = {literal}; let d = '/'; std::fs::read(); // gone\n");
+        let code = strip_comments(&source);
+        assert!(
+            code.contains(&format!("let c = {literal};")),
+            "{literal}: {code}"
+        );
+        assert!(code.contains("std::fs::read()"), "{literal}: {code}");
+        assert!(!code.contains("gone"), "{literal}: {code}");
+    }
+    for lifetime in ["'a>", "'static str", "'outer: loop", "'_>", "'ab'"] {
+        assert_eq!(literal_len(lifetime, false), 0, "{lifetime}");
+    }
+    // An `r` or `b` that ends an identifier prefixes nothing.
+    assert_eq!(literal_len("r\"x\"", true), 0);
+    assert_eq!(literal_len("b'x'", true), 0);
 }
 
 #[test]
@@ -174,27 +298,15 @@ fn ports_model_and_core_name_no_backend() {
 
 #[test]
 fn core_ports_and_model_do_no_io_or_read_a_clock() {
-    const BANNED: [&str; 8] = [
-        "tokio",
-        "std::thread",
-        "std::env",
-        "SystemTime",
-        "Instant",
-        "std::fs",
-        "std::net",
-        "std::process",
-    ];
     for file in layer_sources() {
-        let code = strip_comments(&fs::read_to_string(&file).unwrap());
-        for banned in BANNED {
-            assert!(!code.contains(banned), "{} uses {banned}", file.display());
-        }
+        let banned = banned_in(&fs::read_to_string(&file).unwrap());
+        assert!(banned.is_empty(), "{} uses {banned:?}", file.display());
     }
 }
 
 /// Production code in the layers never panics on a `None` or an `Err`. The scan reads whole
-/// lines and skips only those that start with `//`, so no comment stripper (which can misread a
-/// lifetime tick) can hide a call: a spelling in a trailing comment fails the test too.
+/// lines and skips only those that start with `//`, so no bug in a comment stripper can hide a
+/// call: a spelling in a trailing comment fails the test too.
 #[test]
 fn core_ports_and_model_have_no_unwrap_or_expect() {
     for file in layer_sources() {

@@ -8,7 +8,12 @@ review of 2026-11-20 that trellis let through.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -1516,6 +1521,139 @@ class GuardTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(textwrap.dedent(text))
             return check.run(root, CONFIG)
+
+
+# The violation each git test plants: a listener, which `no-listener-no-pty` bans anywhere.
+LISTENER = 'fn f() { let _ = std::net::TcpListener::bind("0.0.0.0:1"); }\n'
+# Only the repository's own .gitignore: no global or system excludes from the machine.
+GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+@unittest.skipIf(shutil.which("git") is None, "git is not installed")
+class GitVisibleTest(unittest.TestCase):
+    """In a git work tree the guard reads only what git shows (#18): tracked files and untracked
+    ones that aren't ignored. Ignored scratch, such as feature-factory state, is never read."""
+
+    def run_guard(self, files: dict[str, str], git: bool = True, track: tuple[str, ...] = (),
+                  links: dict[str, str] | None = None) -> tuple[set[tuple[str, str]], list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in {**BASE, **files}.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(textwrap.dedent(text))
+            for rel, target in (links or {}).items():
+                (root / rel).symlink_to(target)
+            notes: list[str] = []
+            with mock.patch.dict(os.environ, GIT_ENV):
+                if git:
+                    subprocess.run(["git", "init", "-q", str(root)], check=True)
+                    if track:
+                        subprocess.run(["git", "-C", str(root), "add", "--", *track], check=True)
+                got = {(v.rule, v.path) for v in check.run(root, CONFIG, notes)}
+            return got, notes
+
+    def test_an_ignored_directory_is_never_read(self):
+        files = {".gitignore": "scratch/\n", "scratch/deep/x.rs": LISTENER}
+        self.assertEqual(self.run_guard(files), (set(), []))
+        # Witness: the same tree without git is walked whole, and the file is flagged.
+        got, notes = self.run_guard(files, git=False)
+        self.assertEqual(got, {("no-listener-no-pty", "scratch/deep/x.rs")})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("walking every file", notes[0])
+        self.assertIn("git-ignored ones included", notes[0])
+
+    def test_an_ignored_file_is_never_read(self):
+        files = {".gitignore": "*.local.rs\n", "crates/combined/src/x.local.rs": LISTENER}
+        self.assertEqual(self.run_guard(files), (set(), []))
+
+    def test_tracked_and_untracked_files_are_still_read(self):
+        files = {
+            ".gitignore": "scratch/\n",
+            "crates/combined/src/tracked.rs": LISTENER,
+            "crates/combined/src/untracked.rs": LISTENER,
+            "new-dir/untracked.rs": LISTENER,
+        }
+        got, notes = self.run_guard(files, track=("crates/combined/src/tracked.rs",))
+        self.assertEqual(notes, [])
+        self.assertEqual(got, {
+            ("no-listener-no-pty", "crates/combined/src/tracked.rs"),
+            ("no-listener-no-pty", "crates/combined/src/untracked.rs"),
+            ("no-listener-no-pty", "new-dir/untracked.rs"),
+        })
+
+    def test_a_tracked_file_is_read_even_where_gitignore_matches_it(self):
+        files = {".gitignore": "crates/combined/src/forced.rs\n", "crates/combined/src/forced.rs": LISTENER}
+        self.assertEqual(self.run_guard(files)[0], set(), "untracked and ignored: not read")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in {**BASE, **files}.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            with mock.patch.dict(os.environ, GIT_ENV):
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                # `git add -f` tracks it, and a tracked file is always read.
+                subprocess.run(["git", "-C", str(root), "add", "-f", "crates/combined/src/forced.rs"], check=True)
+                got = {(v.rule, v.path) for v in check.run(root, CONFIG)}
+        self.assertEqual(got, {("no-listener-no-pty", "crates/combined/src/forced.rs")})
+
+    def test_a_tracked_file_deleted_from_the_work_tree_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in {**BASE, "crates/combined/src/gone.rs": LISTENER}.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            with mock.patch.dict(os.environ, GIT_ENV):
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+                (root / "crates/combined/src/gone.rs").unlink()
+                self.assertEqual(check.run(root, CONFIG), [])
+
+    def test_skip_globs_still_apply_to_visible_files(self):
+        got, _ = self.run_guard({".reviews/x.rs": LISTENER, "crates/combined/src/core/node_modules/y.rs": "use std::fs;\n"})
+        self.assertEqual(got, {("guard-skip", "crates/combined/src/core/node_modules")})
+
+    def test_production_code_reaching_an_ignored_path_is_reported(self):
+        files = {
+            ".gitignore": "scratch/\n",
+            "crates/combined/src/main.rs": '#[path = "../../../scratch/payload.rs"]\nmod payload;\nfn main() {}\n',
+            "scratch/payload.rs": LISTENER,
+        }
+        self.assertEqual(self.run_guard(files)[0], {("guard-skip", "scratch")})
+
+    def test_a_production_symlink_into_an_ignored_path_is_reported(self):
+        files = {".gitignore": "scratch/\n", "scratch/payload.rs": "use rquickjs::Runtime;\n"}
+        got, _ = self.run_guard(files, links={"crates/combined/src/payload.rs": "../../../scratch/payload.rs"})
+        # The link itself is visible, so its contents are read under its own path too.
+        self.assertEqual(got, {("guard-skip", "scratch"), ("js-engine-only-in-loader", "crates/combined/src/payload.rs")})
+
+    def test_a_subdirectory_of_a_work_tree_is_walked_whole(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp)
+            root = outer / "inner"
+            for rel, text in {**BASE, "scratch/x.rs": LISTENER}.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            (outer / ".gitignore").write_text("inner/scratch/\n")
+            notes: list[str] = []
+            with mock.patch.dict(os.environ, GIT_ENV):
+                subprocess.run(["git", "init", "-q", str(outer)], check=True)
+                got = {(v.rule, v.path) for v in check.run(root, CONFIG, notes)}
+        self.assertEqual(got, {("no-listener-no-pty", "scratch/x.rs")})
+        self.assertIn("is not the top of a git work tree", notes[0])
+
+    def test_the_command_line_prints_the_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in BASE.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, GIT_ENV), contextlib.redirect_stderr(err), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(check.main(["--root", str(root), "--config", str(CONFIG)]), 0)
+        self.assertIn("arch-guard: note: ", err.getvalue())
+        self.assertIn("git-ignored ones included", err.getvalue())
 
 
 if __name__ == "__main__":

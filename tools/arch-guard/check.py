@@ -8,6 +8,13 @@ Rules live in tools/arch-guard/guard.toml; SPEC.md ("Repository layout and archi
 rules") says which rows of the architecture table this covers. It reads files only: it
 never runs Cargo, npm or the code it checks. Standard library only.
 
+It reads what git shows: in a git work tree, the tracked files and the untracked ones that
+aren't ignored (`git ls-files -co --exclude-standard`), so ignored scratch such as
+feature-factory's `.factory/` and `.factory-sandboxes/` is never read, while a new file is read
+before it is ever added. Production code that reaches an ignored path is a `guard-skip`. Where
+git can't list the files (no git, or a root that isn't a work tree's top) it walks every file,
+ignored ones included, and says so on stderr.
+
 It tokenizes Rust and TypeScript/JavaScript, but it is not a compiler. What it does:
 - Rust: comments and literals are tokens, never code; raw identifiers (`r#fs`) are
   normalized; string literals (normal, raw, byte) are decoded where a path argument is
@@ -241,11 +248,49 @@ def load_config(path: Path) -> Config:
 
 # --------------------------------------------------------------------------- files
 
-def walk(root: Path, skip: Globs) -> tuple[list[tuple[str, Path]], list[str], list[str]]:
-    """(checkout-relative path, full path) of every file, the directories skipped, and
-    every symlink (to a file or a directory; directory links aren't followed)."""
-    files, skipped, links = [], [], []
-    for dirpath, dirnames, filenames in os.walk(root):
+@dataclass
+class Listing:
+    """What [`walk`] found: (checkout-relative path, full path) of every file read, the
+    directories a `skip` glob hid, every symlink (to a file or a directory; directory links
+    aren't followed), and the paths git ignores, which are never read. `note` says why the
+    listing is the filesystem's rather than git's."""
+
+    files: list[tuple[str, Path]] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
+    ignored: list[str] = field(default_factory=list)
+    note: str | None = None
+
+
+def _git_paths(root: Path, *args: str) -> list[str]:
+    done = subprocess.run(["git", "-C", str(root), "ls-files", "-z", *args],
+                          capture_output=True, check=True)
+    return [p.decode("utf-8", "surrogateescape") for p in done.stdout.split(b"\0") if p]
+
+
+def git_listing(root: Path) -> tuple[list[str], list[str]] | str:
+    """(the git-visible paths: tracked, and untracked but not ignored; the ignored entries, a
+    wholly ignored directory as one entry) when `root` is the top of a git work tree, or why
+    git can't list them."""
+    try:
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if os.path.realpath(top) != os.path.realpath(root):
+            return f"{root} is not the top of a git work tree"
+        visible = _git_paths(root, "--cached", "--others", "--exclude-standard")
+        ignored = _git_paths(root, "--others", "--ignored", "--exclude-standard", "--directory")
+    except OSError as e:
+        return f"git can't run ({e})"
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or b"").strip()
+        detail = detail.decode("utf-8", "replace") if isinstance(detail, bytes) else detail
+        return f"git can't list {root} ({detail or f'exit status {e.returncode}'})"
+    return sorted(set(visible)), sorted({p.rstrip("/") for p in ignored})
+
+
+def _walk_fs(root: Path, start: Path, skip: Globs, out: Listing) -> None:
+    """Every file under `start`, as the filesystem has them, into `out`."""
+    for dirpath, dirnames, filenames in os.walk(start):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
         keep = []
@@ -254,19 +299,64 @@ def walk(root: Path, skip: Globs) -> tuple[list[tuple[str, Path]], list[str], li
             if d == ".git":
                 continue
             if skip.match(rel + "/"):
-                skipped.append(rel)
+                out.skipped.append(rel)
                 continue
             if (Path(dirpath) / d).is_symlink():
-                links.append(rel)
+                out.links.append(rel)
             keep.append(d)
         dirnames[:] = keep
         for name in sorted(filenames):
             full = Path(dirpath) / name
             rel = full.relative_to(root).as_posix()
             if full.is_symlink():
-                links.append(rel)
-            files.append((rel, full))
-    return files, skipped, links
+                out.links.append(rel)
+            out.files.append((rel, full))
+
+
+def walk(root: Path, skip: Globs) -> Listing:
+    """The files to read. In a git work tree, only what git shows: tracked files and untracked
+    ones that aren't ignored, so scratch state such as `.factory/` is never read. Anything
+    else (git missing, or `root` not a work tree's top) walks every file, with a note."""
+    out = Listing()
+    listed = git_listing(root)
+    if isinstance(listed, str):
+        out.note = f"{listed}; walking every file under {root}, git-ignored ones included"
+        _walk_fs(root, root, skip, out)
+        return out
+    visible, out.ignored = listed
+    hidden: list[str] = []  # skipped directories, outermost first
+
+    def is_hidden(rel: str) -> bool:
+        return any(rel == d or rel.startswith(d + "/") for d in hidden)
+
+    dirs = set()
+    for path in visible:
+        parts = path.rstrip("/").split("/")
+        dirs.update("/".join(parts[:k]) for k in range(1, len(parts)))
+    for d in sorted(dirs, key=lambda d: (d.count("/"), d)):
+        if not is_hidden(d) and skip.match(d + "/"):
+            hidden.append(d)
+            out.skipped.append(d)
+    for rel in visible:
+        rel = rel.rstrip("/")
+        full = root / rel
+        if is_hidden(rel) or not os.path.lexists(full):
+            continue  # a skipped directory, or a tracked file deleted from the work tree
+        if full.is_symlink():
+            if full.is_dir() and skip.match(rel + "/"):
+                out.skipped.append(rel)
+                continue
+            out.links.append(rel)
+            if not full.is_dir():
+                out.files.append((rel, full))
+        elif full.is_dir():  # a submodule or a nested repository: git lists only its root
+            if skip.match(rel + "/"):
+                out.skipped.append(rel)
+            else:
+                _walk_fs(root, full, skip, out)
+        else:
+            out.files.append((rel, full))
+    return out
 
 
 def normalize(path: str) -> str | None:
@@ -1541,13 +1631,18 @@ def _owner(rel: str, packages: list[Package]) -> Package | None:
 
 # --------------------------------------------------------------------------- run
 
-def run(root: Path, config: Path) -> list[Violation]:
+def run(root: Path, config: Path, notes: list[str] | None = None) -> list[Violation]:
+    """The violations under `root`. How the files were listed, when not by git, is appended
+    to `notes`."""
     cfg = load_config(config)
     found: list[Violation] = []
     packages, ws_deps = workspace_packages(root, found)
     found += check_cargo(root, cfg, packages, ws_deps)
 
-    files, skipped, links = walk(root, cfg.skip)
+    listing = walk(root, cfg.skip)
+    if notes is not None and listing.note:
+        notes.append(listing.note)
+    files, skipped, links = listing.files, listing.skipped, listing.links
     # Every literal destination production code reaches (`#[path]`, `include!`, a relative
     # import, a symlink): a skip must not hide one, or the guard would pass code it never read.
     reached: set[str] = set()
@@ -1583,6 +1678,11 @@ def run(root: Path, config: Path) -> list[Violation]:
         sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
         if sources:
             found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which production code reaches ({', '.join(sources)})"))
+    # Git hides what it ignores the same way: production code must not reach any of it.
+    for entry in listing.ignored:
+        sources = sorted(t for t in reached if t == entry or t.startswith(entry + "/"))
+        if sources:
+            found.append(Violation(SKIP_RULE, entry, 1, f"git ignores this path, so the guard never reads it, but production code reaches it ({', '.join(sources)})"))
     return sorted(set(found), key=lambda v: (v.path, v.line, v.rule, v.message))
 
 
@@ -1602,11 +1702,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = (args.root or default_root()).resolve()
     config = args.config or root / "tools" / "arch-guard" / "guard.toml"
+    notes: list[str] = []
     try:
-        found = run(root, config)
+        found = run(root, config, notes)
     except ConfigError as e:
         print(f"arch-guard: {e}", file=sys.stderr)
         return 2
+    for note in notes:
+        print(f"arch-guard: note: {note}", file=sys.stderr)
     if args.json:
         print(json.dumps({"violations": [asdict(v) for v in found]}, indent=2))
     else:

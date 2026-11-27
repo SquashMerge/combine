@@ -1,4 +1,5 @@
-"""Tests for tools/trellis-check: which trellis failures CI retries, and how often.
+"""Tests for tools/trellis-check: which trellis failures CI retries, how often, and the summary
+of a report (summary.py).
 
     python3 -I -B tools/trellis-check/test_ci_check.py
 
@@ -26,6 +27,10 @@ CI_CHECK = HERE / "ci-check.sh"
 spec = importlib.util.spec_from_file_location("classify", HERE / "classify.py")
 classify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(classify)
+
+summary_spec = importlib.util.spec_from_file_location("summary", HERE / "summary.py")
+summary = importlib.util.module_from_spec(summary_spec)
+summary_spec.loader.exec_module(summary)
 
 # Captured from trellis 0.2.2 (`trellis rules check --format json`, the release binary CI
 # installs) against a cold daemon of its own, slowed by pausing it with SIGSTOP/SIGCONT. Each
@@ -101,6 +106,12 @@ exit "$(cat "$STUB/$n.code")"
 
 def run_ci_check(answers: list[tuple[str, bytes, int]]) -> tuple[int, int, str]:
     """Runs ci-check.sh over `answers` (the last one repeats). Returns (status, calls, stderr)."""
+    status, calls, _stdout, stderr = run_ci_check_output(answers)
+    return status, calls, stderr
+
+
+def run_ci_check_output(answers: list[tuple[str, bytes, int]]) -> tuple[int, int, str, str]:
+    """[`run_ci_check`], with stdout too: (status, calls, stdout, stderr)."""
     with tempfile.TemporaryDirectory() as scratch:
         stub = Path(scratch) / "stub"
         bin_dir = Path(scratch) / "bin"
@@ -121,7 +132,12 @@ def run_ci_check(answers: list[tuple[str, bytes, int]]) -> tuple[int, int, str]:
         calls = int((stub / "count").read_text())
         leftovers = [p.name for p in Path(scratch).iterdir() if p.name.startswith("combine-trellis")]
         assert not leftovers, f"ci-check.sh left {leftovers}"
-        return done.returncode, calls, done.stderr.decode("utf-8", "replace")
+        return (
+            done.returncode,
+            calls,
+            done.stdout.decode("utf-8", "replace"),
+            done.stderr.decode("utf-8", "replace"),
+        )
 
 
 class RetryLoop(unittest.TestCase):
@@ -219,6 +235,73 @@ class Classify(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(classify.main(["classify.py"]), 2)
             self.assertEqual(classify.main(["classify.py", "x", "a", "b"]), 2)
+
+
+# The shape of trellis 0.2.2's report, cut down: the fields summary.py reads.
+FULL_REPORT = {
+    "catchingUp": False,
+    "payload": {
+        "counts": {"comparable": 9, "conforms": 6, "deviates": 1, "excepted": 0, "unknown": 2},
+        "testCounts": {"comparable": 5, "conforms": 4, "deviates": 0, "excepted": 0, "unknown": 1},
+        "unassigned": [
+            {"language": "typescript", "path": "app/web/vite.config.ts", "sid": "sid:v1:b"},
+            {"language": "rust", "path": "app/src-tauri/build.rs", "sid": "sid:v1:a"},
+            {"kind": "externalPackage", "language": "javascript", "package": "@xterm/headless"},
+        ],
+        "unassignedFileCount": 2,
+    },
+}
+FULL_SUMMARY = [
+    "trellis: production: 6 conform, 1 deviate, 0 excepted, 2 unknown",
+    "trellis: test only: 4 conform, 0 deviate, 0 excepted, 1 unknown",
+    "trellis: 2 unassigned files, 1 unassigned external packages",
+    "  app/src-tauri/build.rs",
+    "  app/web/vite.config.ts",
+]
+
+
+class Summary(unittest.TestCase):
+    def test_counts_and_unassigned_files(self):
+        self.assertEqual(summary.summarize(FULL_REPORT), FULL_SUMMARY)
+
+    def test_missing_parts_count_as_none(self):
+        self.assertEqual(
+            summary.summarize({"payload": {"counts": {"deviates": 0}}}),
+            [
+                "trellis: production: 0 conform, 0 deviate, 0 excepted, 0 unknown",
+                "trellis: 0 unassigned files, 0 unassigned external packages",
+            ],
+        )
+
+    def test_a_file_without_a_report_is_refused(self):
+        for text in ("", "{not json", json.dumps({"error": {"code": "invalid_request"}}), "[]"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / "report.json"
+                path.write_text(text)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(summary.main(["summary.py", str(path)]), 1)
+                self.assertIn("trellis: no summary:", err.getvalue())
+
+    def test_ci_check_prints_the_summary_on_success(self):
+        status, calls, stdout, _ = run_ci_check_output([(json.dumps(FULL_REPORT), b"", 0)])
+        self.assertEqual((status, calls), (0, 1))
+        self.assertEqual(stdout.splitlines(), FULL_SUMMARY)
+
+    def test_ci_check_prints_the_summary_of_a_deviation_and_still_fails(self):
+        answer = (json.dumps(FULL_REPORT), b"Error: architecture deviations\n", 1)
+        status, calls, stdout, _ = run_ci_check_output([answer, SUCCESS])
+        self.assertEqual((status, calls), (1, 1))
+        self.assertEqual(stdout.splitlines(), FULL_SUMMARY)
+
+    def test_the_summary_never_changes_the_status(self):
+        # SUCCESS has no testCounts or unassigned list; an error report has no counts at all.
+        self.check_status([SUCCESS], 0)
+        self.check_status([WRONG_CODE_IN_REPORT, SUCCESS], 1)
+
+    def check_status(self, answers, status):
+        got, _, _, stderr = run_ci_check_output(answers)
+        self.assertEqual(got, status, stderr)
 
 
 if __name__ == "__main__":
