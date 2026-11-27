@@ -1287,24 +1287,87 @@ class GuardTest(unittest.TestCase):
         for src in (
             "export const o = { import(v: string) { return v; }, require(v: string) { return v; } };\n",
             "export const o = { async import(v: string) { return v; }, *require(v: string) { yield v; } };\n",
+            "export const o = { *import(v: string) { yield v; }, async *require(v: string) { yield v; } };\n",
             "export const o = { get import() { return 1; }, set require(v: number) { void v; } };\n",
             "export const o = { a: 1, import<T>(v: T): T { return v; } };\n",
             "export const o = { a: { import(v: string) { return v; } } };\n",
             "export const o = [{ import(v: string) { return v; } }];\n",
             "f({ import(v: string) { return v; } });\nfunction f(x: object) { return x; }\n",
             "export default { import(v: string) { return v; } };\n",
-            "export function f() { return { require(v: string) { return v; } }; }\n",
             "export class C { import(v: string) { return v; } require(v: string): string { return v; } }\n",
-            "export class C { x = 1\n  import(v: string) { return v; } }\n",
+            "export class C { *import(v: string) { yield v; } static async *require(v: string) { yield v; } }\n",
+            "export class C { x = 1; import(v: string) { return v; } }\n",
+            "export class C { m() { return 1; } import(v: string): string { return v; } }\n",
             "export class C extends Object { static async import(v: string) { return v; } }\n",
             "export class C implements I { public require(v: string): string { return v; } }\ninterface I { a?: 1 }\n",
             "export const K = class { require(v: string) { return v; } };\n",
-            "export class C { m(): { import(v: string): void } { return { import(v: string) { void v; } }; } }\n",
-            "export interface I { import(v: string): string; require(v: string): void }\n",
-            "export type T = { import(v: string): string; require(v: string): void };\n",
+            "export type T = { import(v: string): string, require(v: string): void };\n",
         ):
             with self.subTest(src=src):
                 self.assertFlags({self.TS_PROBE: src})
+
+    # --- opencode review 76: an exemption only where the member head is unambiguous
+
+    LOAD_SHAPES = (
+        ("import('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("require('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("require?.('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("import('../../test/support/snapshots')", "no-production-dependency-on-non-production"),
+        ("import('../ipc/' + 'tauri')", "frontend-imports-are-literal"),
+    )
+
+    def test_a_word_then_a_line_break_then_a_block_is_not_an_object(self):
+        # `of`, `async`, `type` and `get` can be identifiers, and a line break after
+        # `return`, `await x`, `yield` or `throw 1` ends the statement: the `{` that
+        # follows is a block, so its first call is a load. The `;` forms are controls.
+        for ext in (".ts", ".mts", ".cts"):
+            path = f"app/web/src/shell/probe{ext}"
+            for load, rule in self.LOAD_SHAPES:
+                block = f"{{\n  {load}\n  {{}}\n}}\n"
+                for src in (
+                    f"const of = 1;\nof\n{block}export {{}};\n",
+                    f"const of = 1;\nof;\n{block}export {{}};\n",
+                    f"const async = 1;\nasync\n{block}export {{}};\n",
+                    f"const type = 1;\ntype\n{block}export {{}};\n",
+                    f"const get = 1;\nget\n{block}export {{}};\n",
+                    f"export function f() {{ return\n{block}}}\n",
+                    f"export function f() {{ return;\n{block}}}\n",
+                    f"export async function f(x: number) {{ await\nx\n{block}}}\n",
+                    f"export function* g() {{ yield\n{block}}}\n",
+                    f"export function f() {{ throw 1\n{block}}}\n",
+                ):
+                    with self.subTest(path=path, src=src):
+                        self.assertFlags({path: src}, (rule, path))
+
+    def test_a_call_in_an_initializer_is_not_a_method(self):
+        for load, rule in self.LOAD_SHAPES:
+            for src in (
+                f"declare const c: boolean;\nexport const o = {{\n  x: c ? 2 * {load} : 0\n}};\n",
+                f"declare const c: boolean;\nexport class C {{ x = c ? 2 * {load} : 0; }}\n",
+                f"declare const c: boolean;\nexport class C {{ static x = c ? 2 * {load} : 0 }}\n",
+                f"declare const c: boolean, a: number;\nexport const o = {{ x: c ? a\n* {load} : 0 }};\n",
+                f"declare const c: boolean;\nexport const o = {{ x: c ? f(1, {load}) : 0 }};\nfunction f(...a: unknown[]) {{ return a; }}\n",
+                f"declare const c: boolean;\nexport class C {{ x = c ? [1, {load}] : 0 }}\n",
+                f"declare const c: boolean, get: number;\nexport class C {{ x = c ? get\n* {load} : 0 }}\n",
+                f"declare const c: boolean;\nexport const y = c ? 2 * {load} : 0;\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, (rule, self.TS_PROBE))
+
+    def test_ambiguous_member_positions_are_read_as_loads(self):
+        # The documented false positives: real methods or signatures named `import`
+        # or `require` whose position the reader can't prove is a member head. Each is
+        # reported, here as a non-literal load, never skipped.
+        for src in (
+            "export function f() { return { require(v: string) { return v; } }; }\n",
+            "declare const c: boolean;\nexport const o = c ? 1 : { import(v: string) { return v; } };\n",
+            "export class C { x = 1\n  import(v: string) { return v; } }\n",
+            "export class C<T extends { a: 1 }> { import(v: T) { return v; } }\n",
+            "export interface I { import(v: string): string }\n",
+            "export type T = { import(v: string): string; require(v: string): void };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src}, ("frontend-imports-are-literal", self.TS_PROBE))
 
     def test_clean_tsx_lexes_clean(self):
         src = """\

@@ -22,15 +22,17 @@ It tokenizes Rust and TypeScript/JavaScript, but it is not a compiler. What it d
   `extern crate x as y;` within its own block.
 - Frontend: static `import`/`export ... from` (string-named bindings included),
   `import()` and `require()`/`require?.()` are read from tokens, with string escapes
-  decoded. A method definition or signature named `import`/`require` isn't a load, but
-  only directly in a class or interface body or in an object or type literal: anywhere
-  else (a block, a function body, the top level) `import(...)` followed by `{` or `:` is
-  read as a load. Strings, templates and regex literals are never scanned as code;
-  regex-versus-division follows the previous token with context (control-statement `)`,
-  block `}`, postfix `++`, `x!`), and line comments end at every ECMAScript line
-  terminator. A non-literal
-  `import()`/`require()` argument is reported by the `js_literal_imports` rule, and an
-  import/export declaration this grammar can't follow is reported as `guard-parse`.
+  decoded. A method definition or signature named `import`/`require` isn't a load only
+  at an unambiguous member head: directly in a class body or an object or type literal,
+  right after a member boundary (`{` or `,` in an object; `{`, `;` or `}` in a class),
+  optionally after modifiers and a generator `*`, with `{` or `:` after the parameters.
+  Anything else is a load: a call in a block, a function body, the top level, a template
+  or an initializer (`x = c ? 2 * require('y') : 0`). Strings, templates and regex
+  literals are never scanned as code; regex-versus-division follows the previous token
+  with context (control-statement `)`, block `}`, postfix `++`, `x!`), and line comments
+  end at every ECMAScript line terminator. A non-literal `import()`/`require()` argument
+  is reported by the `js_literal_imports` rule, and an import/export declaration this
+  grammar can't follow is reported as `guard-parse`.
 - Cargo: workspace members are the root `members` globs (minus `exclude`) plus every path
   dependency inside the checkout, recursively, as Cargo does. Both spellings of the
   dependency tables (`build-dependencies` and edition-2021 `build_dependencies`) count.
@@ -61,12 +63,17 @@ Known limits, by design:
   `export` load. Comments, strings and JSX text that spell those words are therefore a
   `guard-parse`, as are `import.meta`, `import x = require(...)`, member access such as
   `obj.import`, and keys or methods named `import` or `require`.
-- Frontend, `.ts`/`.mts`/`.cts` method definitions: which kind of brace holds a call is
-  judged from the token before the `{`, leaning to "block" (where it is a load). The
-  residual is false positives, never a hidden load: a method named `import`/`require`
-  in an object literal after `:` outside an object (`c ? a : { import() {} }`), after an
-  operator not listed in `_brace_contexts`, or in a class whose type parameters hold a
-  `{` (`class C<T extends { a: 1 }>`), is reported as a load.
+- Frontend, method definitions: the exemption fails closed, so its residual is false
+  positives, never a hidden load. A `{` is an object or type literal only after `(`, `[`,
+  `,`, `=`, `?`, `...`, `|`, `&`, `export default`, or a `:` inside an object, class or
+  template; after a word (`return`, `of`, `await`), `)`, `=>`, `>` or `]` it is a block,
+  because a line break can end the statement before it. So a real method or signature
+  named `import`/`require` is reported as a load when it is in an object literal after
+  `return` or after a ternary `:` in a block (`c ? a : { import() {} }`), in an
+  interface, after a `;` in a type literal, after a class field with no `;`
+  (`x = 1` then a line break), in a class whose type parameters or heritage type
+  arguments hold a `{` (`class C<T extends { a: 1 }>`), or in a nameless generic class
+  expression (`class<T> {`). No file in the repository has such a method.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is
@@ -1064,87 +1071,89 @@ def js_imports(toks: list[Tok]) -> list[tuple[int, str, str | None]]:
     return _read_loads(toks)[0]
 
 
+# Punctuation after which a `{` can only start an expression (an object literal) or a
+# type literal, never a statement block: none of these can end a statement, so no line
+# break before the `{` can insert a semicolon. `:` is handled on its own.
 _OBJECT_AFTER_PUNCT = {"(", "[", ",", "=", "?", "...", "|", "&"}
-_OBJECT_AFTER_WORD = {"return", "yield", "await", "throw", "typeof", "void", "delete", "in", "of", "new"}
+_MEMBER_MODIFIERS = {"async", "get", "set", "static", "public", "private", "protected", "readonly",
+                     "override", "accessor", "declare", "abstract"}
 
 
-def _brace_contexts(toks: list[Tok]) -> list[str]:
-    """For each token, what its innermost enclosing brace is: "class" (a class or
-    interface body), "object" (an object literal or type literal), "block" (statements),
-    "expr" (a template `${...}`) or "top". It is for the method-definition exemption, so
-    it leans to "block" whenever a brace could hold statements: a `{` counts as an object
-    only after `(`, `[`, `,`, `=`, `?`, `...`, `|`, `&`, `return`-like words,
-    `export default`, or a `:` inside an object, class or template. A `{` after `)`, `=>`,
-    `>`, `]`, `else`, `do`, a label or `case x:` is a block. A class body is the first `{`
-    at the same bracket depth after `class` or `interface` and a name or `{`."""
-    out: list[str] = []
-    stack: list[str] = []
-    parens = 0
-    pending: tuple[int, int] | None = None  # (brace depth, paren depth) of a `class` head
+def _brace_contexts(toks: list[Tok]) -> list[tuple[str, int]]:
+    """For each token, its innermost enclosing brace and how many `(`/`[` deep inside that
+    brace it sits. The brace is "class" (a class body), "object" (an object or type
+    literal), "block" (statements, or anything not proven otherwise), "expr" (a template
+    `${...}`) or "top". It exists for the method-definition exemption, so it fails closed:
+    a `{` is an object only after punctuation that can't end a statement (`(`, `[`, `,`,
+    `=`, `?`, `...`, `|`, `&`), after `export default`, or after a `:` that is itself
+    inside an object, class or template. A word before the `{` (`return`, `of`, `await`)
+    never proves an object, since a line break can end the statement before it. A class
+    body is the first `{` at the same bracket depth after `class` and a name or `{`."""
+    out: list[tuple[str, int]] = []
+    stack: list[tuple[str, int]] = []  # (kind, bracket depth at which it opened)
+    depth = 0
+    pending: tuple[int, int] | None = None  # (brace depth, bracket depth) of a `class` head
     n = len(toks)
     for k, t in enumerate(toks):
-        out.append(stack[-1] if stack else "top")
+        kind_here, opened_at = stack[-1] if stack else ("top", 0)
+        out.append((kind_here, depth - opened_at))
         prev = toks[k - 1] if k else None
         if t.kind == "punct" and t.text in ("(", "["):
-            parens += 1
+            depth += 1
         elif t.kind == "punct" and t.text in (")", "]"):
-            parens = max(parens - 1, 0)
-        elif t.kind == "ident" and t.text in ("class", "interface") and not (
+            depth = max(depth - 1, 0)
+        elif t.is_("ident", "class") and not (
             prev is not None and prev.kind == "punct" and prev.text in (".", "?.")
         ) and k + 1 < n and (toks[k + 1].kind == "ident" or toks[k + 1].is_("punct", "{")):
-            pending = (len(stack), parens)
-        elif t.is_("punct", ";") and pending == (len(stack), parens):
+            pending = (len(stack), depth)
+        elif t.is_("punct", ";") and pending == (len(stack), depth):
             pending = None
         elif t.is_("punct", "{"):
-            if pending == (len(stack), parens):
+            if pending == (len(stack), depth):
                 kind, pending = "class", None
-            elif prev is None:
-                kind = "block"
-            elif prev.kind == "punct" and prev.text in _OBJECT_AFTER_PUNCT:
+            elif prev is not None and prev.kind == "punct" and prev.text in _OBJECT_AFTER_PUNCT:
                 kind = "object"
-            elif prev.is_("punct", ":"):
-                kind = "object" if stack and stack[-1] in ("object", "class", "expr") else "block"
-            elif prev.kind == "ident" and prev.text in _OBJECT_AFTER_WORD:
-                kind = "object"
-            elif prev.is_("ident", "default") and k > 1 and toks[k - 2].is_("ident", "export"):
+            elif prev is not None and prev.is_("punct", ":"):
+                kind = "object" if kind_here in ("object", "class", "expr") else "block"
+            elif prev is not None and prev.is_("ident", "default") and k > 1 and toks[k - 2].is_("ident", "export"):
                 kind = "object"
             else:
                 kind = "block"
-            stack.append(kind)
+            stack.append((kind, depth))
         elif t.is_("punct", "}") or t.kind == "template_tail":
             if stack:
-                stack.pop()
+                depth = stack.pop()[1]
         elif t.kind == "template_expr":
-            stack.append("expr")
+            stack.append(("expr", depth))
         elif t.kind == "template_mid":
             if stack:
-                stack.pop()
-            stack.append("expr")
+                depth = stack.pop()[1]
+            stack.append(("expr", depth))
     return out
 
 
-def _is_method_definition(ctx: str, prev: Tok | None, after_args: Tok) -> bool:
-    """Whether `import(...)`/`require(...)` (or `<...>(...)`), with `prev` before it and
-    `after_args` after its `)`, is a method definition or signature and not a load. Only
-    a class body or an object or type literal can hold one; in a block, at the top level
-    or in a template it is always a load, so `import('x')` followed by a block is read."""
-    if ctx not in ("class", "object"):
+def _is_method_definition(toks: list[Tok], i: int, context: tuple[str, int], after_args: Tok) -> bool:
+    """Whether the `import`/`require` at toks[i], whose call is followed by `after_args`,
+    is a method definition or signature and not a load. Only an unambiguous member head
+    counts: directly in a class body or an object or type literal (not inside a `(` or
+    `[`), with the name right after a member boundary (`{` or `,` in an object; `{`, `;`
+    or `}` in a class), optionally after modifiers (`static`, `async`, `get`, ...) and a
+    generator `*`, and with `{` (a body) or `:` (a return type) after the parameters.
+    Anything else, including an initializer (`x = c ? 2 * require('y') : 0`), is a load."""
+    ctx, nested = context
+    if ctx not in ("class", "object") or nested:
         return False
-    if after_args.is_("punct", "{"):
-        if ctx == "class":
-            return True  # a class body holds no statements: this can only be a method
-        return prev is not None and (
-            (prev.kind == "punct" and prev.text in ("{", ",", "*"))
-            or (prev.kind == "ident" and prev.text in _METHOD_PREFIXES))
-    if after_args.is_("punct", ":"):  # a return type: `import(x): T { ... }` or `import(x): T;`
-        if prev is None:
-            return False
-        if prev.kind == "punct":
-            return prev.text in ("{", "}", ";", ",", "*", ")", "]")
-        if prev.kind == "ident":
-            return prev.text not in _REGEX_AFTER_WORD
-        return prev.kind in ("num", "str", "template", "template_tail")
-    return False
+    if not (after_args.is_("punct", "{") or after_args.is_("punct", ":")):
+        return False
+    j = i - 1
+    if j >= 0 and toks[j].is_("punct", "*"):
+        j -= 1
+    while j >= 0 and toks[j].kind == "ident" and toks[j].text in _MEMBER_MODIFIERS:
+        j -= 1
+    if j < 0:
+        return False
+    boundaries = ("{", ",") if ctx == "object" else ("{", ";", "}")
+    return toks[j].kind == "punct" and toks[j].text in boundaries
 
 
 def _read_loads(toks: list[Tok]) -> tuple[list[tuple[int, str, str | None]], set[int]]:
@@ -1179,7 +1188,7 @@ def _read_loads(toks: list[Tok]) -> tuple[list[tuple[int, str, str | None]], set
         elif t.text == "require" and nxt.is_("punct", "?.") and tok(i + 2).is_("punct", "("):
             call = i + 2  # require?.("x")
         if call is not None:
-            if _is_method_definition(contexts[i], prev, tok(_group_end(toks, call))):
+            if _is_method_definition(toks, i, contexts[i], tok(_group_end(toks, call))):
                 methods.add(t.start)
                 continue  # a method definition: import(value) { ... }
             arg, after = tok(call + 1), tok(call + 2)
