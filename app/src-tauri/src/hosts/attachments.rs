@@ -36,9 +36,14 @@ pub struct StreamId(pub u64);
 /// What a panel stream receives.
 #[derive(Debug)]
 pub enum StreamDelivery<'a> {
-    /// Whether the stream's host has a live session. Sent when the stream opens and on each change.
+    /// Whether the stream's host has a live session that is ready for attachments, and which
+    /// backend instance that session's daemon serves. Sent when the stream opens and on each
+    /// change. A session is ready once its first `terminals` reply has named the instance, so
+    /// a panel pinned to one instance never attaches before it knows the session's. `instance`
+    /// is `None` while not connected and for a daemon that names none.
     Connection {
         connected: bool,
+        instance: Option<&'a str>,
     },
     Message(&'a DaemonMessage),
 }
@@ -83,6 +88,8 @@ struct Route {
 #[derive(Debug, Default)]
 struct HostState {
     connected: bool,
+    /// The backend instance of the current session's daemon, once it is connected.
+    instance: Option<String>,
     pending: BTreeMap<u64, Target>,
     routes: BTreeMap<u64, Route>,
     /// Counts the sessions started for this host, so a session's end can tell it was replaced.
@@ -157,10 +164,16 @@ impl Attachments {
     /// Records the stream's host and tells the stream whether that host is connected.
     pub fn open_stream(&self, stream: StreamId, host_id: HostId) {
         let mut state = self.state();
-        let connected = state.host(&host_id).connected;
+        let host = state.host(&host_id);
+        let (connected, instance) = (host.connected, host.instance.clone());
         state.streams.insert(stream, host_id);
-        self.sink
-            .deliver(stream, StreamDelivery::Connection { connected });
+        self.sink.deliver(
+            stream,
+            StreamDelivery::Connection {
+                connected,
+                instance: instance.as_deref(),
+            },
+        );
     }
 
     /// Closes a stream. Whatever it still owns becomes an orphan, and is finished.
@@ -179,32 +192,41 @@ impl Attachments {
     }
 
     /// Sends an `attach` for `stream`. Its reply is delivered to the stream only while the request
-    /// is pending.
+    /// is pending. `instance` is the backend instance a pinned panel expects; the daemon refuses
+    /// the attach with `backend_mismatch` when its own differs.
     pub fn attach(
         &self,
         outbound: &Outbound,
         stream: StreamId,
         terminal: TermId,
         options: AttachRequestOptions,
+        instance: Option<String>,
     ) -> Result<(), ForwardError> {
         self.request(outbound, stream, RequestKind::Attach, |request| {
             ClientMessage::Attach(Attach {
                 request,
                 terminal,
                 options,
+                instance,
             })
         })
     }
 
-    /// Sends a `resume` for `stream`, from the cursor the webview last applied.
+    /// Sends a `resume` for `stream`, from the cursor the webview last applied. `instance` is
+    /// as for [`Attachments::attach`].
     pub fn resume(
         &self,
         outbound: &Outbound,
         stream: StreamId,
         cursor: Cursor,
+        instance: Option<String>,
     ) -> Result<(), ForwardError> {
         self.request(outbound, stream, RequestKind::Resume, |request| {
-            ClientMessage::Resume(Resume { request, cursor })
+            ClientMessage::Resume(Resume {
+                request,
+                cursor,
+                instance,
+            })
         })
     }
 
@@ -292,39 +314,78 @@ impl Attachments {
         Ok(())
     }
 
-    /// A session for `host_id` is registered: nothing from an earlier session survives. The
-    /// returned number names this session for [`Attachments::session_ended_by`].
-    pub fn session_started(&self, host_id: &HostId) -> u64 {
-        self.set_connected(host_id, true, None).unwrap_or_default()
+    /// A session for `host_id` is ready for attachments: its daemon has named `instance`, the
+    /// backend instance it serves, in its first `terminals` reply. Nothing from an earlier
+    /// session survives. The returned number names this session for
+    /// [`Attachments::session_ended_by`].
+    pub fn session_started(&self, host_id: &HostId, instance: Option<String>) -> u64 {
+        self.set_connected(host_id, Some(instance), None)
+            .unwrap_or_default()
+    }
+
+    /// The session `session_started` numbered `session` started without an instance (its first
+    /// terminal list was refused), and a later list names `instance`. The streams are told, and
+    /// later ones hear it when they open; the session keeps its pending requests and routes.
+    /// Nothing changes for another session, or once the session already has an instance.
+    pub fn instance_learned(&self, host_id: &HostId, session: u64, instance: String) {
+        let mut state = self.state();
+        let host = state.host(host_id);
+        if host.session != session || !host.connected || host.instance.is_some() {
+            return;
+        }
+        host.instance = Some(instance.clone());
+        for (stream, _) in state.streams.iter().filter(|(_, host)| *host == host_id) {
+            self.sink.deliver(
+                *stream,
+                StreamDelivery::Connection {
+                    connected: true,
+                    instance: Some(&instance),
+                },
+            );
+        }
     }
 
     /// The session for `host_id` is gone, and so are its pending requests and attachments.
     pub fn session_ended(&self, host_id: &HostId) {
-        self.set_connected(host_id, false, None);
+        self.set_connected(host_id, None, None);
     }
 
     /// Ends the session that `session_started` numbered `session`, unless a newer session for
     /// the host has started since: that session's state is not this one's to clear.
     pub fn session_ended_by(&self, host_id: &HostId, session: u64) {
-        self.set_connected(host_id, false, Some(session));
+        self.set_connected(host_id, None, Some(session));
     }
 
-    fn set_connected(&self, host_id: &HostId, connected: bool, only: Option<u64>) -> Option<u64> {
+    /// `started` is the new session's backend instance, or `None` when the session ends.
+    fn set_connected(
+        &self,
+        host_id: &HostId,
+        started: Option<Option<String>>,
+        only: Option<u64>,
+    ) -> Option<u64> {
         let mut state = self.state();
         let host = state.host(host_id);
         if only.is_some_and(|session| session != host.session) {
             return None;
         }
+        let connected = started.is_some();
         if connected {
             host.session += 1;
         }
         let session = host.session;
         host.connected = connected;
+        host.instance = started.flatten();
         host.pending.clear();
         host.routes.clear();
+        let instance = host.instance.clone();
         for (stream, _) in state.streams.iter().filter(|(_, host)| *host == host_id) {
-            self.sink
-                .deliver(*stream, StreamDelivery::Connection { connected });
+            self.sink.deliver(
+                *stream,
+                StreamDelivery::Connection {
+                    connected,
+                    instance: instance.as_deref(),
+                },
+            );
         }
         Some(session)
     }
@@ -472,7 +533,7 @@ mod tests {
 
     #[derive(Debug, PartialEq)]
     enum Seen {
-        Connection(bool),
+        Connection(bool, Option<String>),
         Message(DaemonMessage),
     }
 
@@ -482,7 +543,10 @@ mod tests {
     impl TerminalSink for RecordingSink {
         fn deliver(&self, stream: StreamId, event: StreamDelivery<'_>) {
             let seen = match event {
-                StreamDelivery::Connection { connected } => Seen::Connection(connected),
+                StreamDelivery::Connection {
+                    connected,
+                    instance,
+                } => Seen::Connection(connected, instance.map(str::to_string)),
                 StreamDelivery::Message(m) => Seen::Message(m.clone()),
             };
             self.0
@@ -503,6 +567,15 @@ mod tests {
 
     const S1: StreamId = StreamId(1);
     const S2: StreamId = StreamId(2);
+    const CORE_A: &str = "core-a";
+
+    fn up() -> Seen {
+        Seen::Connection(true, Some(CORE_A.to_string()))
+    }
+
+    fn down() -> Seen {
+        Seen::Connection(false, None)
+    }
 
     fn connect(
         outbound: &Arc<Outbound>,
@@ -511,7 +584,7 @@ mod tests {
     ) -> (Receiver<Outgoing>, Registration) {
         let (tx, rx) = mpsc::channel();
         let registration = outbound.register(host, tx);
-        router.session_started(host);
+        router.session_started(host, Some(CORE_A.to_string()));
         (rx, registration)
     }
 
@@ -559,8 +632,13 @@ mod tests {
         }
 
         fn attach(&self, stream: StreamId) -> Result<(), ForwardError> {
-            self.router
-                .attach(&self.outbound, stream, TermId("t1".to_string()), options())
+            self.router.attach(
+                &self.outbound,
+                stream,
+                TermId("t1".to_string()),
+                options(),
+                None,
+            )
         }
 
         fn forward(&self, stream: StreamId, message: ClientMessage) -> Result<(), ForwardError> {
@@ -799,7 +877,7 @@ mod tests {
         let rig = Rig::with_streams();
         rig.attached(S1, 10);
         rig.router
-            .resume(&rig.outbound, S1, cursor(10, 5))
+            .resume(&rig.outbound, S1, cursor(10, 5), None)
             .expect("resume");
         assert!(matches!(
             rig.sent().as_slice(),
@@ -843,7 +921,7 @@ mod tests {
     fn resumed_reply_routes_to_its_stream() {
         let rig = Rig::with_streams();
         rig.router
-            .resume(&rig.outbound, S2, cursor(10, 5))
+            .resume(&rig.outbound, S2, cursor(10, 5), None)
             .expect("resume");
         rig.sent();
         let resumed = DaemonMessage::Resumed(Resumed {
@@ -901,6 +979,7 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: Vec::new(),
+            backend: None,
         });
         assert_eq!(rig.route(terminals.clone()), Some(terminals));
         assert_eq!(rig.route(error(None, None)), Some(error(None, None)));
@@ -1072,20 +1151,100 @@ mod tests {
         let host = host_id(HOST_A);
         router.open_stream(S1, host.clone());
         assert_eq!(
-            router.attach(&outbound, S1, TermId("t".to_string()), options()),
+            router.attach(&outbound, S1, TermId("t".to_string()), options(), None),
             Err(ForwardError::NotConnected)
         );
         let (_rx, _registration) = connect(&outbound, &router, &host);
         router.open_stream(S2, host);
         let seen = std::mem::take(&mut *sink.0.lock().expect("sink"));
+        assert_eq!(seen, [(S1, down()), (S1, up()), (S2, up()),]);
+    }
+
+    #[test]
+    fn a_session_reports_the_instance_it_started_with_and_forgets_it_at_its_end() {
+        let sink = Arc::new(RecordingSink::default());
+        let router = Attachments::new(sink.clone());
+        let host = host_id(HOST_A);
+        router.open_stream(S1, host.clone());
+        let first = router.session_started(&host, Some("core-a".to_string()));
+        router.session_ended_by(&host, first);
+        router.session_started(&host, Some("core-b".to_string()));
+        router.open_stream(S2, host.clone());
+        router.session_ended(&host);
+        router.session_started(&host, None);
+        let seen = std::mem::take(&mut *sink.0.lock().expect("sink"));
         assert_eq!(
             seen,
             [
-                (S1, Seen::Connection(false)),
-                (S1, Seen::Connection(true)),
-                (S2, Seen::Connection(true)),
+                (S1, down()),
+                (S1, Seen::Connection(true, Some("core-a".to_string()))),
+                (S1, down()),
+                (S1, Seen::Connection(true, Some("core-b".to_string()))),
+                (S2, Seen::Connection(true, Some("core-b".to_string()))),
+                (S1, down()),
+                (S2, down()),
+                (S1, Seen::Connection(true, None)),
+                (S2, Seen::Connection(true, None)),
             ]
         );
+    }
+
+    #[test]
+    fn an_instance_learned_later_reaches_the_streams_and_keeps_the_sessions_routes() {
+        let rig = Rig::with_streams();
+        let host = rig.host.clone();
+        rig.router.session_ended(&host);
+        let session = rig.router.session_started(&host, None);
+        rig.attached(S1, 10);
+        rig.seen();
+        rig.router
+            .instance_learned(&host, session + 1, "core-x".to_string());
+        assert!(
+            rig.seen().is_empty(),
+            "another session's list changes nothing"
+        );
+        rig.router
+            .instance_learned(&host, session, "core-b".to_string());
+        let core_b = || Seen::Connection(true, Some("core-b".to_string()));
+        assert_eq!(rig.seen(), [(S1, core_b()), (S2, core_b())]);
+        rig.router
+            .instance_learned(&host, session, "core-c".to_string());
+        assert!(rig.seen().is_empty(), "the first instance stays");
+        rig.router.open_stream(StreamId(3), host.clone());
+        assert_eq!(rig.seen(), [(StreamId(3), core_b())]);
+        assert_eq!(
+            rig.forward(
+                S1,
+                ClientMessage::Focus(Focus {
+                    attachment: AttachmentId(10)
+                })
+            ),
+            Ok(()),
+            "the route made before the instance was learned survives"
+        );
+    }
+
+    #[test]
+    fn an_attach_and_a_resume_carry_the_expected_instance() {
+        let rig = Rig::with_streams();
+        rig.router
+            .attach(
+                &rig.outbound,
+                S1,
+                TermId("t1".to_string()),
+                options(),
+                Some("core-a".to_string()),
+            )
+            .expect("attach");
+        rig.router
+            .resume(&rig.outbound, S2, cursor(10, 5), Some("core-a".to_string()))
+            .expect("resume");
+        let sent = rig.sent();
+        let [ClientMessage::Attach(attach), ClientMessage::Resume(resume)] = sent.as_slice() else {
+            panic!("expected an attach and a resume, got {sent:?}");
+        };
+        assert_eq!(attach.instance.as_deref(), Some("core-a"));
+        assert_eq!(resume.instance.as_deref(), Some("core-a"));
     }
 
     #[test]
@@ -1094,10 +1253,7 @@ mod tests {
         rig.attached(S1, 10);
         rig.registration = None;
         rig.router.session_ended(&rig.host);
-        assert_eq!(
-            rig.seen(),
-            [(S1, Seen::Connection(false)), (S2, Seen::Connection(false))]
-        );
+        assert_eq!(rig.seen(), [(S1, down()), (S2, down())]);
         assert_eq!(
             rig.forward(
                 S1,

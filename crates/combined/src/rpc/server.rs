@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use combine_protocol::{
-    ClientMessage, ClosePanel, DaemonMessage, DroppedNotice, ErrorCode, ErrorMessage, GetPanel,
-    HostId, JsonRpcMessage, Layout, Mcp, McpOpen, McpOpened, PanelClosed, PanelState, Panels,
-    PinPanel, ReportRender, RequestId, TermId,
+    BackendInfo, ClientMessage, ClosePanel, DaemonMessage, DroppedNotice, ErrorCode, ErrorMessage,
+    GetPanel, HostId, JsonRpcMessage, Layout, Mcp, McpOpen, McpOpened, PanelClosed, PanelState,
+    Panels, PinPanel, ReportRender, RequestId, TermId,
 };
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
@@ -390,7 +390,7 @@ pub async fn serve_watched(
     let listener = UnixListener::from_std(listener).map_err(ServeError::Io)?;
 
     let ServerParts {
-        driver,
+        mut driver,
         mut terminals,
         host_id,
         ids,
@@ -408,6 +408,12 @@ pub async fn serve_watched(
     } = parts;
     let Watched { watch, list } = watched;
     let file_store_for_lane = Arc::clone(&file_store);
+    let instance = driver.backend().instance();
+    terminals.set_backend(BackendInfo {
+        id: driver.backend().id().to_string(),
+        instance: instance.clone(),
+    });
+    driver.core_mut().set_backend_instance(instance);
     terminals.apply_list(&list);
     terminals.take_changed();
     let (mcp_calls, mut mcp_rx) = mpsc::channel(64);

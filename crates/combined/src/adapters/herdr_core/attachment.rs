@@ -1155,6 +1155,7 @@ mod queue_tests {
             highest_ownership: Mutex::new(HashMap::new()),
             fidelities: Mutex::new(Fidelities::default()),
             automatic_feature: true,
+            core_id: None,
             control: Arc::new(control::Shared::default()),
         })
     }

@@ -16,7 +16,7 @@ use super::outbound::{Outbound, Outgoing, RequestKind};
 use super::panels::PanelReply;
 use super::spawn::SpawnReply;
 use super::supervisor::{SessionEnd, SessionIo, SessionPhase};
-use super::terminals::space_views;
+use super::terminals::{backend_view, space_views};
 use super::text::display_text;
 
 /// Where a host's layout traffic goes, with the panel list that rides the layout watch. The
@@ -62,7 +62,10 @@ impl SessionPhase for LivePhase {
         } = io;
         let (tx, rx) = mpsc::channel();
         let registration = self.outbound.register(host_id, tx.clone());
-        let session = self.attachments.session_started(host_id);
+        // Panel streams stay disconnected until the first `terminals` reply names the daemon's
+        // backend instance: a pinned panel must not attach or resume before it knows the
+        // session's instance, whatever the registry still shows from the last session.
+        let mut session: Option<u64> = None;
         thread::scope(|scope| {
             let writer_thread = scope.spawn(move || writer_loop(writer, rx));
             let sent = self
@@ -86,7 +89,25 @@ impl SessionPhase for LivePhase {
                     };
                     match message {
                         DaemonMessage::Terminals(list) => {
-                            events.spaces(host_id, space_views(host_id, &list));
+                            let instance = list.backend.as_ref().and_then(|b| b.instance.clone());
+                            match (session, instance) {
+                                (None, instance) => {
+                                    session =
+                                        Some(self.attachments.session_started(host_id, instance));
+                                }
+                                // The first list was refused, so the session started with no
+                                // instance: this one supplies it, without a restart.
+                                (Some(started), Some(instance)) => {
+                                    self.attachments
+                                        .instance_learned(host_id, started, instance);
+                                }
+                                (Some(_), None) => {}
+                            }
+                            events.spaces(
+                                host_id,
+                                space_views(host_id, &list),
+                                backend_view(&list),
+                            );
                         }
                         DaemonMessage::Layout(reply) => {
                             events.layout(host_id, reply.request, reply.layout);
@@ -132,12 +153,16 @@ impl SessionPhase for LivePhase {
                                             message: display_text(error.trimmed_message()),
                                         },
                                     ),
-                                    Some(
-                                        RequestKind::Terminals
-                                        | RequestKind::Attach
-                                        | RequestKind::Resume,
-                                    )
-                                    | None => {}
+                                    // The list can't be had, so no instance is known; panels
+                                    // that follow the active terminal may still attach.
+                                    Some(RequestKind::Terminals) => {
+                                        if session.is_none() {
+                                            session = Some(
+                                                self.attachments.session_started(host_id, None),
+                                            );
+                                        }
+                                    }
+                                    Some(RequestKind::Attach | RequestKind::Resume) | None => {}
                                 }
                             }
                         }
@@ -146,7 +171,9 @@ impl SessionPhase for LivePhase {
                 }
             };
             drop(registration);
-            self.attachments.session_ended_by(host_id, session);
+            if let Some(session) = session {
+                self.attachments.session_ended_by(host_id, session);
+            }
             events.layout_disconnected(host_id);
             events.panel_reply(host_id, PanelReply::Disconnected);
             events.spawn_reply(host_id, SpawnReply::Disconnected);
@@ -166,10 +193,11 @@ mod tests {
     use std::time::Instant;
 
     use combine_protocol::{
-        Ack, AttachRequestOptions, Attached, AttachmentId, BackendGeneration, CloseReason, Closed,
-        Cursor, Data, Display, Epoch, ErrorCode, ErrorMessage, Fidelity, Gap, HostId, Layout,
-        LayoutNode, LayoutSnapshot, ListTemplates, MutateLayout, RequestId, Seq, SpaceInfo,
-        SpaceKind, Spawned, Started, TemplateInfo, Templates, TermId, Terminals, WatchLayout,
+        Ack, AttachRequestOptions, Attached, AttachmentId, BackendGeneration, BackendInfo,
+        CloseReason, Closed, Cursor, Data, Display, Epoch, ErrorCode, ErrorMessage, Fidelity, Gap,
+        HostId, Layout, LayoutNode, LayoutSnapshot, ListTemplates, MutateLayout, RequestId, Seq,
+        SpaceInfo, SpaceKind, Spawned, Started, TemplateInfo, Templates, TermId, Terminals,
+        WatchLayout,
     };
     use combine_protocol::{
         CreatedBy, GetPanel, Panel, PanelClosed, PanelLifetime, PanelPinned, PanelState,
@@ -177,7 +205,7 @@ mod tests {
     };
 
     use super::super::attachments::StreamId;
-    use super::super::model::{ConfigStatus, ConnectionState, HostView, SpaceView};
+    use super::super::model::{BackendView, ConfigStatus, ConnectionState, HostView, SpaceView};
     use super::super::outbound::NotConnected;
     use super::super::registry::HostRegistry;
     use super::super::spawn::SpawnSink;
@@ -261,6 +289,7 @@ mod tests {
                 kind: SpaceKind::Folder,
                 terminals: Vec::<TermId>::new(),
             }],
+            backend: None,
         }
     }
 
@@ -290,11 +319,11 @@ mod tests {
     impl HostEvents for RegistryEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
+        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
             self.0
                 .lock()
                 .expect("registry")
-                .replace_spaces(host_id, spaces);
+                .replace_spaces(host_id, spaces, backend);
         }
     }
 
@@ -310,6 +339,7 @@ mod tests {
                 host_id: Some(host_id(HOST_A)),
                 connection: ConnectionState::Connected,
                 spaces: Vec::new(),
+                backend: None,
             }],
         );
         let events = Arc::new(RegistryEvents(Mutex::new(registry)));
@@ -395,7 +425,13 @@ mod tests {
     impl HostEvents for LayoutEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
             self.0.layout(host_id, request, snapshot);
         }
@@ -573,7 +609,13 @@ mod tests {
     impl HostEvents for SpawnEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
             self.0.spawn_reply(host_id, reply);
         }
@@ -585,7 +627,13 @@ mod tests {
     impl HostEvents for BothEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>) {}
+        fn spaces(
+            &self,
+            _host_id: &HostId,
+            _spaces: Vec<SpaceView>,
+            _backend: Option<BackendView>,
+        ) {
+        }
         fn layout_error(
             &self,
             host_id: &HostId,
@@ -907,19 +955,80 @@ mod tests {
         write_message(&mut rig.daemon, &message).expect("write");
     }
 
+    const CORE_A: &str = "core-a";
+
+    fn up(instance: &str) -> Delivered {
+        Delivered::Connection(true, Some(instance.to_string()))
+    }
+
+    fn down() -> Delivered {
+        Delivered::Connection(false, None)
+    }
+
+    fn list_of(instance: Option<&str>) -> Terminals {
+        Terminals {
+            backend: Some(BackendInfo {
+                id: "herdr-core".to_string(),
+                instance: instance.map(str::to_string),
+            }),
+            ..list()
+        }
+    }
+
+    /// Waits until `STREAM` has been told `expected`, the last delivery it got.
+    fn wait_connection(rig: &Rig, expected: Delivered) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let last = rig
+                .terminals
+                .deliveries()
+                .into_iter()
+                .rev()
+                .find(|(stream, d)| *stream == STREAM && matches!(d, Delivered::Connection(..)));
+            if last.as_ref().map(|(_, d)| d) == Some(&expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "STREAM was last told {last:?}, expected {expected:?}"
+            );
+            thread::yield_now();
+        }
+    }
+
+    /// Opens `STREAM`, answers the session's `watch_terminals` with a list naming `instance`,
+    /// and waits for the stream to hear the session is ready.
+    fn open_ready(rig: &mut Rig, instance: &str) {
+        let request = watch_request(read_client(&mut rig.daemon));
+        rig.attachments.open_stream(STREAM, host_id(HOST_A));
+        write_daemon(
+            rig,
+            DaemonMessage::Terminals(Terminals {
+                request: Some(request),
+                ..list_of(Some(instance))
+            }),
+        );
+        wait_connection(rig, up(instance));
+    }
+
     /// Opens `STREAM` on a started session, attaches it and answers with `attached`.
     fn attached_rig(attachment: u64) -> Rig {
         let (events, _published) = RecordingEvents::new();
         let mut rig = start(events);
-        read_client(&mut rig.daemon);
-        open_and_attach(&mut rig, attachment);
+        open_ready(&mut rig, CORE_A);
+        attach_and_answer(&mut rig, attachment);
         rig
     }
 
-    fn open_and_attach(rig: &mut Rig, attachment: u64) {
-        rig.attachments.open_stream(STREAM, host_id(HOST_A));
+    fn attach_and_answer(rig: &mut Rig, attachment: u64) {
         rig.attachments
-            .attach(&rig.outbound, STREAM, TermId("t1".to_string()), options())
+            .attach(
+                &rig.outbound,
+                STREAM,
+                TermId("t1".to_string()),
+                options(),
+                None,
+            )
             .expect("attach");
         let request = match read_client(&mut rig.daemon) {
             ClientMessage::Attach(attach) => attach.request,
@@ -953,9 +1062,167 @@ mod tests {
                     assert_eq!(stream, STREAM);
                     Some(message)
                 }
-                Delivered::Connection(_) => None,
+                Delivered::Connection(..) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_stream_is_not_connected_until_the_sessions_terminals_name_the_instance() {
+        let (events, _published) = RecordingEvents::new();
+        let mut rig = start(events);
+        let request = watch_request(read_client(&mut rig.daemon));
+        rig.attachments.open_stream(STREAM, host_id(HOST_A));
+        assert_eq!(
+            rig.terminals.deliveries(),
+            [(STREAM, down())],
+            "a registered session that hasn't listed its terminals is not connected"
+        );
+        assert_eq!(
+            rig.attachments.attach(
+                &rig.outbound,
+                STREAM,
+                TermId("t1".to_string()),
+                options(),
+                Some(CORE_A.to_string())
+            ),
+            Err(super::super::attachments::ForwardError::NotConnected)
+        );
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: Some(request),
+                ..list_of(Some("core-b"))
+            }),
+        );
+        wait_connection(&rig, up("core-b"));
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                ..list_of(Some("core-c"))
+            }),
+        );
+        let after = sentinel(&rig);
+        assert_eq!(watch_request(read_client(&mut rig.daemon)), after);
+        assert_eq!(
+            rig.terminals.deliveries(),
+            [(STREAM, down()), (STREAM, up("core-b"))],
+            "a later push doesn't restart the session"
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
+    fn a_refused_terminal_list_readies_the_session_and_a_later_list_supplies_the_instance() {
+        let (events, _published) = RecordingEvents::new();
+        let mut rig = start(events);
+        let request = watch_request(read_client(&mut rig.daemon));
+        rig.attachments.open_stream(STREAM, host_id(HOST_A));
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Error(ErrorMessage {
+                code: ErrorCode::Internal,
+                message: "the terminal list is larger than one frame".to_string(),
+                request: Some(request),
+                attachment: None,
+            }),
+        );
+        wait_connection(&rig, Delivered::Connection(true, None));
+
+        // The list fits again: a push names the instance, and the session goes on.
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                ..list_of(Some(CORE_A))
+            }),
+        );
+        wait_connection(&rig, up(CORE_A));
+        const LATER: StreamId = StreamId(2);
+        rig.attachments.open_stream(LATER, host_id(HOST_A));
+        assert_eq!(
+            rig.terminals.deliveries(),
+            [
+                (STREAM, down()),
+                (STREAM, Delivered::Connection(true, None)),
+                (STREAM, up(CORE_A)),
+                (LATER, up(CORE_A)),
+            ],
+            "the session isn't restarted, and a stream opened later hears the instance"
+        );
+        // A route made before the instance was learned survives it.
+        rig.attachments
+            .attach(
+                &rig.outbound,
+                STREAM,
+                TermId("t1".to_string()),
+                options(),
+                Some(CORE_A.to_string()),
+            )
+            .expect("attach");
+        let request = match read_client(&mut rig.daemon) {
+            ClientMessage::Attach(attach) => attach.request,
+            other => panic!("expected attach, got {other:?}"),
+        };
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                ..list_of(Some("core-b"))
+            }),
+        );
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Attached(Attached {
+                request,
+                attachment: AttachmentId(10),
+            }),
+        );
+        let attached = DaemonMessage::Attached(Attached {
+            request,
+            attachment: AttachmentId(10),
+        });
+        let seen = rig.terminals.wait_for(5);
+        assert_eq!(seen.last(), Some(&(STREAM, Delivered::Message(attached))));
+        assert_eq!(
+            seen.len(),
+            5,
+            "a later instance never replaces the first: {seen:?}"
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+    }
+
+    #[test]
+    fn a_reconnect_to_another_instance_reports_that_instance_and_never_the_old_one() {
+        let mut rig = attached_rig(10);
+        write_daemon(&mut rig, started(10));
+        delivered_messages(&rig, 4);
+        let (outbound, attachments, terminals) = (
+            Arc::clone(&rig.outbound),
+            Arc::clone(&rig.attachments),
+            Arc::clone(&rig.terminals),
+        );
+        assert_eq!(end_session(rig), SessionEnd::Closed);
+        let (events, _published) = RecordingEvents::new();
+        let mut rig = start_on(events, outbound, attachments, terminals);
+        let request = watch_request(read_client(&mut rig.daemon));
+        let before = rig.terminals.deliveries().len();
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: Some(request),
+                ..list_of(Some("core-b"))
+            }),
+        );
+        wait_connection(&rig, up("core-b"));
+        let connections: Vec<Delivered> = rig.terminals.deliveries()[before - 1..]
+            .iter()
+            .filter(|(_, d)| matches!(d, Delivered::Connection(..)))
+            .map(|(_, d)| d.clone())
+            .collect();
+        assert_eq!(connections, [down(), up("core-b")]);
+        assert_eq!(end_session(rig), SessionEnd::Closed);
     }
 
     #[test]
@@ -974,7 +1241,7 @@ mod tests {
             attachment: AttachmentId(10),
         });
         assert_eq!(
-            delivered_messages(&rig, 4),
+            delivered_messages(&rig, 5),
             [
                 attached,
                 started(10),
@@ -984,7 +1251,8 @@ mod tests {
                 })
             ]
         );
-        assert_eq!(rig.terminals.deliveries()[0].1, Delivered::Connection(true));
+        assert_eq!(rig.terminals.deliveries()[0].1, down());
+        assert_eq!(rig.terminals.deliveries()[1].1, up(CORE_A));
         assert_eq!(end_session(rig), SessionEnd::Closed);
     }
 
@@ -994,7 +1262,7 @@ mod tests {
         write_daemon(&mut rig, started(10));
         write_daemon(&mut rig, output(10, 1, b"hi"));
         write_daemon(&mut rig, output(10, 2, b""));
-        let messages = delivered_messages(&rig, 5);
+        let messages = delivered_messages(&rig, 6);
         assert_eq!(messages[2..], [output(10, 1, b"hi"), output(10, 2, b"")]);
         assert_eq!(end_session(rig), SessionEnd::Closed);
     }
@@ -1004,7 +1272,7 @@ mod tests {
         let mut rig = attached_rig(10);
         write_daemon(&mut rig, started(10));
         write_daemon(&mut rig, output(10, 1, b"hi"));
-        delivered_messages(&rig, 4);
+        delivered_messages(&rig, 5);
         let first = sentinel(&rig);
         assert_eq!(watch_request(read_client(&mut rig.daemon)), first);
         let (outbound, attachments, terminals) = (
@@ -1026,7 +1294,7 @@ mod tests {
         let mut rig = attached_rig(10);
         write_daemon(&mut rig, started(10));
         write_daemon(&mut rig, output(10, 1, b"hi"));
-        delivered_messages(&rig, 4);
+        delivered_messages(&rig, 5);
         let (outbound, attachments, terminals) = (
             Arc::clone(&rig.outbound),
             Arc::clone(&rig.attachments),
@@ -1035,18 +1303,32 @@ mod tests {
         assert_eq!(end_session(rig), SessionEnd::Closed);
         assert_eq!(
             terminals.deliveries().last().map(|(_, d)| d.clone()),
-            Some(Delivered::Connection(false))
+            Some(down())
         );
         let (events, _published) = RecordingEvents::new();
         let mut rig = start_on(events, outbound, attachments, terminals);
-        watch_request(read_client(&mut rig.daemon));
+        let request = watch_request(read_client(&mut rig.daemon));
+        write_daemon(
+            &mut rig,
+            DaemonMessage::Terminals(Terminals {
+                request: Some(request),
+                ..list_of(Some(CORE_A))
+            }),
+        );
+        wait_connection(&rig, up(CORE_A));
         rig.attachments
-            .resume(&rig.outbound, STREAM, cursor(10, 1))
+            .resume(
+                &rig.outbound,
+                STREAM,
+                cursor(10, 1),
+                Some(CORE_A.to_string()),
+            )
             .expect("resume");
         let resume = match read_client(&mut rig.daemon) {
             ClientMessage::Resume(resume) => resume,
             other => panic!("expected resume, got {other:?}"),
         };
+        assert_eq!(resume.instance.as_deref(), Some(CORE_A));
         write_daemon(
             &mut rig,
             DaemonMessage::Gap(Gap {
@@ -1055,7 +1337,13 @@ mod tests {
             }),
         );
         rig.attachments
-            .attach(&rig.outbound, STREAM, TermId("t1".to_string()), options())
+            .attach(
+                &rig.outbound,
+                STREAM,
+                TermId("t1".to_string()),
+                options(),
+                None,
+            )
             .expect("attach");
         let attach = match read_client(&mut rig.daemon) {
             ClientMessage::Attach(attach) => attach.request,
@@ -1068,7 +1356,7 @@ mod tests {
                 attachment: AttachmentId(11),
             }),
         );
-        let messages = delivered_messages(&rig, 8);
+        let messages = delivered_messages(&rig, 9);
         assert_eq!(
             messages[3..],
             [
@@ -1094,7 +1382,7 @@ mod tests {
             reason: CloseReason::Exited,
         });
         write_daemon(&mut rig, closed.clone());
-        assert_eq!(delivered_messages(&rig, 4).last(), Some(&closed));
+        assert_eq!(delivered_messages(&rig, 5).last(), Some(&closed));
         rig.attachments.close_stream(&rig.outbound, STREAM);
         let after = sentinel(&rig);
         assert_eq!(
@@ -1111,7 +1399,7 @@ mod tests {
     fn an_old_sessions_end_does_not_clear_a_newer_session() {
         let (events, _published) = RecordingEvents::new();
         let mut old = start(events);
-        read_client(&mut old.daemon);
+        open_ready(&mut old, CORE_A);
         let (events, _published) = RecordingEvents::new();
         let mut new = start_on(
             events,
@@ -1119,21 +1407,21 @@ mod tests {
             Arc::clone(&old.attachments),
             Arc::clone(&old.terminals),
         );
-        read_client(&mut new.daemon);
-        let (attachments, terminals) = (Arc::clone(&new.attachments), Arc::clone(&new.terminals));
+        let request = watch_request(read_client(&mut new.daemon));
+        write_daemon(
+            &mut new,
+            DaemonMessage::Terminals(Terminals {
+                request: Some(request),
+                ..list_of(Some("core-b"))
+            }),
+        );
+        wait_connection(&new, up("core-b"));
+        let terminals = Arc::clone(&new.terminals);
+        let before = terminals.deliveries().len();
         assert_eq!(end_session(old), SessionEnd::Closed);
-        attachments.open_stream(STREAM, host_id(HOST_A));
-        assert!(!terminals
-            .deliveries()
-            .contains(&(STREAM, Delivered::Connection(false))));
-        assert_eq!(
-            terminals.deliveries().last(),
-            Some(&(STREAM, Delivered::Connection(true)))
-        );
+        assert_eq!(terminals.deliveries().len(), before);
+        assert_eq!(terminals.deliveries().last(), Some(&(STREAM, up("core-b"))));
         assert_eq!(end_session(new), SessionEnd::Closed);
-        assert_eq!(
-            terminals.deliveries().last(),
-            Some(&(STREAM, Delivered::Connection(false)))
-        );
+        assert_eq!(terminals.deliveries().last(), Some(&(STREAM, down())));
     }
 }

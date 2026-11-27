@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseTermId, type TermId } from '../../src/model/ids';
 import { TerminalController } from '../../src/panels/terminalController';
 import { fakeXtermFactory } from '../support/fakeXterm';
-import { HOST_ID, MemoryTerminalPort, type MemoryTerminalStream } from '../support/memoryTerminalPort';
+import {
+  HOST_ID,
+  MemoryTerminalPort,
+  type MemoryTerminalStream,
+  type SentCommand,
+} from '../support/memoryTerminalPort';
 import { ScriptedDaemon } from '../support/scriptedDaemon';
 
 const TERM: TermId = parseTermId('term-1');
@@ -147,6 +152,43 @@ describe('two panels over a scripted daemon', () => {
     expect(b.stream.commands('requestOwnership')).toEqual([]);
   });
 
+  it('two focused panels that saw the same vacant generation: the first claim wins and the second steals nothing', async () => {
+    const { daemon, port, a, b } = await twoPanels();
+    expect(daemon.ownerOf(TERM)).toBeNull();
+    const handle = port.onCommand;
+    if (handle === null) throw new Error('no daemon');
+    // Both claims are in flight before the daemon answers either: two clients saw no owner.
+    const held: [MemoryTerminalStream, SentCommand][] = [];
+    port.onCommand = (stream, command) => {
+      if (command.op === 'requestOwnership') held.push([stream, command]);
+      else handle(stream, command);
+    };
+    a.controller.setFocused(true);
+    b.controller.setFocused(true);
+    await settle(a, b);
+    expect(held.map(([, command]) => command)).toEqual([
+      { op: 'requestOwnership', attachment: '1', ifVacant: '0' },
+      { op: 'requestOwnership', attachment: '2', ifVacant: '0' },
+    ]);
+    port.onCommand = handle;
+    for (const [stream, command] of held) handle(stream, command);
+    await settle(a, b);
+    expect(daemon.ownerOf(TERM)).toBe('1');
+    expect(daemon.generation(TERM)).toBe('1');
+    expect(daemon.ptySize(TERM)).toEqual({ cols: 100, rows: 20 });
+    expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['self', 'other']);
+
+    b.controller.takeInput();
+    await settle(a, b);
+    expect(b.stream.commands('requestOwnership').at(-1)).toEqual({
+      op: 'requestOwnership',
+      attachment: '2',
+      ifVacant: null,
+    });
+    expect(daemon.ownerOf(TERM)).toBe('2');
+    expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['other', 'self']);
+  });
+
   it('only the owner forwards DECXCPR, and never from the replay stream', async () => {
     const { daemon, a, b } = await twoPanels();
     typeOn(a, 'x');
@@ -209,6 +251,22 @@ describe('two panels over a scripted daemon', () => {
     typeOn(b, 'z');
     await settle(a, b);
     expect(daemon.ownerOf(TERM)).toBe('4');
+    expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['other', 'self']);
+  });
+
+  it('only the focused panel claims', async () => {
+    const port = new MemoryTerminalPort();
+    const daemon = new ScriptedDaemon(port);
+    daemon.setScreen(TERM, 'prompt$ ');
+    const a = await openPanel(port, { width: 805, height: 349 });
+    const b = await openPanel(port, { width: 400, height: 170 });
+    b.controller.setFocused(true);
+    await settle(a, b);
+    expect(daemon.ownerOf(TERM)).toBe('2');
+    expect(daemon.ptySize(TERM)).toEqual({ cols: 50, rows: 10 });
+    expect(a.stream.commands('requestOwnership')).toEqual([]);
+    expect(a.stream.commands('resize')).toEqual([]);
+    expect(b.stream.commands('requestOwnership')).toHaveLength(1);
     expect([a, b].map((panel) => panel.controller.getView().ownership)).toEqual(['other', 'self']);
   });
 });

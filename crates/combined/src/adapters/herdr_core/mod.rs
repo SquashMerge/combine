@@ -28,7 +28,7 @@ use futures::stream::BoxStream;
 use serde_json::{json, Value};
 
 use self::attachment::Fidelities;
-use self::connection::{CallError, Connection};
+use self::connection::{CallError, Connection, Opened};
 use self::jsonrpc::{address_of, is_remote, term_id, Hello};
 use self::pair::{OpenError, OpenParams};
 use crate::model::{SpawnSpec, TermEvent, TermInfo};
@@ -80,11 +80,47 @@ struct Env {
     pub(super) fidelities: Mutex<Fidelities>,
     /// The core lists `automatic_input` among its features.
     pub(super) automatic_feature: bool,
+    /// The core's id when the backend started, if `hello` carried a usable one.
+    pub(super) core_id: Option<String>,
     #[cfg(feature = "test-support")]
     pub(super) control: Arc<control::Shared>,
 }
 
+/// Why a connection to the core didn't open.
+pub(super) enum OpenFailure {
+    Backend(BackendError),
+    /// The core answered, but it isn't the core this backend started with.
+    CoreChanged,
+}
+
 impl Env {
+    /// Opens a connection and checks that the core behind it is the one the backend started
+    /// with. A core whose state was wiped has a new id, and would hand out terminal IDs again.
+    async fn open(&self) -> Result<Opened, OpenFailure> {
+        let opened = Connection::open(&self.config.socket)
+            .await
+            .map_err(OpenFailure::Backend)?;
+        if opened.0.hello().core_id != self.core_id {
+            return Err(OpenFailure::CoreChanged);
+        }
+        Ok(opened)
+    }
+
+    /// The failure a caller of the backend sees. Nothing matches on its text.
+    fn core_changed(&self) -> BackendError {
+        BackendError::Failed(format!(
+            "herdr-core on {} is another core now",
+            self.config.socket.display()
+        ))
+    }
+
+    fn refusal(&self, failure: OpenFailure) -> BackendError {
+        match failure {
+            OpenFailure::Backend(error) => error,
+            OpenFailure::CoreChanged => self.core_changed(),
+        }
+    }
+
     fn watch_credit_stalled(&self) -> bool {
         #[cfg(feature = "test-support")]
         return self.control.watch_credit_stalled();
@@ -138,6 +174,7 @@ impl HerdrCoreBackend {
                 highest_ownership: Mutex::new(HashMap::new()),
                 fidelities: Mutex::new(Fidelities::default()),
                 automatic_feature: hello.has_feature("automatic_input"),
+                core_id: hello.core_id,
                 #[cfg(feature = "test-support")]
                 control: Arc::new(control::Shared::default()),
             }),
@@ -165,9 +202,12 @@ impl HerdrCoreBackend {
         let config = &self.env.config;
         let started = tokio::time::Instant::now();
         let (connection, _frames) = loop {
-            match Connection::open(&config.socket).await {
+            match self.env.open().await {
                 Ok(opened) => break opened,
-                Err(error) => {
+                Err(OpenFailure::CoreChanged) => {
+                    return Err(CallError::Failed(self.env.core_changed().to_string()));
+                }
+                Err(OpenFailure::Backend(error)) => {
                     if started.elapsed() >= config.control_connect_window {
                         return Err(CallError::Failed(error.to_string()));
                     }
@@ -195,6 +235,10 @@ fn capabilities(automatic: bool) -> Capabilities {
 impl TerminalBackend for HerdrCoreBackend {
     fn id(&self) -> &'static str {
         ID
+    }
+
+    fn instance(&self) -> Option<String> {
+        self.env.core_id.clone()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -270,12 +314,22 @@ impl TerminalBackend for HerdrCoreBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
+
+    use combine_protocol::Display;
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio::task::JoinHandle;
+
     use super::*;
 
     fn backend(features: &[&str]) -> HerdrCoreBackend {
         let hello = Hello {
             version: "0.1.21".to_string(),
             features: features.iter().map(|f| f.to_string()).collect(),
+            core_id: Some("core-a".to_string()),
         };
         HerdrCoreBackend::with_hello(HerdrCoreConfig::new("/nonexistent.sock".into()), hello)
     }
@@ -327,5 +381,222 @@ mod tests {
             backend.resolve(&id),
             Err(BackendError::RemoteTerminal(id.clone()))
         );
+    }
+
+    static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
+
+    /// `/tmp/cc-core-<pid>-<n>`, short enough for a socket path, removed on drop.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new() -> Dir {
+            let n = NEXT_DIR.fetch_add(1, Ordering::SeqCst);
+            let path = PathBuf::from(format!("/tmp/cc-core-{}-{n}", std::process::id()));
+            std::fs::create_dir(&path).expect("scratch directory");
+            Dir(path)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A core that answers `hello` with a core id the test can change, and the one call each
+    /// test needs. Its connections stay open until `drop_connections`.
+    struct ScriptedCore {
+        _dir: Dir,
+        socket: PathBuf,
+        core_id: Arc<Mutex<String>>,
+        connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+        accept: JoinHandle<()>,
+    }
+
+    impl ScriptedCore {
+        fn start(core_id: &str) -> ScriptedCore {
+            let dir = Dir::new();
+            let socket = dir.0.join("core.sock");
+            let listener = UnixListener::bind(&socket).expect("bind");
+            let core_id = Arc::new(Mutex::new(core_id.to_string()));
+            let connections = Arc::new(Mutex::new(Vec::new()));
+            let accept = tokio::spawn({
+                let core_id = Arc::clone(&core_id);
+                let connections = Arc::clone(&connections);
+                async move {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let id = core_id.lock().expect("core id").clone();
+                        let connection = tokio::spawn(serve(stream, id));
+                        connections.lock().expect("connections").push(connection);
+                    }
+                }
+            });
+            ScriptedCore {
+                _dir: dir,
+                socket,
+                core_id,
+                connections,
+                accept,
+            }
+        }
+
+        fn config(&self) -> HerdrCoreConfig {
+            let mut config = HerdrCoreConfig::new(self.socket.clone());
+            config.reopen_attempts = 3;
+            config.reopen_interval = Duration::from_millis(20);
+            config
+        }
+
+        fn become_core(&self, id: &str) {
+            *self.core_id.lock().expect("core id") = id.to_string();
+        }
+
+        fn drop_connections(&self) {
+            for connection in self.connections.lock().expect("connections").drain(..) {
+                connection.abort();
+            }
+        }
+    }
+
+    impl Drop for ScriptedCore {
+        fn drop(&mut self) {
+            self.accept.abort();
+            self.drop_connections();
+        }
+    }
+
+    async fn serve(mut stream: UnixStream, core_id: String) {
+        let mut byte = [0u8; 1];
+        while stream.read_exact(&mut byte).await.is_ok() && byte[0] != b'\n' {}
+        let hello = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "generation": 1,
+                "version": "0.1.21",
+                "framed": true,
+                "core": {"id": core_id, "name": "scripted"},
+                "methods": [
+                    "terminal.attach", "terminal.list", "terminal.run", "terminal.kill",
+                    "events.subscribe"
+                ],
+                "features": [],
+            }
+        });
+        let mut line = hello.to_string().into_bytes();
+        line.push(b'\n');
+        if stream.write_all(&line).await.is_err() {
+            return;
+        }
+        loop {
+            let mut header = [0u8; frame::HEADER_LEN];
+            if stream.read_exact(&mut header).await.is_err() {
+                return;
+            }
+            let length = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
+            let mut body = vec![0u8; length as usize];
+            if stream.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+                return;
+            };
+            let result = match request["method"].as_str() {
+                Some("terminal.list") => json!({"terminals": []}),
+                _ => json!({"seq": 0, "terminals": []}),
+            };
+            let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+            if stream
+                .write_all(&frame::rpc(reply.to_string().as_bytes()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    fn display() -> Display {
+        Display {
+            foreground: "#ffffff".to_string(),
+            background: "#000000".to_string(),
+            cursor_color: "#ffffff".to_string(),
+            cell_width: 9,
+            cell_height: 18,
+        }
+    }
+
+    async fn connected(core: &ScriptedCore) -> HerdrCoreBackend {
+        HerdrCoreBackend::connect(core.config())
+            .await
+            .expect("connect")
+    }
+
+    #[tokio::test]
+    async fn instance_is_the_core_id_at_start() {
+        let core = ScriptedCore::start("core-a");
+        let backend = connected(&core).await;
+        assert_eq!(backend.instance().as_deref(), Some("core-a"));
+        assert_eq!(backend.list().await, Ok(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn call_refuses_another_core_without_retrying() {
+        let core = ScriptedCore::start("core-a");
+        let backend = connected(&core).await;
+        core.become_core("core-b");
+        let started = Instant::now();
+        let result = backend.list().await;
+        assert!(matches!(result, Err(BackendError::Failed(_))), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(backend.instance().as_deref(), Some("core-a"));
+    }
+
+    #[tokio::test]
+    async fn attach_half_refuses_another_core() {
+        let core = ScriptedCore::start("core-a");
+        let backend = connected(&core).await;
+        core.become_core("core-b");
+        let display = display();
+        let params = OpenParams {
+            address: "t1",
+            size: (80, 24),
+            display: &display,
+            history: 0,
+            resumed: false,
+            watch_only: false,
+        };
+        let opened = pair::open(&backend.env, &params).await;
+        let Err(OpenError::Failed(BackendError::Failed(message))) = opened else {
+            panic!("the open must fail");
+        };
+        assert!(message.contains("another core"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn the_watch_ends_when_it_resubscribes_to_another_core() {
+        let core = ScriptedCore::start("core-a");
+        let backend = connected(&core).await;
+        let mut stream = backend.watch().await.expect("watch");
+        core.become_core("core-b");
+        core.drop_connections();
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends");
+        assert!(next.is_none(), "{next:?}");
+    }
+
+    #[tokio::test]
+    async fn the_watch_survives_the_same_core_reconnecting() {
+        let core = ScriptedCore::start("core-a");
+        let backend = connected(&core).await;
+        let mut stream = backend.watch().await.expect("watch");
+        core.drop_connections();
+        let next = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
+        assert!(next.is_err(), "the stream stays open: {next:?}");
     }
 }

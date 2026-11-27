@@ -343,6 +343,22 @@ fn bad_json_is_a_typed_error() {
 }
 
 #[test]
+fn a_backend_that_is_not_an_object_is_bad_json() {
+    for backend in [
+        serde_json::json!("backend-a"),
+        serde_json::json!(7),
+        serde_json::json!({"instance": "0123abcd"}),
+        serde_json::json!({"id": 3}),
+    ] {
+        let json = patched(&golden_json("terminals"), "/backend", Some(backend));
+        assert!(
+            is_bad_json(DaemonMessage::decode(&control_frame(&json))),
+            "{json}"
+        );
+    }
+}
+
+#[test]
 fn control_payload_that_is_not_an_object_has_a_fixed_detail() {
     assert_eq!(
         ClientMessage::decode(&control_frame("  [1]")),

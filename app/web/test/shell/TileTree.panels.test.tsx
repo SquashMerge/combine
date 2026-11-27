@@ -1,10 +1,9 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DecimalU64, HostId } from '../../src/model/ids';
-import { parseTermId } from '../../src/model/ids';
 import type { LayoutSnapshot } from '../../src/model/layout';
 import type { PanelList, PanelState, PanelSummary, SpacePanelsView } from '../../src/model/panels';
-import { TileTree, type TerminalMount } from '../../src/shell/TileTree';
+import { TileTree } from '../../src/shell/TileTree';
 import { fakeXtermFactory } from '../support/fakeXterm';
 import { MemoryPanelPort } from '../support/memoryPanelPort';
 import { HOST_ID, MemoryTerminalPort } from '../support/memoryTerminalPort';
@@ -12,11 +11,6 @@ import { installTerminalDom } from '../support/terminalDom';
 
 const HOST = HOST_ID as HostId;
 const SPACE = { hostId: HOST, path: '/work' };
-const MOUNT: TerminalMount = {
-  hostId: HOST_ID,
-  termId: parseTermId('term-1'),
-  label: { name: 'build', host: 'mini', state: 'running' },
-};
 
 function layout(panels: string[], active: string | null = panels[0] ?? null): LayoutSnapshot {
   return {
@@ -46,7 +40,7 @@ function view(panels: PanelSummary[], skipped: PanelList['skipped'] = [], listEr
 function mount(
   panelIds: string[],
   panels: SpacePanelsView | null,
-  options: { active?: string | null; focused?: string; terminal?: TerminalMount | null } = {},
+  options: { active?: string | null; focused?: string; } = {},
 ) {
   const port = new MemoryPanelPort();
   const element = (next: SpacePanelsView | null) => (
@@ -61,7 +55,6 @@ function mount(
       onSplit={vi.fn()}
       onClose={vi.fn()}
       terminalPort={new MemoryTerminalPort()}
-      terminal={options.terminal ?? null}
       createAdapter={fakeXtermFactory().factory}
       space={SPACE}
       panels={next}
@@ -142,24 +135,5 @@ describe('TileTree panel tabs', () => {
   it('shows a list error that is not the loading text', () => {
     mount(['a'], view([summary('a')], [], 'panels/ could not be read'));
     expect(screen.getByText('panels/ could not be read').getAttribute('role')).toBe('alert');
-  });
-
-  it('a_view_panel_wins_the_focused_tile_and_a_dangling_one_keeps_the_terminal', async () => {
-    const listed = view([summary('a', 'Alpha')]);
-    const first = mount(['a'], listed, { focused: 't1', terminal: MOUNT });
-    await act(async () => Promise.resolve());
-    expect(screen.queryByTestId('terminal-panel')).toBeNull();
-    expect(section().getAttribute('data-panel-id')).toBe('a');
-    first.rerender(view([summary('other')]));
-    await act(async () => Promise.resolve());
-    expect(screen.queryByTestId('terminal-panel')).not.toBeNull();
-    expect(section()).toBeNull();
-    first.rerender({ session: 0, connected: false, list: null });
-    await act(async () => Promise.resolve());
-    expect(screen.queryByTestId('terminal-panel')).not.toBeNull();
-    first.rerender(view([], [{ panel: 'a', reason: 'bad' }]));
-    await act(async () => Promise.resolve());
-    expect(screen.queryByTestId('terminal-panel')).toBeNull();
-    expect(body().textContent).toBe("Panel a isn't loaded: bad");
   });
 });

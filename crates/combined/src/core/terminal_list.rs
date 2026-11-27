@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use combine_protocol::{
-    RequestId, SpaceInfo, SpaceKind, TermId, TerminalInfo, TerminalState, Terminals,
+    BackendInfo, RequestId, SpaceInfo, SpaceKind, TermId, TerminalInfo, TerminalState, Terminals,
 };
 
 use super::spaces::Spaces;
@@ -15,6 +15,7 @@ use crate::ports::GitProbe;
 pub struct TerminalList {
     spaces: Spaces,
     terminals: Vec<TermInfo>,
+    backend: Option<BackendInfo>,
     changed: bool,
 }
 
@@ -23,8 +24,14 @@ impl TerminalList {
         TerminalList {
             spaces: Spaces::new(probe),
             terminals: Vec::new(),
+            backend: None,
             changed: false,
         }
+    }
+
+    /// Names the backend the snapshots report. It doesn't change what a watcher is owed.
+    pub fn set_backend(&mut self, backend: BackendInfo) {
+        self.backend = Some(backend);
     }
 
     /// Replaces the table with the backend's list, in its order. The first of any duplicate IDs wins.
@@ -40,7 +47,8 @@ impl TerminalList {
     }
 
     /// `Created` and `Changed` replace a known terminal in place and append an unknown one,
-    /// `Exited` keeps it with its exit code and `Lost` removes it. `Restarted` changes nothing.
+    /// `Exited` keeps it with its exit code and `Lost` removes it, whether it ran or had exited
+    /// (the backend removed it, so a pinned tab reads as gone). `Restarted` changes nothing.
     pub fn apply_event(&mut self, event: &TermEvent) {
         self.spaces.apply_event(event);
         match event {
@@ -112,6 +120,7 @@ impl TerminalList {
             request,
             terminals: self.terminals.iter().map(terminal_info).collect(),
             spaces: self.spaces.spaces().into_iter().map(space_info).collect(),
+            backend: self.backend.clone(),
         }
     }
 }

@@ -9,7 +9,10 @@ export interface UseTerminalPanelOptions {
   port: TerminalPort;
   hostId: HostId;
   termId: TermId;
+  /** The backend instance a pinned panel's terminal belongs to; `null` to follow the active terminal. */
+  instance: string | null;
   visible: boolean;
+  focused: boolean;
   createAdapter: XtermAdapterFactory;
 }
 
@@ -19,20 +22,23 @@ export interface TerminalPanelState {
   onContainerSize: (size: { width: number; height: number }) => void;
   takeInput: () => void;
   reattach: () => void;
+  retry: () => void;
 }
 
 /**
- * `hostId` and `termId` are fixed for the panel's lifetime: key the panel by them. The controller is created once and `stop()` is permanent, so never run this hook under React.StrictMode or a Fast Refresh double-mount.
+ * `hostId`, `termId` and `instance` are fixed for the panel's lifetime: key the panel by them. The controller is created once and `stop()` is permanent, so never run this hook under React.StrictMode or a Fast Refresh double-mount.
  */
 export function useTerminalPanel({
   port,
   hostId,
   termId,
+  instance,
   visible,
+  focused,
   createAdapter,
 }: UseTerminalPanelOptions): TerminalPanelState {
   const controllerRef = useRef<TerminalController | null>(null);
-  controllerRef.current ??= new TerminalController({ port, hostId, termId, createAdapter });
+  controllerRef.current ??= new TerminalController({ port, hostId, termId, instance, createAdapter });
   const controller = controllerRef.current;
   const hostElement = useRef<HTMLDivElement | null>(null);
 
@@ -43,7 +49,7 @@ export function useTerminalPanel({
   useEffect(() => {
     const element = hostElement.current;
     if (element === null) return;
-    controller.start(element).catch(() => undefined);
+    void controller.start(element);
     return () => {
       controller.stop().catch(() => undefined);
     };
@@ -52,6 +58,10 @@ export function useTerminalPanel({
   useEffect(() => {
     controller.setVisible(visible);
   }, [controller, visible]);
+
+  useEffect(() => {
+    controller.setFocused(focused);
+  }, [controller, focused]);
 
   const view = useSyncExternalStore(
     useCallback((listener) => controller.subscribe(listener), [controller]),
@@ -65,6 +75,7 @@ export function useTerminalPanel({
   );
   const takeInput = useCallback(() => controller.takeInput(), [controller]);
   const reattach = useCallback(() => controller.reattach(), [controller]);
+  const retry = useCallback(() => controller.retryStream(), [controller]);
 
-  return { view, hostRef, onContainerSize, takeInput, reattach };
+  return { view, hostRef, onContainerSize, takeInput, reattach, retry };
 }

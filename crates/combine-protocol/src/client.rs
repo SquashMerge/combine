@@ -32,20 +32,31 @@ pub struct AttachRequestOptions {
 
 /// A fresh attach. The daemon answers `attached` (before the attachment's first
 /// `started`) or an `error` naming this request.
+///
+/// `instance` is the backend instance the client expects `terminal` to belong to: a pinned
+/// panel names one, and the daemon refuses with `backend_mismatch` when its own differs. It is
+/// absent (and not serialized) for a panel that follows the active terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attach {
     pub request: RequestId,
     pub terminal: TermId,
     pub options: AttachRequestOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// Resumes an attachment from the last *applied* event. The daemon answers
 /// `resumed` before the first replayed event, or `gap` carrying this request
 /// when it cannot serve the resume exactly.
+///
+/// `instance` is as for [`Attach`]: a mismatch gets `backend_mismatch` before the attachment
+/// is looked up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resume {
     pub request: RequestId,
     pub cursor: Cursor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// Detaches. The daemon answers with the attachment's final `closed` event
@@ -87,9 +98,16 @@ pub struct SetDisplay {
 
 /// Asks for input ownership without typing. Typed input from a non-owner is
 /// itself the request.
+///
+/// With `if_vacant: None` (a manual "Take input") the daemon grants it whoever owns the
+/// terminal. With `if_vacant: Some(generation)` (a panel claiming a terminal it saw with no
+/// owner) the daemon grants it only if the terminal still has no owner and its ownership
+/// generation is still `generation`; otherwise the request does nothing, with no error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestOwnership {
     pub attachment: AttachmentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_vacant: Option<OwnershipGeneration>,
 }
 
 /// Subscribes the connection to the host's terminals and spaces. The daemon

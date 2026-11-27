@@ -209,6 +209,23 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
     .await?;
     attachment.detach().await.map_err(|e| e.to_string())?;
 
+    // An exited terminal the core removes leaves the list: the watch reports it `Lost`.
+    target.checked_status()?;
+    target
+        .probe()
+        .call(
+            "terminal.rm",
+            json!({"terminal": a.0.trim_start_matches("hc:")}),
+        )
+        .map_err(|e| e.to_string())?;
+    wait_for(
+        &mut events,
+        10,
+        "Lost(A) after it was removed",
+        |e| matches!(e, TermEvent::Lost { id } if *id == a),
+    )
+    .await?;
+
     let b = spawn_one(target, backend.as_ref(), "b").await;
     wait_for(
         &mut events,
@@ -217,6 +234,10 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
         |e| matches!(e, TermEvent::Created(i) if i.id == b),
     )
     .await?;
+    let instance = backend.instance();
+    if instance.is_none() {
+        return Err("the core named no backend instance".to_string());
+    }
     target
         .restart_backend()
         .await
@@ -228,6 +249,13 @@ async fn watch_scenario(target: &mut HerdrCoreTarget) -> Result<(), String> {
         |e| matches!(e, TermEvent::Restarted { id } if *id == b),
     )
     .await?;
+    backend
+        .list()
+        .await
+        .map_err(|e| format!("the same core refused a call after the restart: {e}"))?;
+    if backend.instance() != instance {
+        return Err("the backend instance changed across the restart".to_string());
+    }
 
     let meta = std::fs::read_to_string(format!("{FIXTURES}/meta.json"))
         .map_err(|_| "no meta.json: run `sh tools/verify-herdr-core --capture`".to_string())?;

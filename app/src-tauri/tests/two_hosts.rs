@@ -327,3 +327,28 @@ fn a_host_id_mismatch_is_refused() {
     service.stop();
     gamma.stop();
 }
+
+/// AC2/AC4 across the daemon and the app: the terminals list a daemon sends names its backend
+/// and that backend's instance, and the hosts snapshot the web client reads carries both.
+#[test]
+fn a_host_snapshot_names_the_daemon_backend_and_its_instance() {
+    let scratch = ScratchDir::new();
+    let mut alpha = Daemon::new(&scratch, "alpha", HOST_A);
+    let client_dir = scratch.path.join("client");
+    write_hosts(
+        &client_dir,
+        serde_json::json!([{ "name": "alpha", "socket": alpha.checked_socket() }]),
+    );
+    let service = start_service(&client_dir);
+
+    wait_for(&service, "alpha connected with its backend", |s| {
+        shows_space(s, "alpha", &alpha)
+            && host(s, "alpha")
+                .backend
+                .as_ref()
+                .is_some_and(|b| b.id == "fake" && b.instance.as_deref() == Some("fake-core"))
+    });
+
+    service.stop();
+    alpha.stop();
+}

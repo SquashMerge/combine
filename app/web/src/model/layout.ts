@@ -1,5 +1,6 @@
 import { type DecimalU64, ModelError, parseDecimalU64 } from './ids';
 import type { LayoutTile, LayoutTiles } from './clientState';
+import { type Dict, dictGet } from './dict';
 
 export type SplitDirection = 'h' | 'v';
 
@@ -189,6 +190,14 @@ export function opTiles(op: LayoutOp): string[] {
     case 'remove_panel':
       return [];
   }
+}
+
+/** The tab a tile shows: the stored choice, else the tile's own active tab, else its first. */
+export function shownTab(
+  tile: { id: string; panels: readonly string[]; active: string | null },
+  activeTabs: Readonly<Dict<string>>,
+): string | null {
+  return dictGet(activeTabs, tile.id) ?? tile.active ?? tile.panels[0] ?? null;
 }
 
 /** The ID of the tile whose panels hold the panel, or null when no tile does. */

@@ -147,6 +147,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
                     observe: false,
                     history: 1000,
                 },
+                instance: None,
             }),
             control_frame(&attach),
         ),
@@ -155,6 +156,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
             ClientMessage::Resume(Resume {
                 request: RequestId(2),
                 cursor: cursor(3, 41),
+                instance: None,
             }),
             control_frame(
                 r#"{"type":"resume","request":2,"cursor":{"attachment":7,"epoch":3,"seq":41}}"#,
@@ -205,6 +207,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
             "request_ownership",
             ClientMessage::RequestOwnership(RequestOwnership {
                 attachment: AttachmentId(7),
+                if_vacant: None,
             }),
             control_frame(r#"{"type":"request_ownership","attachment":7}"#),
         ),
@@ -553,6 +556,46 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
             }),
             control_frame(
                 r#"{"type":"panels","request":5,"space":"/Users/me/src/trellis","panels":[{"id":"classes","title":"Class diagram","renderer":"mermaid","revision":7,"state":"validated","error":null,"created_by":{"type":"agent","slot":"claude"},"lifetime":"persistent"},{"id":"flow","title":null,"renderer":"mermaid","revision":9,"state":"failed","error":{"code":"parse_error","message":"unexpected token","line":2,"column":11,"snippet":"  A -> B"},"created_by":{"type":"user"},"lifetime":"scratch"}],"skipped":[],"error":null}"#,
+            ),
+        ),
+        (
+            "terminals",
+            DaemonMessage::Terminals(Terminals {
+                request: Some(RequestId(7)),
+                terminals: vec![TerminalInfo {
+                    id: TermId(s("t8")),
+                    cwd: s("/Users/me/src/trellis"),
+                    argv: vec![s("zsh")],
+                    state: TerminalState::Running,
+                    exit_code: None,
+                    labels: Default::default(),
+                    cols: 80,
+                    rows: 24,
+                }],
+                spaces: vec![SpaceInfo {
+                    id: s("/Users/me/src/trellis"),
+                    kind: SpaceKind::Repository,
+                    terminals: vec![TermId(s("t8"))],
+                }],
+                backend: Some(BackendInfo {
+                    id: s("backend-a"),
+                    instance: Some(s("0123abcd")),
+                }),
+            }),
+            control_frame(
+                r#"{"type":"terminals","request":7,"terminals":[{"id":"t8","cwd":"/Users/me/src/trellis","argv":["zsh"],"state":"running","exit_code":null,"labels":{},"cols":80,"rows":24}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["t8"]}],"backend":{"id":"backend-a","instance":"0123abcd"}}"#,
+            ),
+        ),
+        (
+            "terminals_no_backend",
+            DaemonMessage::Terminals(Terminals {
+                request: None,
+                terminals: vec![],
+                spaces: vec![],
+                backend: None,
+            }),
+            control_frame(
+                r#"{"type":"terminals","request":null,"terminals":[],"spaces":[],"backend":null}"#,
             ),
         ),
         (

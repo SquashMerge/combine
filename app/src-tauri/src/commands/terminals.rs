@@ -32,8 +32,11 @@ const DATA_HEADER_LEN: usize = 24;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcTerminalEvent {
+    /// `instance` is the backend instance the connected session's daemon serves, or `null`
+    /// while not connected and for a daemon that names none.
     Connection {
         connected: bool,
+        instance: Option<String>,
     },
     Attached {
         request: DecimalU64,
@@ -171,8 +174,12 @@ fn data_frame(cursor: Cursor, bytes: &[u8]) -> Vec<u8> {
 
 fn body(delivery: &StreamDelivery<'_>) -> Option<InvokeResponseBody> {
     let event = match delivery {
-        StreamDelivery::Connection { connected } => IpcTerminalEvent::Connection {
+        StreamDelivery::Connection {
+            connected,
+            instance,
+        } => IpcTerminalEvent::Connection {
             connected: *connected,
+            instance: instance.map(str::to_string),
         },
         StreamDelivery::Message(DaemonMessage::Data(Data { cursor, bytes })) => {
             return Some(InvokeResponseBody::Raw(data_frame(*cursor, bytes)));
@@ -345,18 +352,27 @@ pub fn terminal_close_stream(
     Ok(())
 }
 
+/// `instance` names the backend instance a pinned panel expects, and is `null` for a panel
+/// that follows the active terminal.
 #[tauri::command]
 pub fn terminal_attach(
     service: State<'_, HostsService>,
     stream: String,
     terminal: String,
     options: Value,
+    instance: Option<String>,
 ) -> Result<(), String> {
     let stream = stream_id(&stream)?;
     let options: AttachRequestOptions = structured(options)?;
     service
         .attachments()
-        .attach(&service.outbound(), stream, TermId(terminal), options)
+        .attach(
+            &service.outbound(),
+            stream,
+            TermId(terminal),
+            options,
+            instance,
+        )
         .map_err(forward_error)
 }
 
@@ -365,12 +381,13 @@ pub fn terminal_resume(
     service: State<'_, HostsService>,
     stream: String,
     cursor: Value,
+    instance: Option<String>,
 ) -> Result<(), String> {
     let stream = stream_id(&stream)?;
     let cursor: IpcCursor = structured(cursor)?;
     service
         .attachments()
-        .resume(&service.outbound(), stream, cursor.into())
+        .resume(&service.outbound(), stream, cursor.into(), instance)
         .map_err(forward_error)
 }
 
@@ -448,11 +465,25 @@ pub fn terminal_request_ownership(
     service: State<'_, HostsService>,
     stream: String,
     attachment: String,
+    if_vacant: Option<String>,
 ) -> Result<(), String> {
-    let message = ClientMessage::RequestOwnership(RequestOwnership {
-        attachment: AttachmentId(parse_decimal(&attachment)?),
-    });
+    let message = request_ownership_message(&attachment, if_vacant.as_deref())?;
     send(&service, stream_id(&stream)?, message)
+}
+
+/// `if_vacant` is the ownership generation, a decimal string, under which a panel saw the
+/// terminal with no owner: its automatic claim. `None` is a manual "Take input".
+fn request_ownership_message(
+    attachment: &str,
+    if_vacant: Option<&str>,
+) -> Result<ClientMessage, String> {
+    Ok(ClientMessage::RequestOwnership(RequestOwnership {
+        attachment: AttachmentId(parse_decimal(attachment)?),
+        if_vacant: if_vacant
+            .map(parse_decimal)
+            .transpose()?
+            .map(OwnershipGeneration),
+    }))
 }
 
 /// Typed input: the body is the bytes, and the headers name the stream and the attachment.
@@ -548,6 +579,7 @@ mod tests {
                 Some(message) => StreamDelivery::Message(message),
                 None => StreamDelivery::Connection {
                     connected: ipc["connected"].as_bool().expect("connected"),
+                    instance: ipc["instance"].as_str(),
                 },
             };
             let body = body(&delivery).expect("a body");
@@ -627,20 +659,55 @@ mod tests {
             Ok(())
         });
         sink.channels().insert(5, channel);
-        sink.deliver(StreamId(6), StreamDelivery::Connection { connected: true });
+        let up = || StreamDelivery::Connection {
+            connected: true,
+            instance: Some("core-a"),
+        };
+        sink.deliver(StreamId(6), up());
         assert!(rx.try_recv().is_err());
-        sink.deliver(StreamId(5), StreamDelivery::Connection { connected: true });
+        sink.deliver(StreamId(5), up());
         let received = rx.try_recv().expect("delivered");
         assert_eq!(
             json_of(received),
-            json!({"type": "connection", "connected": true})
+            json!({"type": "connection", "connected": true, "instance": "core-a"})
         );
         sink.clear();
-        sink.deliver(StreamId(5), StreamDelivery::Connection { connected: false });
+        sink.deliver(
+            StreamId(5),
+            StreamDelivery::Connection {
+                connected: false,
+                instance: None,
+            },
+        );
         assert!(rx.try_recv().is_err());
     }
 
     const MAX: &str = "18446744073709551615";
+
+    #[test]
+    fn a_claim_names_the_generation_it_saw_vacant_and_a_manual_take_names_none() {
+        assert_eq!(
+            request_ownership_message("7", Some(MAX)),
+            Ok(ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: AttachmentId(7),
+                if_vacant: Some(OwnershipGeneration(u64::MAX)),
+            }))
+        );
+        assert_eq!(
+            request_ownership_message("7", None),
+            Ok(ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: AttachmentId(7),
+                if_vacant: None,
+            }))
+        );
+        for bad in ["", "-1", "1.5", "18446744073709551616", "07"] {
+            assert_eq!(
+                request_ownership_message("7", Some(bad)),
+                Err(MALFORMED.to_string()),
+                "{bad}"
+            );
+        }
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

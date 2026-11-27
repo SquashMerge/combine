@@ -215,6 +215,7 @@ fn attach(client: &mut WireClient, term: &TermId) -> AttachmentId {
         request: RequestId(1),
         terminal: term.clone(),
         options: request_options(80, 24, false),
+        instance: None,
     }));
     let mut attachment = None;
     loop {

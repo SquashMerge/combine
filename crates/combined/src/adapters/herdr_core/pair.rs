@@ -74,9 +74,10 @@ async fn attach_half(
     params: &OpenParams<'_>,
     display_half: bool,
 ) -> Result<(Viewer, jsonrpc::AttachResult), OpenError> {
-    let (connection, frames) = Connection::open(&env.config.socket)
+    let (connection, frames) = env
+        .open()
         .await
-        .map_err(OpenError::Failed)?;
+        .map_err(|failure| OpenError::Failed(env.refusal(failure)))?;
     let request = jsonrpc::attach_params(&AttachParams {
         address: params.address,
         cols: params.size.0,

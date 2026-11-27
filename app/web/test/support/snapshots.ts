@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  type BackendView,
   type ConnectionState,
   type HostView,
   type HostsSnapshot,
@@ -31,8 +32,11 @@ export function host(
   hostId: HostId | null,
   connection: ConnectionState,
   spaces: SpaceView[] = [],
+  backend?: BackendView | null,
 ): HostView {
-  return { name, hostId, connection, spaces };
+  return backend === undefined
+    ? { name, hostId, connection, spaces }
+    : { name, hostId, connection, spaces, backend };
 }
 
 export function snapshot(hosts: HostView[], revision = '1', error: string | null = null): HostsSnapshot {

@@ -410,8 +410,15 @@ pub async fn event_flood_ends_with_a_final_gap_once_drained<T: Target>(t: &mut T
         .last_applied
         .ok_or_else(|| Failure::new("harness", "nothing was applied"))?;
     let request = c.next_request();
-    h.send(&mut c, ClientMessage::Resume(Resume { request, cursor }))
-        .await?;
+    h.send(
+        &mut c,
+        ClientMessage::Resume(Resume {
+            request,
+            cursor,
+            instance: None,
+        }),
+    )
+    .await?;
     h.settle(&mut [&mut c]).await?;
     ensure!(
         "resume-gap",

@@ -20,8 +20,20 @@ export interface LayoutQueueOptions {
   newTileId?: () => string;
 }
 
+/**
+ * What the held layout must show for an intent to be sent: `tile` exists and, when `panel` is
+ * set, holds that panel. Checked before the first send and before a stale retry, so an intent
+ * made against a layout another client has since changed is dropped rather than applied to
+ * whatever the daemon finds.
+ */
+interface Requirement {
+  tile: string;
+  panel?: string;
+}
+
 interface Intent {
   ops: LayoutOp[];
+  requires: Requirement[];
   stale: boolean;
 }
 
@@ -63,8 +75,8 @@ export class LayoutQueue {
     this.newTileId = newTileId;
   }
 
-  enqueue(ops: LayoutOp[]): void {
-    this.intents.push({ ops, stale: false });
+  enqueue(ops: LayoutOp[], requires: Requirement[] = []): void {
+    this.intents.push({ ops, requires, stale: false });
     this.pump();
   }
 
@@ -80,6 +92,42 @@ export class LayoutQueue {
 
   addPanel(panel: string): void {
     this.enqueue([{ op: 'add_panel', panel, tile: null }]);
+  }
+
+  /**
+   * Puts the panel in the named tile. The tile must still exist: the daemon would put the panel
+   * in the first tile instead.
+   */
+  addPanelTo(panel: string, tile: string): void {
+    this.enqueue([{ op: 'add_panel', panel, tile }], [{ tile }]);
+  }
+
+  /** Splits `tile` to the right and puts the panel in the new tile, as one batch. */
+  openBeside(tile: string, panel: string): void {
+    const newTile = this.newTileId();
+    this.enqueue([
+      { op: 'split_tile', tile, dir: 'h', newTile, ratio: SPLIT_RATIO, panel: null },
+      { op: 'add_panel', panel, tile: newTile },
+    ]);
+  }
+
+  /**
+   * Adds `next` to the tile, then removes `previous`. Sent only while the tile still holds
+   * `previous`: once another client has moved it, or closed the tile, the batch would remove
+   * `previous` from wherever it went now, or put `next` in the first tile.
+   */
+  replacePanel(previous: string, next: string, tile: string): void {
+    this.enqueue(
+      [
+        { op: 'add_panel', panel: next, tile },
+        { op: 'remove_panel', panel: previous },
+      ],
+      [{ tile, panel: previous }],
+    );
+  }
+
+  movePanelTo(panel: string, toTile: string, index: number): void {
+    this.enqueue([{ op: 'move_panel', panel, toTile, index }]);
   }
 
   removePanel(panel: string): void {
@@ -155,7 +203,14 @@ export class LayoutQueue {
     const { held } = this;
     if (held === null) return;
     const tiles = layoutTiles(held.root);
-    if (!intent.ops.every((op) => opTiles(op).every((tile) => tiles.has(tile)))) {
+    const holds = ({ tile, panel }: Requirement): boolean => {
+      const found = tiles.get(tile);
+      return found !== undefined && (panel === undefined || found.panels.includes(panel));
+    };
+    if (
+      !intent.ops.every((op) => opTiles(op).every((tile) => tiles.has(tile))) ||
+      !intent.requires.every(holds)
+    ) {
       this.onNotice(STALE_NOTICE);
       return;
     }

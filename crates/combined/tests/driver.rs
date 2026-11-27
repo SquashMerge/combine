@@ -349,6 +349,7 @@ impl Env {
             request: RequestId(request),
             terminal: TermId(terminal.to_string()),
             options: request_options(80, 24, false),
+            instance: None,
         })
     }
 
@@ -504,6 +505,7 @@ fn disconnects_are_queued_for_the_caller() {
         request: RequestId(1),
         terminal: TermId("fake:1".into()),
         options: request_options(0, 0, false),
+        instance: None,
     });
     env.send(bad.clone());
     env.send(bad);
@@ -617,6 +619,7 @@ fn requesting_ownership_runs_the_grant_commands() {
     let id = env.attach(1);
     env.send(ClientMessage::RequestOwnership(RequestOwnership {
         attachment: id,
+        if_vacant: None,
     }));
     env.run();
     assert_eq!(
@@ -660,6 +663,7 @@ fn live_owner(env: &mut Env, n: u32) -> Live {
         .unwrap();
     env.send(ClientMessage::RequestOwnership(RequestOwnership {
         attachment: id,
+        if_vacant: None,
     }));
     env.run();
     env.pull();
@@ -1158,6 +1162,7 @@ fn reply(live: &Live, bytes: &str) -> ClientMessage {
 fn take_ownership(env: &mut Env, attachment: AttachmentId) -> OwnershipGeneration {
     env.send(ClientMessage::RequestOwnership(RequestOwnership {
         attachment,
+        if_vacant: None,
     }));
     env.run();
     let ownership = env
@@ -1311,9 +1316,11 @@ fn a_reply_batched_with_a_hand_off_and_regain_keeps_its_original_authorization()
     env.send(input(&a, "w1"));
     env.send(ClientMessage::RequestOwnership(RequestOwnership {
         attachment: b,
+        if_vacant: None,
     }));
     env.send(ClientMessage::RequestOwnership(RequestOwnership {
         attachment: a.id,
+        if_vacant: None,
     }));
     env.send(input(&a, "w2"));
     env.run();

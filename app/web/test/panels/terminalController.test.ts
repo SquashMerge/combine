@@ -11,6 +11,7 @@ import {
   MemoryTerminalPort,
   attachedEvent,
   closedEvent,
+  connectionEvent,
   cursor,
   dataEvent,
   errorEvent,
@@ -108,6 +109,7 @@ describe('terminalController attach and detach', () => {
           observe: false,
           history: TERMINAL_HISTORY_LINES,
         },
+        instance: null,
       },
     ]);
     expect(t.controller.getView().phase).toBe('attaching');
@@ -511,7 +513,7 @@ describe('terminalController status and lifetime', () => {
 
   it('events delivered before openStream resolves are handled in order', async () => {
     const t = rig();
-    t.port.onOpen = (stream) => stream.emit({ type: 'connection', connected: false });
+    t.port.onOpen = (stream) => stream.emit(connectionEvent(false));
     const starting = t.controller.start(t.host);
     t.controller.setVisible(true);
     await starting;
@@ -547,7 +549,7 @@ describe('terminalController resume', () => {
   it('resumes from the last applied cursor after a drop', async () => {
     const t = rig();
     await resumeAfterDrop(t, 2);
-    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2), instance: null }]);
     expect(t.stream().commands('attach')).toHaveLength(1);
     expect(t.controller.getView()).toMatchObject({ phase: 'resuming', hasInstance: true, stale: false });
     t.stream().emit(resumedEvent(2, 7, null));
@@ -567,7 +569,7 @@ describe('terminalController resume', () => {
     t.fake.instances[0]?.completeWrite();
     expect(t.stream().commands('resume')).toEqual([]);
     t.fake.instances[0]?.completeWrite();
-    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2) }]);
+    expect(t.stream().commands('resume')).toEqual([{ op: 'resume', cursor: cursor(7, 1, 2), instance: null }]);
     expect(t.controller.getView().phase).toBe('resuming');
     expect(t.stream().commands('attach')).toHaveLength(1);
   });
@@ -701,11 +703,11 @@ describe('terminalController resume', () => {
     const machine = new AttachmentMachine(TERM);
     const events = [attachedEvent(1, 7), startedEvent(cursor(7, 1, 0))];
     machine.handle({ kind: 'show' });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     for (const event of events) machine.handle({ kind: 'event', event });
     machine.handle({ kind: 'applied', cursor: cursor(7, 1, 0) });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: false } });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(false) });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     expect(machine.view().phase).toBe('resuming');
     expect(machine.isReplay(cursor(7, 1, 1))).toBe(false);
     machine.handle({ kind: 'event', event: resumedEvent(2, 7, cursor(7, 1, 2)) });
@@ -906,7 +908,7 @@ describe('terminalController ownership and resize', () => {
     expect(t.controller.getView().canTakeInput).toBe(true);
     t.controller.takeInput();
     expect(t.stream().commands('requestOwnership')).toEqual([
-      { op: 'requestOwnership', attachment: '7' },
+      { op: 'requestOwnership', attachment: '7', ifVacant: null },
     ]);
     t.stream().emit(ownershipEvent(7, 2, 7));
     expect(t.controller.getView().canTakeInput).toBe(false);
@@ -965,7 +967,7 @@ describe('terminalController ownership and resize', () => {
     const timerStarts = (effects: ReturnType<AttachmentMachine['handle']>): number =>
       effects.filter((effect) => effect.kind === 'startTimer' && effect.timer === 'resize').length;
     machine.handle({ kind: 'show' });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     machine.handle({ kind: 'event', event: attachedEvent(1, 7) });
     expect(timerStarts(machine.handle({ kind: 'event', event: ownershipEvent(7, 1, 7) }))).toBe(0);
     machine.handle({ kind: 'event', event: startedEvent(cursor(7, 1, 0)) });
@@ -981,7 +983,7 @@ describe('terminalController display facts', () => {
     const machine = new AttachmentMachine(TERM);
     machine.handle({ kind: 'cellSize', cell: { width: 9.4, height: 18.2 } });
     machine.handle({ kind: 'containerSize', width: 940, height: 364 });
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     const effects = machine.handle({ kind: 'show' });
     expect(effects).toContainEqual({
       kind: 'attach',
@@ -993,6 +995,7 @@ describe('terminalController display facts', () => {
         observe: false,
         history: TERMINAL_HISTORY_LINES,
       },
+      instance: null,
     });
   });
 
@@ -1021,7 +1024,7 @@ describe('terminalController display facts', () => {
     machine.handle({ kind: 'cellSize', cell: { width: 9, height: 18 } });
     expect(machine.view().phase).toBe('waiting');
     expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);
-    machine.handle({ kind: 'event', event: { type: 'connection', connected: true } });
+    machine.handle({ kind: 'event', event: connectionEvent(true) });
     expect(machine.view().phase).toBe('attaching');
     machine.handle({ kind: 'cellSize', cell: { width: 10, height: 18 } });
     expect(sentDisplay(machine.handle({ kind: 'timer', timer: 'display' }))).toBe(false);
@@ -1171,6 +1174,86 @@ describe('terminalController resize guards (test-verifier)', () => {
     expect(t.stream().commands('resize')).toEqual([
       { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
       { op: 'resize', attachment: '8', size: { cols: 100, rows: 20 }, ownershipGeneration: '1' },
+    ]);
+  });
+});
+
+describe('terminalController stream failure', () => {
+  it('a refused stream shows the failure and retry opens it', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.setVisible(true);
+    expect(t.controller.getView()).toMatchObject({
+      status: { kind: 'streamFailed', message: 'link down' },
+      canRetry: true,
+    });
+    expect(t.port.streams).toEqual([]);
+    t.controller.retryStream();
+    await flush();
+    expect(t.controller.getView()).toMatchObject({ status: null, canRetry: false });
+    expect(t.port.streams).toHaveLength(1);
+    expect(t.ops()).toEqual(['attach']);
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toHaveLength(1);
+  });
+
+  it('retry while the stream is opening does nothing', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.retryStream();
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toHaveLength(1);
+  });
+
+  it('a stopped controller never retries', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    await t.controller.stop();
+    t.controller.retryStream();
+    await flush();
+    expect(t.port.streams).toEqual([]);
+  });
+
+  it('events from a refused attempt are dropped', async () => {
+    const t = rig();
+    t.port.failNextOpen('link down');
+    await t.controller.start(t.host);
+    t.controller.setVisible(true);
+    const refused = t.port.refusedListeners[0];
+    if (refused === undefined) throw new Error('no refused attempt');
+    t.controller.retryStream();
+    await flush();
+    expect(t.controller.getView().connected).toBe(true);
+    refused(connectionEvent(false));
+    refused(attachedEvent(9, 99));
+    await flush();
+    expect(t.controller.getView().connected).toBe(true);
+    expect(t.controller.getView().phase).toBe('attaching');
+  });
+});
+
+describe('terminalController claim', () => {
+  it('a focused panel on a terminal with no owner stores its fit, then requests input', async () => {
+    const t = rig();
+    await t.controller.start(t.host);
+    t.controller.setContainerSize(800, 340);
+    t.controller.setFocused(true);
+    t.controller.setVisible(true);
+    t.stream().emit(attachedEvent(1, 7));
+    t.stream().emit(startedEvent(cursor(7, 1, 0)));
+    await Promise.resolve();
+    t.stream().emit(ownershipEvent(7, 3, null));
+    expect(t.stream().sent.map((command) => command.op).filter((op) => op !== 'attach')).toEqual([
+      'resize',
+      'requestOwnership',
+    ]);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 20 }, ownershipGeneration: '3' },
     ]);
   });
 });

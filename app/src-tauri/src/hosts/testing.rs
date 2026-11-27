@@ -28,7 +28,7 @@ use super::link::{
     ticking_reader, Closer, ConnectError, Connector, ExitInfo, ExitReport, FailureText, Link,
     TimedSocket,
 };
-use super::model::{ConnectionState, HostsSnapshot, SpaceView};
+use super::model::{BackendView, ConnectionState, HostsSnapshot, SpaceView};
 use super::panels::PanelReply;
 use super::service::SnapshotSink;
 use super::session::LayoutSink;
@@ -554,7 +554,7 @@ impl Clock for FakeClock {
 pub enum Event {
     Connection(String, ConnectionState),
     HostId(String, HostId),
-    Spaces(HostId, Vec<SpaceView>),
+    Spaces(HostId, Vec<SpaceView>, Option<BackendView>),
 }
 
 /// Sends every [`HostEvents`] call to a channel.
@@ -582,8 +582,8 @@ impl HostEvents for RecordingEvents {
         self.send(Event::HostId(name.to_string(), host_id.clone()));
     }
 
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>) {
-        self.send(Event::Spaces(host_id.clone(), spaces));
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+        self.send(Event::Spaces(host_id.clone(), spaces, backend));
     }
 }
 
@@ -638,7 +638,8 @@ impl LayoutSink for RecordingLayoutSink {
 /// What a [`RecordingTerminalSink`] was handed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivered {
-    Connection(bool),
+    /// Whether the session is ready, and the backend instance it named.
+    Connection(bool, Option<String>),
     Message(DaemonMessage),
 }
 
@@ -673,7 +674,10 @@ impl RecordingTerminalSink {
 impl TerminalSink for RecordingTerminalSink {
     fn deliver(&self, stream: StreamId, event: StreamDelivery<'_>) {
         let delivered = match event {
-            StreamDelivery::Connection { connected } => Delivered::Connection(connected),
+            StreamDelivery::Connection {
+                connected,
+                instance,
+            } => Delivered::Connection(connected, instance.map(str::to_string)),
             StreamDelivery::Message(message) => Delivered::Message(message.clone()),
         };
         lock(&self.seen).push((stream, delivered));

@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseTermId } from '../../src/model/ids';
-import { TerminalPanel } from '../../src/panels/TerminalPanel';
+import { GoneTerminal } from '../../src/panels/GoneTerminal';
+import { goneText } from '../../src/panels/panelText';
+import { TerminalPanel, type TerminalPanelProps } from '../../src/panels/TerminalPanel';
 import { fakeXtermFactory } from '../support/fakeXterm';
 import {
   HOST_ID,
@@ -35,8 +37,11 @@ interface Mounted {
   emit(...events: Parameters<MemoryTerminalStream['emit']>[0][]): Promise<void>;
 }
 
-async function mount(visible = true): Promise<Mounted> {
-  const port = new MemoryTerminalPort();
+async function mount(
+  visible = true,
+  extra: Partial<TerminalPanelProps> = {},
+  port = new MemoryTerminalPort(),
+): Promise<Mounted> {
   const fake = fakeXtermFactory();
   const element = (show: boolean) => (
     <TerminalPanel
@@ -46,6 +51,7 @@ async function mount(visible = true): Promise<Mounted> {
       visible={show}
       label={label}
       createAdapter={fake.factory}
+      {...extra}
     />
   );
   const view = render(element(visible));
@@ -111,7 +117,7 @@ describe('TerminalPanel', () => {
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     expect(t.stream().commands('requestOwnership')).toEqual([
-      { op: 'requestOwnership', attachment: '7' },
+      { op: 'requestOwnership', attachment: '7', ifVacant: null },
     ]);
     await t.emit(ownershipEvent(7, 2, 7));
     expect(button.disabled).toBe(true);
@@ -155,5 +161,142 @@ describe('TerminalPanel', () => {
     const panel = screen.getByTestId('terminal-panel');
     expect(panel.hidden).toBe(true);
     expect(panel.querySelector('.terminal-view')).not.toBeNull();
+  });
+
+  it('retry after a refused stream', async () => {
+    const port = new MemoryTerminalPort();
+    port.failNextOpen('link down');
+    const t = await mount(true, {}, port);
+    expect(screen.getByTestId('terminal-status').textContent).toBe(
+      "Couldn't open the terminal stream: link down",
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await flush();
+    expect(port.streams).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.queryByTestId('terminal-status')).toBeNull();
+    await goLive(t, 8);
+    expect(screen.getByText('input: another panel')).toBeTruthy();
+  });
+
+  it('no Retry button without a refused stream', async () => {
+    await mount();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('header shows the backend label', async () => {
+    await mount(true, { label: { ...label, backend: 'core-a' } });
+    expect(screen.getByTestId('terminal-backend').textContent).toBe('core-a');
+  });
+
+  it('dropdown switches terminals', async () => {
+    const onSwitch = vi.fn();
+    await mount(true, {
+      switcher: {
+        options: [
+          { id: 'term-1', label: 'build', disabled: false },
+          { id: 'term-2', label: 'logs', disabled: false },
+          { id: 'term-3', label: 'taken', disabled: true },
+        ],
+        onSwitch,
+        disabledTitle: 'Already open',
+      },
+    });
+    const select = screen.getByRole('combobox', { name: 'Terminal' }) as HTMLSelectElement;
+    expect(select.value).toBe('term-1');
+    const taken = screen.getByRole('option', { name: 'taken' }) as HTMLOptionElement;
+    expect(taken.disabled).toBe(true);
+    expect(taken.title).toBe('Already open');
+    fireEvent.change(select, { target: { value: 'term-2' } });
+    expect(onSwitch).toHaveBeenCalledWith('term-2');
+  });
+
+  it('without the new props the panel renders as before', async () => {
+    const t = await mount();
+    await goLive(t, null);
+    await t.emit(closedEvent(cursor(7, 1, 1), 'exited'));
+    const panel = screen.getByTestId('terminal-panel');
+    expect(panel.querySelector('.terminal-panel__backend')).toBeNull();
+    expect(panel.querySelector('select')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(
+      Array.from(panel.querySelectorAll('button')).map((button) => button.textContent),
+    ).toEqual(['Take input']);
+    expect(t.stream().commands('requestOwnership')).toEqual([]);
+    expect(t.stream().commands('resize')).toEqual([]);
+  });
+
+  it('an unfocused panel never claims a terminal with no owner', async () => {
+    const t = await mount();
+    await goLive(t, null);
+    expect(t.stream().commands('requestOwnership')).toEqual([]);
+  });
+
+  it('a focused panel claims a terminal with no owner', async () => {
+    const t = await mount(true, { focused: true });
+    await goLive(t, null);
+    expect(t.stream().commands('requestOwnership')).toEqual([
+      { op: 'requestOwnership', attachment: '7', ifVacant: '1' },
+    ]);
+  });
+
+  it('close shows only when exited', async () => {
+    const onClose = vi.fn();
+    const t = await mount(true, { onClose });
+    await goLive(t);
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+    await t.emit(closedEvent(cursor(7, 1, 1), 'exited'));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('close shows for an exited label and disables with its title', async () => {
+    await mount(true, {
+      onClose: vi.fn(),
+      label: { ...label, state: 'exited' },
+      closeDisabledTitle: 'Layout is held',
+    });
+    const button = screen.getByRole('button', { name: 'Close' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe('Layout is held');
+  });
+
+  it('a lost terminal shows no Close', async () => {
+    const t = await mount(true, { onClose: vi.fn() });
+    await goLive(t);
+    await t.emit(lostEvent(cursor(7, 1, 1)));
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+  });
+});
+
+describe('GoneTerminal', () => {
+  it('shows its message and a Close button, and attaches nothing', () => {
+    const onClose = vi.fn();
+    const port = new MemoryTerminalPort();
+    render(<GoneTerminal message={goneText('unlisted', 'term-9')} onClose={onClose} />);
+    expect(screen.getByTestId('gone-terminal-message').textContent).toBe(
+      'Terminal term-9 is gone. The host no longer lists it.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(port.streams).toEqual([]);
+  });
+
+  it('disables Close with its title', () => {
+    render(<GoneTerminal message="x" onClose={vi.fn()} disabledTitle="Layout is held" />);
+    const button = screen.getByRole('button', { name: 'Close' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe('Layout is held');
+  });
+
+  it('has the three exact texts', () => {
+    expect(goneText('unlisted', 't')).toBe('Terminal t is gone. The host no longer lists it.');
+    expect(goneText('backendGone', 't')).toBe(
+      'Terminal t is gone. It belonged to a terminal backend this host no longer runs.',
+    );
+    expect(goneText('noInstance', 't')).toBe(
+      "Terminal t can't be shown: the host doesn't say which terminal backend instance it runs.",
+    );
   });
 });

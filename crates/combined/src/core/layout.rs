@@ -118,14 +118,15 @@ impl From<InvalidId> for LayoutError {
     }
 }
 
-/// A new layout with a single empty tile, used until the first change is accepted.
+/// A new layout with a single tile holding the follow-active tab, used until the first change is
+/// accepted.
 pub fn default_layout() -> SpaceLayout {
     SpaceLayout {
         version: SUPPORTED_VERSION,
         root: SplitNode::Tile(Tile {
             id: TileId::main(),
-            panels: Vec::new(),
-            active: None,
+            panels: vec![PanelId::active_terminal()],
+            active: Some(PanelId::active_terminal()),
             extra: Map::new(),
         }),
         groups: Value::Array(Vec::new()),

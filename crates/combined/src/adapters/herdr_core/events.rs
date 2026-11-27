@@ -127,12 +127,12 @@ impl WatchState {
         events
     }
 
-    /// Reports every cached running terminal as lost and forgets them.
+    /// Reports every cached terminal as lost, exited ones included, and forgets them: once the
+    /// cache has forgotten an exited terminal, no later diff could take it out of the list.
     pub(super) fn lose_all(&mut self) -> Vec<TermEvent> {
         let events = self
             .cache
             .values()
-            .filter(|info| info.state == TermState::Running)
             .map(|info| TermEvent::Lost {
                 id: info.id.clone(),
             })
@@ -195,9 +195,11 @@ impl WatchState {
                 vec![TermEvent::Lost { id }]
             }
             "restarted" => vec![TermEvent::Restarted { id }],
+            // The core no longer has the terminal, running or exited: an exited one leaves the
+            // list too, so a pinned tab reads as gone rather than exited forever.
             "removed" => match self.cache.remove(address) {
-                Some(info) if info.state == TermState::Running => vec![TermEvent::Lost { id }],
-                _ => Vec::new(),
+                Some(_) => vec![TermEvent::Lost { id }],
+                None => Vec::new(),
             },
             "labels" => self.change(address, |info| {
                 let labels = data.get("labels").unwrap_or(data);
@@ -243,11 +245,8 @@ pub(super) fn diff(
     let mut events = Vec::new();
     for (address, old) in before {
         match after.get(address) {
-            None => {
-                if old.state == TermState::Running {
-                    events.push(TermEvent::Lost { id: old.id.clone() });
-                }
-            }
+            // Missing from the fresh snapshot: the core removed it, whether it ran or had exited.
+            None => events.push(TermEvent::Lost { id: old.id.clone() }),
             Some(new) => match (&old.state, &new.state) {
                 (TermState::Running, TermState::Exited { exit_code }) => {
                     events.push(TermEvent::Exited {
@@ -277,7 +276,11 @@ pub(super) fn diff(
 
 #[cfg(test)]
 mod tests {
+    use combine_protocol::{TermId, TerminalState};
+
     use super::*;
+    use crate::core::TerminalList;
+    use crate::ports::{GitEntry, GitProbe};
 
     const EVENTS: &str = include_str!("fixtures/events.jsonl");
     const SUBSCRIBE_1: &str = include_str!("fixtures/subscribe-1.json");
@@ -372,8 +375,9 @@ mod tests {
             .iter()
             .flat_map(|line| state.apply_line(line).events)
             .collect();
-        let [created, labelled, grown, restored, exited, created_b] = events.as_slice() else {
-            panic!("expected six events, got {events:?}");
+        let [created, labelled, grown, restored, exited, removed, created_b] = events.as_slice()
+        else {
+            panic!("expected seven events, got {events:?}");
         };
         assert!(matches!(created, TermEvent::Created(info)
             if info.id == term_id("t2") && info.state == TermState::Running));
@@ -384,6 +388,11 @@ mod tests {
             matches!(restored, TermEvent::Changed(info) if (info.cols, info.rows) == (200, 120))
         );
         assert!(matches!(exited, TermEvent::Exited { id, .. } if *id == term_id("t2")));
+        assert_eq!(
+            *removed,
+            TermEvent::Lost { id: term_id("t2") },
+            "an exited terminal the core removed leaves the list"
+        );
         assert!(matches!(created_b, TermEvent::Created(info) if info.id == term_id("t3")));
         assert!(
             !state.cache.contains_key("t2"),
@@ -440,6 +449,143 @@ mod tests {
         assert!(matches!(&events[0], TermEvent::Created(info) if info.id == term_id("t3")));
         assert_eq!(state.last_seq, fresh.seq);
         assert_eq!(state.cache.len(), 2);
+    }
+
+    /// The captured `created` → `finished` → `removed` of one terminal, through the daemon's
+    /// terminal list: it is listed running, then exited (its tab keeps its screen), then not at
+    /// all (its tab reads as gone).
+    #[test]
+    fn a_finished_then_removed_terminal_leaves_the_daemon_snapshot() {
+        let mut state = state_of(SUBSCRIBE_1);
+        let mut list = TerminalList::new(Box::new(NoGit));
+        list.apply_list(&state.cache.values().cloned().collect::<Vec<_>>());
+        let t2 = term_id("t2");
+        let state_of_t2 = |list: &TerminalList| {
+            list.snapshot(None)
+                .terminals
+                .into_iter()
+                .find(|terminal| terminal.id == t2)
+                .map(|terminal| terminal.state)
+        };
+        let mut seen = Vec::new();
+        for line in &subscriptions()[0] {
+            let kind = match parse_line(line) {
+                Line::Event { kind, .. } => kind,
+                _ => continue,
+            };
+            for event in state.apply_line(line).events {
+                list.apply_event(&event);
+            }
+            if ["created", "finished", "removed"].contains(&kind.as_str())
+                && line.contains("\"t2\"")
+            {
+                seen.push((kind, state_of_t2(&list)));
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                ("created".to_string(), Some(TerminalState::Running)),
+                ("finished".to_string(), Some(TerminalState::Exited)),
+                ("removed".to_string(), None),
+            ]
+        );
+        assert!(list
+            .snapshot(None)
+            .spaces
+            .iter()
+            .all(|space| !space.terminals.contains(&t2)));
+    }
+
+    #[test]
+    fn an_exited_terminal_missing_from_a_replacement_snapshot_is_removed() {
+        let mut exited = running("t2");
+        exited.state = TermState::Exited { exit_code: Some(0) };
+        let before: BTreeMap<String, TermInfo> = [
+            ("t1".to_string(), running("t1")),
+            ("t2".to_string(), exited.clone()),
+            ("t5".to_string(), {
+                let mut kept = running("t5");
+                kept.state = TermState::Exited { exit_code: None };
+                kept
+            }),
+        ]
+        .into_iter()
+        .collect();
+        let mut still = running("t5");
+        still.state = TermState::Exited { exit_code: None };
+        let after: BTreeMap<String, TermInfo> =
+            [("t1".to_string(), running("t1")), ("t5".to_string(), still)]
+                .into_iter()
+                .collect();
+        for mode in [DiffMode::Missed, DiffMode::Reconnect] {
+            let events = diff(&before, &after, mode);
+            assert!(
+                events.contains(&TermEvent::Lost { id: term_id("t2") }),
+                "{mode:?}: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, TermEvent::Lost { id } if *id != term_id("t2"))),
+                "{mode:?}: only the missing terminal is removed: {events:?}"
+            );
+        }
+
+        let mut state = WatchState {
+            last_seq: 0,
+            cache: before,
+        };
+        let mut list = TerminalList::new(Box::new(NoGit));
+        list.apply_list(&state.cache.values().cloned().collect::<Vec<_>>());
+        for event in state.reseed(
+            &Snapshot {
+                seq: 0,
+                channel: None,
+                terminals: after,
+            },
+            DiffMode::Reconnect,
+        ) {
+            list.apply_event(&event);
+        }
+        let ids: Vec<TermId> = list
+            .snapshot(None)
+            .terminals
+            .into_iter()
+            .map(|terminal| terminal.id)
+            .collect();
+        assert_eq!(ids, vec![term_id("t1"), term_id("t5")]);
+    }
+
+    #[test]
+    fn losing_the_core_removes_exited_terminals_too() {
+        let mut exited = running("t2");
+        exited.state = TermState::Exited { exit_code: Some(1) };
+        let mut state = WatchState {
+            last_seq: 0,
+            cache: [
+                ("t1".to_string(), running("t1")),
+                ("t2".to_string(), exited),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            state.lose_all(),
+            vec![
+                TermEvent::Lost { id: term_id("t1") },
+                TermEvent::Lost { id: term_id("t2") },
+            ]
+        );
+        assert!(state.cache.is_empty());
+    }
+
+    struct NoGit;
+
+    impl GitProbe for NoGit {
+        fn git_entry(&self, _dir: &str) -> GitEntry {
+            GitEntry::Absent
+        }
     }
 
     #[test]

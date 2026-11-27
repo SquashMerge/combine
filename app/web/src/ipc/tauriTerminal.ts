@@ -37,13 +37,24 @@ function decodeMessage(message: unknown) {
   return parseTerminalStreamEvent(message);
 }
 
+/**
+ * Lets a channel go after `open_stream` was refused: nothing reaches the listener any more, and
+ * the api forgets the channel's callback, which it would otherwise keep until Rust ended the
+ * channel, and Rust never does for a stream it didn't open. `cleanupCallback` is private in the
+ * api's typings, so it is called only if present.
+ */
+function releaseChannel(channel: Channel<unknown>): void {
+  channel.onmessage = () => undefined;
+  (channel as unknown as { cleanupCallback?: () => void }).cleanupCallback?.();
+}
+
 function createStream(stream: string): TerminalStream {
   return {
-    async attach(terminal, options) {
-      await invoke(TERMINAL_ATTACH_COMMAND, { stream, terminal, options });
+    async attach(terminal, options, instance) {
+      await invoke(TERMINAL_ATTACH_COMMAND, { stream, terminal, options, instance });
     },
-    async resume(cursor) {
-      await invoke(TERMINAL_RESUME_COMMAND, { stream, cursor });
+    async resume(cursor, instance) {
+      await invoke(TERMINAL_RESUME_COMMAND, { stream, cursor, instance });
     },
     async detach(attachment) {
       await invoke(TERMINAL_DETACH_COMMAND, { stream, attachment });
@@ -81,8 +92,8 @@ function createStream(stream: string): TerminalStream {
     async setDisplay(attachment, display) {
       await invoke(TERMINAL_SET_DISPLAY_COMMAND, { stream, attachment, display });
     },
-    async requestOwnership(attachment) {
-      await invoke(TERMINAL_REQUEST_OWNERSHIP_COMMAND, { stream, attachment });
+    async requestOwnership(attachment, ifVacant) {
+      await invoke(TERMINAL_REQUEST_OWNERSHIP_COMMAND, { stream, attachment, ifVacant });
     },
     async close() {
       await invoke(TERMINAL_CLOSE_STREAM_COMMAND, { stream });
@@ -112,7 +123,13 @@ export function createTauriTerminalPort(): TerminalPort {
           console.error(error);
         }
       };
-      const stream = await invoke<string>(TERMINAL_OPEN_STREAM_COMMAND, { hostId, channel });
+      let stream: string;
+      try {
+        stream = await invoke<string>(TERMINAL_OPEN_STREAM_COMMAND, { hostId, channel });
+      } catch (error) {
+        releaseChannel(channel);
+        throw error;
+      }
       return createStream(stream);
     },
   };

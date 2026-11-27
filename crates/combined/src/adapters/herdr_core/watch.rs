@@ -4,7 +4,9 @@
 //! A `missed` line means the subscriber fell behind: subscribe again on a new connection and
 //! report the difference. A lost connection waits one interval, subscribes again and reports
 //! the difference, with `Restarted` for every survivor. After the configured number of
-//! failures every cached running terminal is reported `Lost`, and the retries go on.
+//! failures every cached running terminal is reported `Lost`, and the retries go on. A
+//! subscription that finds another core behind the socket ends the stream instead: nothing the
+//! cache holds is true of that core.
 
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ use tokio::sync::mpsc;
 use super::connection::{reserve_slot, CallError, Connection};
 use super::events::{parse_snapshot, DiffMode, Snapshot, WatchState};
 use super::frame::{self, Frame, Kind};
-use super::Env;
+use super::{Env, OpenFailure};
 use crate::model::TermEvent;
 use crate::ports::{BackendError, BackendResult};
 
@@ -26,15 +28,18 @@ struct Subscription {
     snapshot: Snapshot,
 }
 
-async fn subscribe(env: &Env) -> BackendResult<Subscription> {
-    let (connection, frames) = Connection::open(&env.config.socket).await?;
+async fn subscribe(env: &Env) -> Result<Subscription, OpenFailure> {
+    let (connection, frames) = env.open().await?;
     let result = connection
         .call("events.subscribe", json!({}))
         .await
-        .map_err(|error: CallError| error.to_failure())?;
+        .map_err(|error: CallError| OpenFailure::Backend(error.to_failure()))?;
     env.record_subscribe(&result);
-    let snapshot = parse_snapshot(&result)
-        .ok_or_else(|| BackendError::Failed("unreadable events.subscribe result".to_string()))?;
+    let snapshot = parse_snapshot(&result).ok_or_else(|| {
+        OpenFailure::Backend(BackendError::Failed(
+            "unreadable events.subscribe result".to_string(),
+        ))
+    })?;
     Ok(Subscription {
         connection,
         frames,
@@ -51,7 +56,9 @@ enum Ended {
 
 /// Subscribes, seeds the cache from the snapshot (no events) and returns the stream.
 pub(super) async fn start(env: Arc<Env>) -> BackendResult<BoxStream<'static, TermEvent>> {
-    let first = subscribe(&env).await?;
+    let first = subscribe(&env)
+        .await
+        .map_err(|failure| env.refusal(failure))?;
     let mut state = WatchState::default();
     state.seed(&first.snapshot);
     let (tx, rx) = mpsc::unbounded_channel();
@@ -84,7 +91,8 @@ async fn run(
         subscription = loop {
             match subscribe(&env).await {
                 Ok(next) => break next,
-                Err(_) => {
+                Err(OpenFailure::CoreChanged) => return,
+                Err(OpenFailure::Backend(_)) => {
                     failures += 1;
                     if failures == env.config.reopen_attempts {
                         for event in state.lose_all() {
@@ -307,6 +315,7 @@ mod tests {
             highest_ownership: Mutex::new(HashMap::new()),
             fidelities: Mutex::new(Fidelities::default()),
             automatic_feature: false,
+            core_id: None,
             control: Arc::new(control::Shared::default()),
         };
         let mut state = WatchState::default();

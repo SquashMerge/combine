@@ -75,7 +75,7 @@ A stop that isn't SIGTERM or SIGINT (SIGKILL, a crash, power loss) is handled li
 
 The daemon owns each space's layout. Clients watch a space and change it with `mutate_layout` (`SPEC.md`, "Wire protocol" and "Persistence").
 
-- **File:** `<project>/.workspace/layout.json`, where `<project>` is the space's folder. The first write creates `.workspace/`, 500 ms to 2 s after the first accepted change, and a write that falls back never creates it. The daemon never overwrites a `layout.json` it can't parse; an invalid file shows an error in the client and the last good layout stays on screen.
+- **File:** `<project>/.workspace/layout.json`, where `<project>` is the space's folder. A fresh space starts with one tile, `main`, holding the follow-active tab `.active-terminal`; nothing is written until the first change. The first write creates `.workspace/`, 500 ms to 2 s after the first accepted change, and a write that falls back never creates it. The daemon never overwrites a `layout.json` it can't parse; an invalid file shows an error in the client and the last good layout stays on screen.
 - **Writes:** a change is written 500 ms after the latest one and at most 2 s after the first. A space switch, an unwatch, a client disconnect and a clean shutdown write at once, unless the file is invalid. A crash or SIGKILL loses a change still waiting.
 - **Outside edits:** edit `layout.json` by hand or with `git` while the daemon runs and it reloads the file. If you edit a field the daemon has an unsaved change to, your edit wins and the daemon drops its change, and the client shows a notice.
 - **Read-only projects:** if `.workspace/` can't be written, the layout is kept in `<daemon data>/spaces/<sha256 of the space's folder path>/layout.json` and the client marks the space read-only. That file then takes priority: delete it to go back to the project's `layout.json`. While it exists, edits to the project's file are ignored.
@@ -93,14 +93,14 @@ SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout chang
 
 ## Check the bridge over ssh
 
-This is a manual check. It is not part of the automated pass criteria: no automated test runs ssh or reads `~/.ssh`. `sh tools/verify-herdr-core` runs `combined connect` as a subprocess with piped stdio, which is what `ssh -T` runs on the far side. The general form is `ssh -T -o BatchMode=yes localhost <path>/combined connect`. Keep the daemon's `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`. With Remote Login on, this sends a `hello` for protocol version 5 through `combined connect` and prints the reply:
+This is a manual check. It is not part of the automated pass criteria: no automated test runs ssh or reads `~/.ssh`. `sh tools/verify-herdr-core` runs `combined connect` as a subprocess with piped stdio, which is what `ssh -T` runs on the far side. The general form is `ssh -T -o BatchMode=yes localhost <path>/combined connect`. Keep the daemon's `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`. With Remote Login on, this sends a `hello` for protocol version 6 through `combined connect` and prints the reply:
 
 ```sh
-printf '\000\000\000\046\001{"type":"hello","protocol_version":5}' \
+printf '\000\000\000\046\001{"type":"hello","protocol_version":6}' \
   | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
 ```
 
-Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":5}`. The reply is a control frame holding `{"type":"welcome","protocol_version":5,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":6}`. The reply is a control frame holding `{"type":"welcome","protocol_version":6,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Which ssh to use for the bridge
 

@@ -13,7 +13,7 @@ use crate::layout::LayoutSnapshot;
 use crate::mcp::Mcp;
 use crate::panels::{PanelError, PanelState, PanelSummary, Renderer};
 use crate::spawn::{SkippedPanel, TemplateInfo};
-use crate::terminals::{SpaceInfo, TerminalInfo};
+use crate::terminals::{BackendInfo, SpaceInfo, TerminalInfo};
 
 /// The daemon's answer to `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +105,9 @@ pub enum ErrorCode {
     UnknownCaller,
     /// Creating a panel would take its space past the panel limit.
     PanelLimit,
+    /// An `attach` or `resume` named a backend instance that isn't the daemon's. Sent in place
+    /// of `attached` or `resumed`; nothing was opened.
+    BackendMismatch,
     /// Anything else.
     Internal,
 }
@@ -137,6 +140,10 @@ pub struct Terminals {
     pub request: Option<RequestId>,
     pub terminals: Vec<TerminalInfo>,
     pub spaces: Vec<SpaceInfo>,
+    /// The backend that owns these terminals. `None` from a daemon that
+    /// doesn't say.
+    #[serde(default)]
+    pub backend: Option<BackendInfo>,
 }
 
 /// A space's layout. With `request: Some(..)` it answers a `watch_layout` or

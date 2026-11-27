@@ -7,7 +7,7 @@ use combine_protocol::*;
 use common::control_frame;
 
 const WATCH_JSON: &str = r#"{"type":"watch_terminals","request":7}"#;
-const TERMINALS_JSON: &str = r#"{"type":"terminals","request":7,"terminals":[{"id":"hc:t8","cwd":"/Users/me/src/trellis/crates","argv":["claude"],"state":"running","exit_code":null,"labels":{},"cols":120,"rows":40},{"id":"hc:t9","cwd":"/Users/me/src/trellis","argv":["zsh"],"state":"exited","exit_code":0,"labels":{"slot":"prime-1"},"cols":80,"rows":24}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["hc:t8","hc:t9"]}]}"#;
+const TERMINALS_JSON: &str = r#"{"type":"terminals","request":7,"terminals":[{"id":"hc:t8","cwd":"/Users/me/src/trellis/crates","argv":["claude"],"state":"running","exit_code":null,"labels":{},"cols":120,"rows":40},{"id":"hc:t9","cwd":"/Users/me/src/trellis","argv":["zsh"],"state":"exited","exit_code":0,"labels":{"slot":"prime-1"},"cols":80,"rows":24}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["hc:t8","hc:t9"]}],"backend":null}"#;
 
 fn terminals() -> Terminals {
     Terminals {
@@ -39,6 +39,7 @@ fn terminals() -> Terminals {
             kind: SpaceKind::Repository,
             terminals: vec![TermId("hc:t8".into()), TermId("hc:t9".into())],
         }],
+        backend: None,
     }
 }
 

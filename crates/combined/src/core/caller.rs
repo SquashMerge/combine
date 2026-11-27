@@ -17,7 +17,7 @@ pub enum CallerMatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCaller {
     pub space: SpaceId,
-    /// The caller's terminal slot: always `None` until terminal slots exist (M2-S8).
+    /// The caller's terminal slot: always `None`, since terminals have no slot (SPEC rev 34).
     pub slot: Option<String>,
     pub by: CallerMatch,
 }

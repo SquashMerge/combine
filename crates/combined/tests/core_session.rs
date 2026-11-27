@@ -88,6 +88,7 @@ impl Rig {
                 request: RequestId(request),
                 terminal: term(terminal),
                 options: request_options(80, 24, observe),
+                instance: None,
             }),
         );
         let commands = self.commands();
@@ -149,7 +150,10 @@ impl Rig {
     fn request_ownership(&mut self, connection: ConnectionId, id: AttachmentId) {
         self.send(
             connection,
-            ClientMessage::RequestOwnership(RequestOwnership { attachment: id }),
+            ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: id,
+                if_vacant: None,
+            }),
         );
     }
 
@@ -265,6 +269,7 @@ fn attached_comes_before_started_and_ownership_follows() {
             request: RequestId(11),
             terminal: term(1),
             options: request_options(80, 24, false),
+            instance: None,
         }),
     );
     let commands = rig.commands();
@@ -351,6 +356,7 @@ fn zero_size_attach_is_invalid_request() {
                 request: RequestId(3),
                 terminal: term(1),
                 options: request_options(cols, rows, false),
+                instance: None,
             }),
         );
         let messages = rig.pull(c);
@@ -395,6 +401,7 @@ fn error_messages_carry_no_peer_text() {
             request: RequestId(1),
             terminal: secret.clone(),
             options: request_options(80, 24, false),
+            instance: None,
         }),
     );
     let commands = rig.commands();
@@ -765,6 +772,7 @@ fn control_queue_overflow_disconnects() {
             request: RequestId(1),
             terminal: term(1),
             options: request_options(0, 0, false),
+            instance: None,
         })
     };
     for _ in 0..3 {
@@ -862,6 +870,7 @@ fn hand_off_skips_members_on_connections_marked_for_disconnect() {
             request: RequestId(9),
             terminal: term(1),
             options: request_options(0, 0, false),
+            instance: None,
         })
     };
     for _ in 0..3 {
@@ -903,6 +912,7 @@ fn overflow_during_announce_never_leaves_a_stale_owner() {
             request: RequestId(9),
             terminal: term(1),
             options: request_options(0, 0, false),
+            instance: None,
         })
     };
     for _ in 0..3 {
@@ -979,6 +989,7 @@ fn resume_on_a_new_connection_moves_the_attachment() {
         ClientMessage::Resume(Resume {
             request: RequestId(9),
             cursor: cursor(id, 1, 1),
+            instance: None,
         }),
     );
     let messages = rig.pull(c2);
@@ -1003,6 +1014,7 @@ fn resume_on_a_new_connection_moves_the_attachment() {
         ClientMessage::Resume(Resume {
             request: RequestId(10),
             cursor: cursor(id, 1, 1),
+            instance: None,
         }),
     );
     assert_eq!(
@@ -1025,6 +1037,7 @@ fn resume_of_unknown_attachment_is_gap_with_request() {
         ClientMessage::Resume(Resume {
             request: RequestId(5),
             cursor: cursor(AttachmentId(99), 1, 0),
+            instance: None,
         }),
     );
     assert_eq!(
@@ -1044,6 +1057,7 @@ fn resume_of_unknown_attachment_is_gap_with_request() {
         ClientMessage::Resume(Resume {
             request: RequestId(6),
             cursor: cursor(id, 1, 7),
+            instance: None,
         }),
     );
     assert_eq!(
@@ -1055,6 +1069,176 @@ fn resume_of_unknown_attachment_is_gap_with_request() {
     );
     assert!(rig.core.attachment_stats(id).is_none());
     assert_eq!(rig.commands(), [BackendCommand::Detach { attachment: id }]);
+}
+
+fn attach_naming(request: u64, terminal: u32, instance: Option<&str>) -> ClientMessage {
+    ClientMessage::Attach(Attach {
+        request: RequestId(request),
+        terminal: term(terminal),
+        options: request_options(80, 24, false),
+        instance: instance.map(str::to_string),
+    })
+}
+
+fn backend_mismatch(request: u64) -> DaemonMessage {
+    DaemonMessage::Error(ErrorMessage {
+        code: ErrorCode::BackendMismatch,
+        message: "the terminal belongs to another backend instance".to_string(),
+        request: Some(RequestId(request)),
+        attachment: None,
+    })
+}
+
+#[test]
+fn an_attach_naming_another_backend_instance_is_backend_mismatch() {
+    let mut rig = Rig::new();
+    rig.core.set_backend_instance(Some("core-b".to_string()));
+    let c = rig.core.connect();
+    rig.send(c, attach_naming(4, 1, Some("core-a")));
+    assert_eq!(rig.pull(c), [backend_mismatch(4)]);
+    assert!(rig.effects().is_empty(), "nothing may reach the backend");
+
+    rig.send(c, attach_naming(5, 1, Some("core-b")));
+    assert!(matches!(
+        rig.commands().as_slice(),
+        [BackendCommand::Attach { .. }]
+    ));
+    rig.send(c, attach_naming(6, 2, None));
+    assert!(matches!(
+        rig.commands().as_slice(),
+        [BackendCommand::Attach { .. }]
+    ));
+}
+
+#[test]
+fn an_attach_naming_an_instance_is_refused_by_a_backend_that_names_none() {
+    let mut rig = Rig::new();
+    let c = rig.core.connect();
+    rig.send(c, attach_naming(4, 1, Some("core-a")));
+    assert_eq!(rig.pull(c), [backend_mismatch(4)]);
+    assert!(rig.effects().is_empty());
+}
+
+#[test]
+fn a_resume_naming_the_same_instance_resumes_and_another_is_backend_mismatch() {
+    let mut rig = Rig::new();
+    rig.core.set_backend_instance(Some("core-a".to_string()));
+    let c1 = rig.core.connect();
+    let id = rig.open(c1, 1, false);
+    rig.event(id, 1, AttachEvent::Data(b"hello".to_vec()));
+    rig.pull(c1);
+    rig.core.disconnect(c1, rig.now());
+
+    let c2 = rig.core.connect();
+    rig.send(
+        c2,
+        ClientMessage::Resume(Resume {
+            request: RequestId(9),
+            cursor: cursor(id, 1, 1),
+            instance: Some("core-b".to_string()),
+        }),
+    );
+    assert_eq!(rig.pull(c2), [backend_mismatch(9)]);
+    assert!(rig.effects().is_empty());
+    assert!(
+        rig.core.attachment_stats(id).is_some(),
+        "a refused resume leaves the attachment in its grace period"
+    );
+
+    rig.send(
+        c2,
+        ClientMessage::Resume(Resume {
+            request: RequestId(10),
+            cursor: cursor(id, 1, 1),
+            instance: Some("core-a".to_string()),
+        }),
+    );
+    let messages = rig.pull(c2);
+    assert_eq!(names(&messages), ["resumed", "ownership"]);
+}
+
+fn claim(rig: &mut Rig, connection: ConnectionId, id: AttachmentId, seen: OwnershipGeneration) {
+    rig.send(
+        connection,
+        ClientMessage::RequestOwnership(RequestOwnership {
+            attachment: id,
+            if_vacant: Some(seen),
+        }),
+    );
+}
+
+#[test]
+fn of_two_claims_on_the_same_vacant_generation_only_the_first_is_granted() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    assert_eq!(rig.owner(1), None);
+    let seen = rig.generation(1);
+
+    claim(&mut rig, c1, a, seen);
+    assert_eq!(rig.owner(1), Some(a));
+    let granted = rig.generation(1);
+    rig.pull(c1);
+    rig.pull(c2);
+    rig.effects();
+
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(rig.owner(1), Some(a), "the second claim must not steal");
+    assert_eq!(
+        rig.generation(1),
+        granted,
+        "a refused claim takes no generation"
+    );
+    assert!(rig.pull(c1).is_empty());
+    assert!(
+        rig.pull(c2).is_empty(),
+        "a refused claim is answered with nothing"
+    );
+    assert!(
+        rig.effects().is_empty(),
+        "a refused claim resizes and focuses nothing"
+    );
+}
+
+#[test]
+fn a_manual_request_still_takes_ownership_from_an_owner() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    let seen = rig.generation(1);
+    claim(&mut rig, c1, a, seen);
+    assert_eq!(rig.owner(1), Some(a));
+    rig.request_ownership(c2, b);
+    assert_eq!(rig.owner(1), Some(b));
+}
+
+#[test]
+fn a_claim_after_someone_typed_or_at_an_older_vacant_generation_does_nothing() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    let seen = rig.generation(1);
+    rig.input(c1, a, b"x");
+    assert_eq!(rig.owner(1), Some(a));
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(rig.owner(1), Some(a));
+
+    // The owner leaves with nobody focused to inherit: no owner again, at a newer generation.
+    rig.core.disconnect(c1, rig.now());
+    assert_eq!(rig.owner(1), None);
+    let vacant = rig.generation(1);
+    assert_ne!(vacant, seen);
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(
+        rig.owner(1),
+        None,
+        "a claim must name the current generation"
+    );
+    claim(&mut rig, c2, b, vacant);
+    assert_eq!(rig.owner(1), Some(b));
 }
 
 #[test]
@@ -1077,6 +1261,7 @@ fn pull_puts_control_before_stream_and_round_robins() {
             request: RequestId(1),
             terminal: term(1),
             options: request_options(0, 1, false),
+            instance: None,
         }),
     );
     let first = rig.core.pull(c, 0, rig.now());
@@ -1171,6 +1356,47 @@ fn stale_or_future_resize_is_stale_generation() {
         }),
     );
     assert_eq!(error_of(&rig.pull(c)[0]).code, ErrorCode::UnknownAttachment);
+}
+
+#[test]
+fn a_non_owner_resize_is_applied_on_its_grant() {
+    let mut rig = Rig::new();
+    let c = rig.core.connect();
+    let id = rig.open(c, 1, false);
+    rig.effects();
+    rig.pull(c);
+    assert_eq!(rig.owner(1), None);
+    let generation = rig.generation(1);
+
+    rig.send(
+        c,
+        ClientMessage::Resize(Resize {
+            attachment: id,
+            cols: 120,
+            rows: 40,
+            ownership_generation: generation,
+        }),
+    );
+    assert!(rig.pull(c).is_empty());
+    assert!(
+        rig.commands()
+            .iter()
+            .all(|command| !matches!(command, BackendCommand::Resize { .. })),
+        "a non-owner's resize reached the terminal before its grant"
+    );
+
+    rig.request_ownership(c, id);
+    assert_eq!(rig.owner(1), Some(id));
+    let commands = rig.commands();
+    assert!(
+        commands.contains(&BackendCommand::Resize {
+            ownership: rig.generation(1),
+            attachment: id,
+            cols: 120,
+            rows: 40
+        }),
+        "{commands:?}"
+    );
 }
 
 #[test]
@@ -1428,6 +1654,7 @@ fn connection_drop_hands_off_ownership() {
         ClientMessage::Resume(Resume {
             request: RequestId(2),
             cursor: cursor(a, 1, 0),
+            instance: None,
         }),
     );
     let messages = rig.pull(c3);
@@ -1731,6 +1958,7 @@ fn resume_with_nothing_to_replay_grants_credit_back() {
         ClientMessage::Resume(Resume {
             request: RequestId(2),
             cursor: last,
+            instance: None,
         }),
     );
     let messages = rig.pull(c2);

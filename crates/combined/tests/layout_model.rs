@@ -3,7 +3,7 @@
 use combined::core::{
     default_layout, encode_layout, parse_layout, validate_layout, LayoutError, LAYOUT_MAX_BYTES,
 };
-use combined::model::{PanelId, SplitNode, TileId};
+use combined::model::{PanelId, SplitNode, TileId, ACTIVE_TERMINAL_TAB};
 use serde_json::{json, Value};
 
 fn load(value: &Value) -> Result<combined::model::SpaceLayout, LayoutError> {
@@ -96,15 +96,17 @@ fn dangling_panel_ids_preserved() {
 }
 
 #[test]
-fn default_layout_is_single_empty_tile() {
+fn default_layout_holds_the_follow_active_tab() {
     let layout = default_layout();
     validate_layout(&layout).unwrap();
     let SplitNode::Tile(root) = &layout.root else {
         panic!("root should be a tile");
     };
     assert_eq!(root.id.as_str(), "main");
-    assert!(root.panels.is_empty());
-    assert_eq!(root.active, None);
+    assert_eq!(root.panels, vec![PanelId::active_terminal()]);
+    assert_eq!(root.active, Some(PanelId::active_terminal()));
+    assert_eq!(ACTIVE_TERMINAL_TAB, ".active-terminal");
+    assert_eq!(PanelId::active_terminal().as_str(), ACTIVE_TERMINAL_TAB);
     assert_eq!(layout.groups, json!([]));
 }
 

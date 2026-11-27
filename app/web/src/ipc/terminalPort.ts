@@ -17,8 +17,13 @@ export type TerminalStreamListener = (event: TerminalStreamEvent) => void;
  * Any other rejection is a transport fault.
  */
 export interface TerminalStream {
-  attach(terminal: TermId, options: AttachRequestOptions): Promise<void>;
-  resume(cursor: Cursor): Promise<void>;
+  /**
+   * `instance` is the backend instance a pinned panel expects its terminal to belong to; the
+   * daemon refuses with `backend_mismatch` when its own differs. `null` for a panel that follows
+   * the active terminal.
+   */
+  attach(terminal: TermId, options: AttachRequestOptions, instance: string | null): Promise<void>;
+  resume(cursor: Cursor, instance: string | null): Promise<void>;
   detach(attachment: DecimalU64): Promise<void>;
   ack(cursor: Cursor): Promise<void>;
   input(attachment: DecimalU64, bytes: Uint8Array): Promise<void>;
@@ -35,7 +40,11 @@ export interface TerminalStream {
   ): Promise<void>;
   focus(attachment: DecimalU64): Promise<void>;
   setDisplay(attachment: DecimalU64, display: Display): Promise<void>;
-  requestOwnership(attachment: DecimalU64): Promise<void>;
+  /**
+   * `ifVacant` is the ownership generation under which the panel saw no owner: the daemon grants
+   * the request only if the terminal still has no owner under it. `null` always takes ownership.
+   */
+  requestOwnership(attachment: DecimalU64, ifVacant: DecimalU64 | null): Promise<void>;
   /** Ends the panel stream. */
   close(): Promise<void>;
 }

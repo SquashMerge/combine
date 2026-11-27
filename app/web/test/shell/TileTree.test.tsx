@@ -25,7 +25,6 @@ function mount(layout: LayoutSnapshot, notice: string | null = null) {
     onSplit: vi.fn(),
     onClose: vi.fn(),
     terminalPort: new MemoryTerminalPort(),
-    terminal: null,
   };
   render(
     <TileTree
@@ -96,7 +95,6 @@ describe('TileTree with tile IDs that name inherited properties', () => {
     onSplit: vi.fn(),
     onClose: vi.fn(),
     terminalPort: new MemoryTerminalPort(),
-    terminal: null,
   });
 
   it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
@@ -169,7 +167,6 @@ describe('TileTree panel controls', () => {
         onSplit={onSplit}
         onClose={onClose}
         terminalPort={new MemoryTerminalPort()}
-        terminal={null}
         space={{ hostId: 'h' as never, path: '/work' }}
         panelPort={new MemoryPanelPort()}
         panels={{

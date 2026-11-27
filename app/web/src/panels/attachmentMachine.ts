@@ -22,10 +22,13 @@ export const DISPLAY_DEBOUNCE_MS = 250;
 export type Phase = 'hidden' | 'waiting' | 'attaching' | 'resuming' | 'live' | 'detaching' | 'ended';
 export type TimerName = 'ack' | 'resize' | 'display';
 export type PanelStatus =
+  /** A pinned panel's terminal belongs to a backend instance the host no longer serves. */
+  | { kind: 'gone'; reason: 'backendGone' }
   | { kind: 'exited' }
   | { kind: 'lost' }
   | { kind: 'closed' }
-  | { kind: 'error'; code: string };
+  | { kind: 'error'; code: string }
+  | { kind: 'streamFailed'; message: string };
 
 export type MachineInput =
   | { kind: 'show' }
@@ -40,12 +43,15 @@ export type MachineInput =
   | { kind: 'containerSize'; width: number; height: number }
   | { kind: 'cellSize'; cell: CellSize }
   | { kind: 'takeInput' }
+  | { kind: 'focused'; focused: boolean }
+  | { kind: 'streamFailed'; message: string }
+  | { kind: 'retryStream' }
   | { kind: 'reattach' }
   | { kind: 'timer'; timer: TimerName };
 
 export type MachineEffect =
-  | { kind: 'attach'; terminal: TermId; options: AttachRequestOptions }
-  | { kind: 'resume'; cursor: Cursor }
+  | { kind: 'attach'; terminal: TermId; options: AttachRequestOptions; instance: string | null }
+  | { kind: 'resume'; cursor: Cursor; instance: string | null }
   | { kind: 'detach'; attachment: DecimalU64 }
   | { kind: 'ack'; cursor: Cursor }
   | { kind: 'input'; attachment: DecimalU64; bytes: Uint8Array }
@@ -64,7 +70,11 @@ export type MachineEffect =
     }
   | { kind: 'focus'; attachment: DecimalU64 }
   | { kind: 'setDisplay'; attachment: DecimalU64; display: Display }
-  | { kind: 'requestOwnership'; attachment: DecimalU64 }
+  /**
+   * `ifVacant` is the generation under which an automatic claim saw no owner: the daemon grants
+   * it only if that is still so. `null` is a manual "Take input", which always takes ownership.
+   */
+  | { kind: 'requestOwnership'; attachment: DecimalU64; ifVacant: DecimalU64 | null }
   /** Disposes the current instance (WebGL addon first), creates one, then inputs `applied`. */
   | { kind: 'createInstance'; size: TerminalSize; cursor: Cursor }
   | { kind: 'disposeInstance' }
@@ -91,6 +101,7 @@ export interface PanelView {
   unorderedResizes: boolean;
   canTakeInput: boolean;
   canReattach: boolean;
+  canRetry: boolean;
 }
 
 /** A FIFO that never copies on `shift`: replays can queue 16,384 events. */
@@ -143,8 +154,13 @@ interface SentResize {
 /** Codes of `error{attachment}` that are not failures: the owner re-sends after the next ownership. */
 const IGNORED_ATTACHMENT_ERRORS = new Set(['stale_generation', 'unknown_attachment']);
 
+/** The daemon's refusal of an attach or resume that names another backend instance. */
+const BACKEND_MISMATCH = 'backend_mismatch';
+const BACKEND_GONE: PanelStatus = { kind: 'gone', reason: 'backendGone' };
+
 export class AttachmentMachine {
   private visible = false;
+  private focused = false;
   private connected = false;
   private phase: Phase = 'hidden';
   private attachment: DecimalU64 | null = null;
@@ -167,15 +183,27 @@ export class AttachmentMachine {
   private cell: CellSize = DEFAULT_CELL;
   private sentDisplay: Display | null = null;
   private sentResize: SentResize | null = null;
+  private claimedGeneration: DecimalU64 | null = null;
   private effects: MachineEffect[] = [];
 
-  constructor(private readonly terminal: TermId) {}
+  /**
+   * `backendInstance` is the backend instance a pinned panel's terminal belongs to, or `null` for a
+   * panel that follows the active terminal. A pinned panel counts as connected only while the
+   * session's daemon serves that instance, so it never attaches or resumes on another core's
+   * terminal that reuses the ID; its attach and resume also name the instance, for the daemon
+   * to check.
+   */
+  constructor(
+    private readonly terminal: TermId,
+    private readonly backendInstance: string | null = null,
+  ) {}
 
   handle(input: MachineInput): MachineEffect[] {
     this.effects = [];
     this.step(input);
     this.advance();
     this.maybeResume();
+    this.maybeClaim();
     return this.effects;
   }
 
@@ -209,6 +237,7 @@ export class AttachmentMachine {
       unorderedResizes: !this.orderedResizes,
       canTakeInput: this.phase === 'live' && this.connected && !isOwner,
       canReattach: this.phase === 'ended' && this.status?.kind === 'lost',
+      canRetry: this.status?.kind === 'streamFailed',
     };
   }
 
@@ -309,6 +338,15 @@ export class AttachmentMachine {
         return this.onDomFocus();
       case 'takeInput':
         return this.onTakeInput();
+      case 'focused':
+        this.focused = input.focused;
+        return;
+      case 'streamFailed':
+        this.status = { kind: 'streamFailed', message: input.message };
+        return;
+      case 'retryStream':
+        if (this.status?.kind === 'streamFailed') this.status = null;
+        return;
     }
   }
 
@@ -353,8 +391,52 @@ export class AttachmentMachine {
 
   private onTakeInput(): void {
     if (this.phase === 'live' && this.connected && this.attachment !== null && !this.isOwner()) {
-      this.effects.push({ kind: 'requestOwnership', attachment: this.attachment });
+      this.requestInput(this.attachment, null);
     }
+  }
+
+  /**
+   * Sends the fit as this attachment's resize first, so the daemon stores it and applies it on
+   * the grant, then asks for input. `ifVacant` makes the request conditional (see the effect).
+   */
+  private requestInput(attachment: DecimalU64, ifVacant: DecimalU64 | null): void {
+    if (this.ownership !== null && this.container !== null) {
+      const fit = fitGrid(this.container, this.cell);
+      if (fit !== null) {
+        const generation = this.ownership.generation;
+        this.sentResize = { size: fit, generation };
+        this.effects.push({
+          kind: 'resize',
+          attachment,
+          size: fit,
+          ownershipGeneration: generation,
+        });
+      }
+    }
+    this.effects.push({ kind: 'requestOwnership', attachment, ifVacant });
+  }
+
+  /**
+   * A focused live panel claims a terminal that has no owner, once per ownership generation. The
+   * claim names that generation, so it can't take ownership from a viewer that acquired it since.
+   */
+  private maybeClaim(): void {
+    if (
+      !this.visible ||
+      !this.focused ||
+      this.phase !== 'live' ||
+      !this.connected ||
+      this.attachment === null ||
+      this.instance === null ||
+      this.stale ||
+      this.ownership === null ||
+      this.ownership.owner !== null ||
+      this.claimedGeneration === this.ownership.generation
+    ) {
+      return;
+    }
+    this.claimedGeneration = this.ownership.generation;
+    this.requestInput(this.attachment, this.ownership.generation);
   }
 
   private onResizeTimer(): void {
@@ -393,7 +475,10 @@ export class AttachmentMachine {
   private show(): void {
     if (this.visible) return;
     this.visible = true;
-    this.status = null;
+    // A stream failure stays until Retry, and a session of another backend instance until one
+    // of the pinned instance connects.
+    const kept = this.status?.kind === 'streamFailed' || (this.status?.kind === 'gone' && !this.connected);
+    if (!kept) this.status = null;
     if (this.phase === 'hidden') {
       if (this.connected) this.attach();
       else this.phase = 'waiting';
@@ -445,9 +530,7 @@ export class AttachmentMachine {
   private onEvent(event: TerminalStreamEvent): void {
     switch (event.type) {
       case 'connection':
-        if (event.connected) this.onConnected();
-        else this.onDisconnected();
-        return;
+        return this.onConnection(event.connected, event.instance);
       case 'attached':
         return this.onAttached(event.attachment);
       case 'gap':
@@ -465,6 +548,22 @@ export class AttachmentMachine {
       default:
         this.onStreamEvent(event);
     }
+  }
+
+  /** A pinned panel treats a session that serves another backend instance as no connection. */
+  private onConnection(connected: boolean, instance: string | null): void {
+    const otherInstance =
+      connected && this.backendInstance !== null && instance !== this.backendInstance;
+    if (!connected || otherInstance) {
+      this.onDisconnected();
+      if (otherInstance) this.status = BACKEND_GONE;
+      return;
+    }
+    if (this.status?.kind === 'gone') {
+      this.status = null;
+      if (this.phase === 'ended') this.phase = this.visible ? 'waiting' : 'hidden';
+    }
+    this.onConnected();
   }
 
   private onConnected(): void {
@@ -544,7 +643,17 @@ export class AttachmentMachine {
 
   /** `gap{request}` and `error{request}`, which answer an attach or a resume. */
   private onRequestAnswerFailed(code?: string): void {
-    if (this.phase === 'detaching' && this.detachWhenNamed) {
+    if (code === BACKEND_MISMATCH && (this.phase === 'resuming' || this.phase === 'attaching')) {
+      // The daemon serves another backend instance: the pinned terminal is gone from it. The
+      // screen stays, dimmed, and nothing is sent until a session of the right instance returns.
+      this.cancelTimer('ack');
+      this.ackScheduled = false;
+      this.resetStream();
+      this.attachment = null;
+      this.stale = this.instance !== null;
+      this.status = BACKEND_GONE;
+      this.phase = 'ended';
+    } else if (this.phase === 'detaching' && this.detachWhenNamed) {
       this.afterDetach();
     } else if (this.phase === 'resuming') {
       this.finish();
@@ -690,7 +799,7 @@ export class AttachmentMachine {
     ) {
       return;
     }
-    this.effects.push({ kind: 'resume', cursor: this.applied });
+    this.effects.push({ kind: 'resume', cursor: this.applied, instance: this.backendInstance });
     this.phase = 'resuming';
     this.received = this.applied;
     this.replayThrough = null;
@@ -729,6 +838,7 @@ export class AttachmentMachine {
         observe: false,
         history: TERMINAL_HISTORY_LINES,
       },
+      instance: this.backendInstance,
     });
     this.sentDisplay = display;
     this.phase = 'attaching';
@@ -782,6 +892,7 @@ export class AttachmentMachine {
     this.acked = null;
     this.ownership = null;
     this.sentResize = null;
+    this.claimedGeneration = null;
     this.queue.clear();
     this.applying = null;
   }

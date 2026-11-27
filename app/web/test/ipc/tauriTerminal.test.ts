@@ -11,15 +11,19 @@ import type { TerminalStreamEvent } from '../../src/model/terminal';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  channels: [] as { onmessage: (message: unknown) => void }[],
+  channels: [] as { onmessage: (message: unknown) => void; cleaned: number }[],
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: mocks.invoke,
   Channel: class {
     onmessage: (message: unknown) => void = () => undefined;
+    cleaned = 0;
     constructor() {
       mocks.channels.push(this);
+    }
+    cleanupCallback(): void {
+      this.cleaned += 1;
     }
   },
 }));
@@ -86,11 +90,12 @@ describe('createTauriTerminalPort', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
     const channel = mocks.channels[0]!;
-    channel.onmessage({ type: 'connection', connected: true });
+    channel.onmessage({ type: 'connection', connected: true, instance: 'core-a' });
     channel.onmessage({ type: 'nonsense' });
     channel.onmessage(new ArrayBuffer(3));
-    expect(events).toEqual([{ type: 'connection', connected: true }]);
-    expect(error).toHaveBeenCalledTimes(2);
+    channel.onmessage({ type: 'connection', connected: true, instance: 7 });
+    expect(events).toEqual([{ type: 'connection', connected: true, instance: 'core-a' }]);
+    expect(error).toHaveBeenCalledTimes(3);
     error.mockRestore();
   });
 
@@ -128,11 +133,29 @@ describe('createTauriTerminalPort', () => {
     const events: TerminalStreamEvent[] = [];
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command !== TERMINAL_OPEN_STREAM_COMMAND) return undefined;
-      mocks.channels[0]!.onmessage({ type: 'connection', connected: false });
+      mocks.channels[0]!.onmessage({ type: 'connection', connected: false, instance: null });
       return '7';
     });
     await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
-    expect(events).toEqual([{ type: 'connection', connected: false }]);
+    expect(events).toEqual([{ type: 'connection', connected: false, instance: null }]);
+  });
+
+  it('releases the channel when open_stream is refused, so a retry leaves nothing behind', async () => {
+    const events: TerminalStreamEvent[] = [];
+    mocks.invoke.mockRejectedValueOnce('no host');
+    await expect(
+      createTauriTerminalPort().openStream(hostId, (event) => events.push(event)),
+    ).rejects.toThrow('no host');
+    const refused = mocks.channels[0]!;
+    expect(refused.cleaned).toBe(1);
+    refused.onmessage({ type: 'connection', connected: true, instance: 'core-a' });
+    expect(events).toEqual([]);
+
+    await createTauriTerminalPort().openStream(hostId, (event) => events.push(event));
+    const opened = mocks.channels[1]!;
+    expect(opened.cleaned).toBe(0);
+    opened.onmessage({ type: 'connection', connected: true, instance: 'core-a' });
+    expect(events).toEqual([{ type: 'connection', connected: true, instance: 'core-a' }]);
   });
 
   it('turns a bare string rejection into an Error with the same message', async () => {

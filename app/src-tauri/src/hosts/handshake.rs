@@ -107,6 +107,7 @@ fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::UnknownPanel => "unknown_panel",
         ErrorCode::UnknownCaller => "unknown_caller",
         ErrorCode::PanelLimit => "panel_limit",
+        ErrorCode::BackendMismatch => "backend_mismatch",
         ErrorCode::Internal => "internal",
     }
 }
@@ -228,6 +229,7 @@ mod tests {
             (ErrorCode::UnknownPanel, "unknown_panel"),
             (ErrorCode::UnknownCaller, "unknown_caller"),
             (ErrorCode::PanelLimit, "panel_limit"),
+            (ErrorCode::BackendMismatch, "backend_mismatch"),
             (ErrorCode::Internal, "internal"),
         ];
         for (code, name) in codes {

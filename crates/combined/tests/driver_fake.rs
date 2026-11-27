@@ -62,6 +62,7 @@ impl Env {
             request: RequestId(1),
             terminal: self.term.clone(),
             options: request_options(80, 24, false),
+            instance: None,
         }));
         self.pump();
         let messages = self.pull();
@@ -74,6 +75,7 @@ impl Env {
             .unwrap();
         self.send(ClientMessage::RequestOwnership(RequestOwnership {
             attachment,
+            if_vacant: None,
         }));
         self.pump();
         let mut messages = messages;

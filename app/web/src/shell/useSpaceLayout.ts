@@ -22,6 +22,14 @@ export interface SpaceLayout {
   addPanel: (panel: string) => void;
   /** Takes the panel out of every tile. */
   removePanel: (panel: string) => void;
+  /** Puts the panel in the named tile. */
+  addPanelTo: (panel: string, tile: string) => void;
+  /** Splits the tile to the right and puts the panel in the new tile, as one batch. */
+  openBeside: (tile: string, panel: string) => void;
+  /** Adds `next` to the tile, then removes `previous`. */
+  replacePanel: (previous: string, next: string, tile: string) => void;
+  /** Moves the panel to the tile at the index. */
+  movePanelTo: (panel: string, toTile: string, index: number) => void;
 }
 
 interface Held {
@@ -250,6 +258,22 @@ export function useSpaceLayout(
   const close = useCallback((tile: string) => queue.current?.close(tile), []);
   const addPanel = useCallback((panel: string) => queue.current?.addPanel(panel), []);
   const removePanel = useCallback((panel: string) => queue.current?.removePanel(panel), []);
+  const addPanelTo = useCallback(
+    (panel: string, tile: string) => queue.current?.addPanelTo(panel, tile),
+    [],
+  );
+  const openBeside = useCallback(
+    (tile: string, panel: string) => queue.current?.openBeside(tile, panel),
+    [],
+  );
+  const replacePanel = useCallback(
+    (previous: string, next: string, tile: string) => queue.current?.replacePanel(previous, next, tile),
+    [],
+  );
+  const movePanelTo = useCallback(
+    (panel: string, toTile: string, index: number) => queue.current?.movePanelTo(panel, toTile, index),
+    [],
+  );
 
   const snapshot =
     held !== null && selected !== null && held.hostId === selected.hostId && held.snapshot.space === selected.path
@@ -276,7 +300,25 @@ export function useSpaceLayout(
       close,
       addPanel,
       removePanel,
+      addPanelTo,
+      openBeside,
+      replacePanel,
+      movePanelTo,
     }),
-    [snapshot, notice, error, panels, readOnly, split, close, addPanel, removePanel],
+    [
+      snapshot,
+      notice,
+      error,
+      panels,
+      readOnly,
+      split,
+      close,
+      addPanel,
+      removePanel,
+      addPanelTo,
+      openBeside,
+      replacePanel,
+      movePanelTo,
+    ],
   );
 }

@@ -22,7 +22,7 @@ use super::identity::{
     check, duplicate_message, is_valid_host_id, mismatch_message, HostIdStore, IdentityCheck,
 };
 use super::link::{abort_link, Closer, ConnectError, Connector, ExitInfo, Link};
-use super::model::{ConnectionState, SpaceView};
+use super::model::{BackendView, ConnectionState, SpaceView};
 use super::outbound::Outbound;
 use super::panels::PanelReply;
 use super::spawn::SpawnReply;
@@ -133,7 +133,7 @@ pub trait HostEvents: Send + Sync {
     fn connection(&self, name: &str, state: ConnectionState);
     fn host_id(&self, name: &str, host_id: &HostId);
     /// The seam S4 uses to publish a host's spaces.
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>);
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>);
     /// A space's layout: the reply to a request, or a push when `request` is `None`.
     fn layout(&self, _host_id: &HostId, _request: Option<RequestId>, _snapshot: LayoutSnapshot) {}
     /// The daemon refused a layout request. `message` is trimmed external text.
@@ -870,7 +870,7 @@ mod tests {
 
     impl SessionPhase for SpacesPhase {
         fn run(&mut self, io: SessionIo<'_>) -> SessionEnd {
-            io.events.spaces(io.host_id, Vec::new());
+            io.events.spaces(io.host_id, Vec::new(), None);
             SessionEnd::Io("reset".to_string())
         }
     }
@@ -886,7 +886,7 @@ mod tests {
         let rig = rig;
         run_to_end(&rig, Some(a()), None);
         let events: Vec<Event> = rig.events.try_iter().collect();
-        assert!(events.contains(&Event::Spaces(a(), Vec::new())));
+        assert!(events.contains(&Event::Spaces(a(), Vec::new(), None)));
         assert_eq!(
             events.last(),
             Some(&Event::Connection(
