@@ -1243,13 +1243,68 @@ class GuardTest(unittest.TestCase):
                     "tauri-only-in-ipc",
                 )
 
-    def test_ts_load_before_a_block_is_the_documented_method_residual(self):
-        # Known limits: in .ts a call whose `)` is followed by `{` reads as a method
-        # definition, so this load passes; .tsx fails closed on the same source. If the
-        # reader learns to tell the two apart, flip the .ts expectation and the docstring.
-        src = "import('@tauri-apps/api/core')\n{}\n"
-        self.assertFlags({"app/web/src/shell/probe.ts": src})
-        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+    # --- issue #20 follow-up: a load followed by a block is not a method definition
+
+    TS_PROBE = "app/web/src/shell/probe.ts"
+
+    def test_ts_load_before_a_block_is_read_as_a_load(self):
+        for load in ("import('@tauri-apps/api/core')", "require('@tauri-apps/api/core')",
+                     "import<any>('@tauri-apps/api/core')"):
+            body = f"{load}\n{{}}\n"
+            for src in (
+                body,
+                f"{{\n{body}}}\n",
+                f"export function f() {{\n{body}}}\n",
+                f"export async function f(): Promise<void> {{\n{body}}}\n",
+                f"export function f(): string[] {{\n{body}return []; }}\n",
+                f"declare const c: boolean;\nif (c) {{ }} else {{\n{body}}}\n",
+                f"do {{\n{body}}} while (false);\n",
+                f"declare const c: number;\nswitch (c) {{ case 1: {{\n{body}}} }}\n",
+                f"label: {{\n{body}}}\n",
+                f"export const f = () => {{\n{body}}};\n",
+                f"namespace N {{\n{body}}}\n",
+                f"export class C {{ m() {{\n{body}}} }}\n",
+                f"export class C {{ static {{\n{body}}} }}\n",
+                f"export class C<T extends {{ a: 1 }}> {{ m() {{\n{body}}} }}\n",
+                f"export const o = {{ m() {{\n{body}}} }};\n",
+                f"export const t = `${{(() => {{ {load} {{}} }})()}}`;\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, ("tauri-only-in-ipc", self.TS_PROBE))
+        self.assertFlags({self.PROBE: "import('@tauri-apps/api/core')\n{}\n"}, ("tauri-only-in-ipc", self.PROBE))
+
+    def test_ts_load_before_a_colon_is_read_as_a_load(self):
+        for src in (
+            "declare const c: boolean, x: any;\nexport const y = c ? await import('@tauri-apps/api/core') : x;\n",
+            "declare const c: boolean, x: any;\nexport const y = c ? import('@tauri-apps/api/core') : x;\n",
+            "export class C { x = 1 ? await import('@tauri-apps/api/core') : 2; }\n",
+            "export const o = { a: 1 ? import('@tauri-apps/api/core') : 2 };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src}, ("tauri-only-in-ipc", self.TS_PROBE))
+
+    def test_method_definitions_in_classes_and_object_literals_are_not_loads(self):
+        for src in (
+            "export const o = { import(v: string) { return v; }, require(v: string) { return v; } };\n",
+            "export const o = { async import(v: string) { return v; }, *require(v: string) { yield v; } };\n",
+            "export const o = { get import() { return 1; }, set require(v: number) { void v; } };\n",
+            "export const o = { a: 1, import<T>(v: T): T { return v; } };\n",
+            "export const o = { a: { import(v: string) { return v; } } };\n",
+            "export const o = [{ import(v: string) { return v; } }];\n",
+            "f({ import(v: string) { return v; } });\nfunction f(x: object) { return x; }\n",
+            "export default { import(v: string) { return v; } };\n",
+            "export function f() { return { require(v: string) { return v; } }; }\n",
+            "export class C { import(v: string) { return v; } require(v: string): string { return v; } }\n",
+            "export class C { x = 1\n  import(v: string) { return v; } }\n",
+            "export class C extends Object { static async import(v: string) { return v; } }\n",
+            "export class C implements I { public require(v: string): string { return v; } }\ninterface I { a?: 1 }\n",
+            "export const K = class { require(v: string) { return v; } };\n",
+            "export class C { m(): { import(v: string): void } { return { import(v: string) { void v; } }; } }\n",
+            "export interface I { import(v: string): string; require(v: string): void }\n",
+            "export type T = { import(v: string): string; require(v: string): void };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src})
 
     def test_clean_tsx_lexes_clean(self):
         src = """\
