@@ -346,10 +346,55 @@ describe('TileTree terminal tabs', () => {
     expect(onRepinTerminal).toHaveBeenCalledWith(PIN_1, PIN_3, 't1');
   });
 
+  it('a terminal whose ID is too long to pin is disabled with its own reason, not as already open', async () => {
+    const long = terminal('x'.repeat(300), 'long', 'sh', 'idle');
+    const ctx = context({ spaceTerminals: [BUILD, long] });
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1])), {}, { ctx }));
+    await flush();
+    const select = within(bodyOf('t1')).getByTestId('terminal-switcher') as HTMLSelectElement;
+    const option = [...select.options].find((o) => o.value === long.id) as HTMLOptionElement;
+    expect(option.textContent).toBe("long (can't be pinned)");
+    expect(option.disabled).toBe(true);
+    expect(option.title).toBe("This terminal can't be pinned: its ID is invalid or too long");
+    expect(option.title).not.toContain('Already open');
+  });
+
   it('shows the backend id in the header', async () => {
     render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1]))));
     await flush();
     expect(screen.getByTestId('terminal-backend').textContent).toBe('herdr-core');
+  });
+
+  it('only the focused tile claims an unowned terminal, and the claim follows the focus', async () => {
+    const port = new MemoryTerminalPort();
+    const fake = fakeXtermFactory();
+    const both = layout(tile('t1', [ACTIVE_TERMINAL_TAB]), tile('t2', [PIN_1]));
+    const view = render(tree(port, fake, both, {}, { focused: 't1' }));
+    await flush();
+    const [one, two] = port.streams;
+    if (one === undefined || two === undefined) throw new Error('two streams expected');
+    const containers = document.querySelectorAll('.terminal-view');
+    expect(containers).toHaveLength(2);
+    for (const container of containers) act(() => FakeResizeObserver.resize(container, 800, 340));
+    await flush();
+    act(() => {
+      for (const [stream, attachment] of [[one, 7], [two, 8]] as const) {
+        stream.emit(attachedEvent(1, attachment));
+        stream.emit(startedEvent(cursor(attachment, 1, 0)));
+        stream.emit(ownershipEvent(attachment, 1, null));
+      }
+    });
+    await flush();
+    expect(one.commands('requestOwnership')).toEqual([{ op: 'requestOwnership', attachment: '7' }]);
+    expect(two.commands('requestOwnership')).toEqual([]);
+    const ops = one.sent.map((command) => command.op);
+    expect(ops.indexOf('resize')).toBeGreaterThanOrEqual(0);
+    expect(ops.lastIndexOf('resize')).toBeLessThan(ops.indexOf('requestOwnership'));
+
+    view.rerender(tree(port, fake, both, {}, { focused: 't2' }));
+    await flush();
+    expect(two.commands('requestOwnership')).toEqual([{ op: 'requestOwnership', attachment: '8' }]);
+    expect(one.commands('requestOwnership')).toHaveLength(1);
   });
 
   it('unmounting a panel stops its controller: detach is sent and its stream closed', async () => {

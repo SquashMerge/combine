@@ -529,7 +529,9 @@ export function App({
     (space: SpaceKey, tile: string) => {
       if (shownLayout === null || selectedId === null || spaceKeyId(space) !== selectedId) return;
       const holder = tileHolding(shownLayout.root, ACTIVE_TERMINAL_TAB);
-      if (holder === null) layout.addPanelTo(ACTIVE_TERMINAL_TAB, tile);
+      if (holder === tile) {
+        // Already in this tile, perhaps as a hidden tab: only show it.
+      } else if (holder === null) layout.addPanelTo(ACTIVE_TERMINAL_TAB, tile);
       else layout.movePanelTo(ACTIVE_TERMINAL_TAB, tile, layoutTiles(shownLayout.root).get(tile)?.panels.length ?? 0);
       changeSpaceState(space, (state) => ({
         ...state,

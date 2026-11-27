@@ -441,6 +441,17 @@ describe('App terminal tabs', () => {
       ]);
     });
 
+    it('show_the_active_terminal_here_only_selects_a_tab_the_focused_tile_already_holds', async () => {
+      const { layoutPort, clientStatePort } = await withPanels(
+        layoutOf(tile('t1', ['p1', ACTIVE_TERMINAL_TAB], 'p1')),
+      );
+      await openPalette('show-active-terminal');
+      expect(mutations(layoutPort)).toEqual([]);
+      const last = spaceWrites(clientStatePort).at(-1);
+      expect(last?.activeTabs['t1']).toBe(ACTIVE_TERMINAL_TAB);
+      expect(bodyOf('t1').querySelector('[data-testid="terminal-panel"]')).not.toBeNull();
+    });
+
     it('is not offered where the focused tile already shows the follow-active tab', async () => {
       await withPanels(layoutOf(tile('t1', [ACTIVE_TERMINAL_TAB])));
       fireEvent.keyDown(window, { key: 'k', metaKey: true });

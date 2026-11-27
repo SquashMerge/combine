@@ -26,6 +26,8 @@ import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 const NO_ACTIVE_TERMINAL = 'No active terminal. Pick one in the navigator.';
 const PENDING_TERMINALS = "Waiting for the host's terminal list…";
 const ALREADY_OPEN_TITLE = 'Already open in this layout';
+const UNPINNABLE_TITLE = "This terminal can't be pinned: its ID is invalid or too long";
+const UNAVAILABLE_TITLE = "Already open, or can't be pinned";
 
 const GONE_REASON = {
   unlisted: 'unlisted',
@@ -143,10 +145,15 @@ function TerminalTabBody({
     const open = candidateTab !== null && candidate.id !== terminal.id && openTabs.has(candidateTab);
     return {
       id: candidate.id,
-      label: open ? `${candidate.name} (already open)` : label,
+      label: open ? `${candidate.name} (already open)` : candidateTab === null ? `${candidate.name} (can't be pinned)` : label,
       disabled: held !== null || open || candidateTab === null,
+      reason: open ? ('open' as const) : candidateTab === null ? ('unpinnable' as const) : null,
     };
   });
+  const reasons = new Set(options.flatMap((option) => ('reason' in option && option.reason !== null ? [option.reason] : [])));
+  // The switcher has one tooltip for all its disabled options, so name a reason only when they share it.
+  const optionTitle =
+    reasons.size > 1 ? UNAVAILABLE_TITLE : reasons.has('unpinnable') ? UNPINNABLE_TITLE : ALREADY_OPEN_TITLE;
   const onSwitch = (id: string): void => {
     if (!pinned) {
       onSelectActiveTerminal?.(id);
@@ -165,7 +172,7 @@ function TerminalTabBody({
       visible
       label={{ name: terminal.name, host: ctx.hostName, state: terminal.state, backend: ctx.backend?.id ?? null }}
       focused={focused}
-      switcher={{ options, onSwitch, disabledTitle: heldTitle ?? ALREADY_OPEN_TITLE }}
+      switcher={{ options, onSwitch, disabledTitle: heldTitle ?? optionTitle }}
       {...(pinned
         ? {
             onClose: () => onCloseTab?.(tile, tabId),
