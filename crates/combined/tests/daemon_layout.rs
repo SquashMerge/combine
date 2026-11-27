@@ -30,11 +30,18 @@ const WAIT: Duration = Duration::from_secs(10);
 /// How long a test waits to be sure nothing more arrives.
 const QUIET: Duration = Duration::from_millis(300);
 
+/// How long a test waits for the answer to a request: longer than `RECV_TIMEOUT`, because the
+/// answer to the first `watch_layout` of a space waits while the server loop has
+/// `FsFileStore::watch` set up its FSEvents streams, and a request sent after it waits too.
+/// That took up to 2 s with 32 of these test binaries running at once, and past 5 s under
+/// heavier load (#88).
+const REPLY_WAIT: Duration = Duration::from_secs(30);
+
 /// The next message, skipping the `panels` frames a client that watches a space is sent. Use it
 /// only on a client that has sent `watch_layout`.
 fn recv_skipping_panels(client: &WireClient) -> DaemonMessage {
     loop {
-        match client.recv() {
+        match client.recv_waiting(REPLY_WAIT) {
             DaemonMessage::Panels(_) => {}
             other => return other,
         }

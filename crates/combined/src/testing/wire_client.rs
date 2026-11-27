@@ -75,9 +75,15 @@ impl WireClient {
 
     /// The next message; panics if none arrives within [`RECV_TIMEOUT`] or the daemon closed.
     pub fn recv(&self) -> DaemonMessage {
-        match self.frames.recv_timeout(RECV_TIMEOUT) {
+        self.recv_waiting(RECV_TIMEOUT)
+    }
+
+    /// [`WireClient::recv`] with its own bound, for a message that can take longer than
+    /// [`RECV_TIMEOUT`] to come.
+    pub fn recv_waiting(&self, wait: Duration) -> DaemonMessage {
+        match self.frames.recv_timeout(wait) {
             Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) => panic!("no message within {RECV_TIMEOUT:?}"),
+            Err(RecvTimeoutError::Timeout) => panic!("no message within {wait:?}"),
             Err(RecvTimeoutError::Disconnected) => panic!("the daemon closed the connection"),
         }
     }
