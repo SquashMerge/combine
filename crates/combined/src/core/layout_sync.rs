@@ -139,9 +139,6 @@ pub enum LayoutEffect {
         space: SpaceId,
         bytes: Vec<u8>,
         op_count: usize,
-        /// The pending ops are only the migration: write the project and nothing else, and
-        /// report [`Layouts::apply_write_held`] when that can't be done.
-        project_only: bool,
     },
 }
 
@@ -362,19 +359,6 @@ impl Pending {
     fn first_at(&self) -> Option<Millis> {
         self.ops.first().map(|timed| timed.at)
     }
-
-    /// The ops that count for a dropped notice: the migration isn't the user's change.
-    fn user_ops(&self) -> usize {
-        self.ops
-            .iter()
-            .filter(|timed| timed.op != LayoutOp::Migrate)
-            .count()
-    }
-
-    /// Nothing but the migration is pending.
-    fn only_migration(&self) -> bool {
-        self.user_ops() == 0
-    }
 }
 
 /// A write that was emitted and not yet acknowledged.
@@ -487,15 +471,8 @@ impl SpaceState {
         true
     }
 
-    /// Only the migration is pending and the layout came from a fallback copy, so it stays in
-    /// memory until a real change arrives.
-    fn holds_migration(&self) -> bool {
-        self.read_only && self.pending.as_ref().is_some_and(Pending::only_migration)
-    }
-
-    /// Removals first, then placements in creation order, then the migration of a version 1
-    /// layout. Applies nothing unless the layout is usable. Returns whether the held tree
-    /// changed.
+    /// Removals first, then placements in creation order. Applies nothing unless the layout is
+    /// usable. Returns whether the held tree changed.
     fn reconcile(&mut self, now: Millis, timing: LayoutTiming) -> bool {
         if !self.usable() {
             return false;
@@ -522,9 +499,6 @@ impl SpaceState {
                 }
             }
             self.placements.push(placement);
-        }
-        if self.current.version == 1 {
-            applied |= self.apply_daemon_op(LayoutOp::Migrate, now);
         }
         if applied {
             self.arm_deadline(now, timing);
@@ -553,7 +527,6 @@ impl SpaceState {
             return;
         }
         self.deadline = match (&self.pending, self.invalid, &self.writing) {
-            (Some(_), false, None) if self.holds_migration() => None,
             (Some(pending), false, None) => pending.first_at().map(|first| {
                 let quiet = now.saturating_add(Millis(timing.debounce_ms));
                 let latest = first.saturating_add(Millis(timing.max_wait_ms));
@@ -707,12 +680,10 @@ impl SpaceState {
                 });
             }
             None => {
-                if !pending.only_migration() {
-                    self.dropped = Some(DroppedBatch {
-                        op_count: pending.user_ops(),
-                        fields: if overlap.is_empty() { changed } else { overlap },
-                    });
-                }
+                self.dropped = Some(DroppedBatch {
+                    op_count: pending.ops.len(),
+                    fields: if overlap.is_empty() { changed } else { overlap },
+                });
                 self.origins = identity_origins(&new);
                 self.disk = new.clone();
                 self.current = new;
@@ -812,16 +783,10 @@ impl SpaceState {
                 self.arm_deadline(now, timing);
             }
             Err(_) => {
-                let user_ops = remaining
-                    .iter()
-                    .filter(|timed| timed.op != LayoutOp::Migrate)
-                    .count();
-                if user_ops > 0 {
-                    self.dropped = Some(DroppedBatch {
-                        op_count: user_ops,
-                        fields: BTreeSet::new(),
-                    });
-                }
+                self.dropped = Some(DroppedBatch {
+                    op_count: remaining.len(),
+                    fields: BTreeSet::new(),
+                });
             }
         }
         self.current != before
@@ -1178,10 +1143,6 @@ impl Layouts {
             return;
         };
         let op_count = pending.ops.len();
-        let project_only = pending.only_migration();
-        if project_only && state.read_only {
-            return;
-        }
         match encode_layout(&state.current) {
             Ok(bytes) => {
                 state.writing = Some(Writing {
@@ -1193,7 +1154,6 @@ impl Layouts {
                     space: space.clone(),
                     bytes,
                     op_count,
-                    project_only,
                 });
             }
             Err(why) => {
@@ -1217,25 +1177,6 @@ impl Layouts {
         let reconciled = state.reconcile(now, self.timing);
         if changed || reconciled {
             self.publish(space);
-        }
-    }
-
-    /// A project-only write wasn't made: the file is now a fallback copy, or the project refused
-    /// it. The migration stays held in memory, with no error, no retry and no change to
-    /// `read_only`. Ops added since get their usual deadline.
-    pub fn apply_write_held(&mut self, space: &SpaceId, now: Millis) {
-        let timing = self.timing;
-        let Some(state) = self.spaces.get_mut(space) else {
-            return;
-        };
-        state.writing = None;
-        state.deadline = None;
-        if state
-            .pending
-            .as_ref()
-            .is_some_and(|pending| !pending.only_migration())
-        {
-            state.arm_deadline(now, timing);
         }
     }
 

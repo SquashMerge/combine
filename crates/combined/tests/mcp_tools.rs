@@ -457,10 +457,10 @@ fn a_remove_conflict_keeps_the_tab() {
 // AC16
 
 /// A layout with `main` holding `p1` and an empty `side` tile, written by someone else.
-const TWO_TILES: &str = r#"{"version":2,"root":{"type":"split","dir":"h","ratio":0.5,
+const TWO_TILES: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,
     "a":{"type":"tile","id":"main","panels":["p1"],"active":"p1"},
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
-const OVERLAPPING: &str = r#"{"version":2,"root":{"type":"split","dir":"h","ratio":0.5,
+const OVERLAPPING: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,
     "a":{"type":"tile","id":"main","panels":["p1","p2"],"active":"p1"},
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
 

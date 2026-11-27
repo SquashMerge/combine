@@ -214,7 +214,7 @@ fn model_tile(id: &str) -> SplitNode {
 /// The bytes of a two-tile layout with the given ratio, as someone else would write them.
 fn outside_layout(ratio: f64) -> Vec<u8> {
     let layout = SpaceLayout {
-        version: 2,
+        version: 1,
         root: SplitNode::Split(combined::model::Split {
             dir: SplitDir::H,
             ratio,

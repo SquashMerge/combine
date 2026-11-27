@@ -38,7 +38,7 @@ fn split(ratio: f64, a: SplitNode, b: SplitNode) -> SplitNode {
 
 fn layout(root: SplitNode) -> SpaceLayout {
     SpaceLayout {
-        version: 2,
+        version: 1,
         root,
         groups: json!([]),
         extra: Map::new(),

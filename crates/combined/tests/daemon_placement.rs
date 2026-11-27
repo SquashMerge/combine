@@ -41,7 +41,7 @@ const HOUR: LayoutTiming = LayoutTiming {
     retry_ms: 3_600_000,
 };
 /// Two tiles, `main` and `side`, someone else wrote.
-const TWO_TILES: &str = r#"{"version":2,"root":{"type":"split","dir":"h","ratio":0.5,
+const TWO_TILES: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio":0.5,
     "a":{"type":"tile","id":"main","panels":[],"active":null},
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
 

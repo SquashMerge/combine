@@ -1,8 +1,7 @@
 //! Layout files: parsing, validation, round-tripping and encoding.
 
 use combined::core::{
-    apply_ops, default_layout, encode_layout, identity_origins, parse_layout, validate_layout,
-    LayoutError, LayoutOp, LAYOUT_MAX_BYTES,
+    default_layout, encode_layout, parse_layout, validate_layout, LayoutError, LAYOUT_MAX_BYTES,
 };
 use combined::model::{PanelId, SplitNode, TileId, ACTIVE_TERMINAL_TAB};
 use serde_json::{json, Value};
@@ -18,7 +17,7 @@ fn tile(id: &str, panels: &[&str], active: Option<&str>) -> Value {
 }
 
 fn file(root: Value) -> Value {
-    json!({ "version": 2, "root": root, "groups": [] })
+    json!({ "version": 1, "root": root, "groups": [] })
 }
 
 fn split(ratio: f64, a: Value, b: Value) -> Value {
@@ -34,13 +33,13 @@ fn parses_minimal_layout() {
     assert_eq!(root.id, TileId::new("main").unwrap());
     assert!(root.panels.is_empty());
     assert_eq!(root.active, None);
-    assert_eq!(layout.version, 2);
+    assert_eq!(layout.version, 1);
 }
 
 #[test]
 fn unknown_fields_and_groups_round_trip() {
     let value = json!({
-        "version": 2,
+        "version": 1,
         "future": { "k": [1, 2] },
         "groups": [{ "name": "g", "panels": ["p1"] }],
         "root": {
@@ -58,7 +57,7 @@ fn unknown_fields_and_groups_round_trip() {
 
 #[test]
 fn missing_groups_defaults_to_empty_list_and_is_written() {
-    let value = json!({ "version": 2, "root": tile("main", &[], None) });
+    let value = json!({ "version": 1, "root": tile("main", &[], None) });
     let layout = load(&value).unwrap();
     assert_eq!(layout.groups, json!([]));
     let again: Value = serde_json::from_slice(&encode_layout(&layout).unwrap()).unwrap();
@@ -100,7 +99,6 @@ fn dangling_panel_ids_preserved() {
 fn default_layout_holds_the_follow_active_tab() {
     let layout = default_layout();
     validate_layout(&layout).unwrap();
-    assert_eq!(layout.version, 2);
     let SplitNode::Tile(root) = &layout.root else {
         panic!("root should be a tile");
     };
@@ -117,31 +115,8 @@ fn encode_is_pretty_with_trailing_newline() {
     let bytes = encode_layout(&default_layout()).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(text.ends_with("}\n"));
-    assert!(text.contains("\n  \"version\": 2"));
+    assert!(text.contains("\n  \"version\": 1"));
     assert!(!text.ends_with("\n\n"));
-}
-
-#[test]
-fn version_2_parses_and_round_trips() {
-    for version in [1, 2] {
-        let value = json!({
-            "version": version,
-            "root": tile("main", &["p1"], Some("p1")),
-            "groups": []
-        });
-        let layout = load(&value).unwrap();
-        assert_eq!(layout.version, version);
-        let again: Value = serde_json::from_slice(&encode_layout(&layout).unwrap()).unwrap();
-        assert_eq!(again, value);
-    }
-}
-
-#[test]
-fn migrate_on_v2_changes_nothing() {
-    let layout = default_layout();
-    let applied = apply_ops(&layout, &identity_origins(&layout), &[LayoutOp::Migrate]).unwrap();
-    assert_eq!(applied.layout, layout);
-    assert!(applied.touched.is_empty());
 }
 
 #[test]
@@ -161,27 +136,16 @@ fn rejects_ratio_out_of_range() {
 fn rejects_missing_or_unsupported_version() {
     let missing = json!({ "root": tile("main", &[], None) });
     assert_eq!(load(&missing).unwrap_err(), LayoutError::MissingVersion);
-    let future = json!({ "version": 3, "root": tile("main", &[], None) });
+    let future = json!({ "version": 2, "root": tile("main", &[], None) });
     assert_eq!(
         load(&future).unwrap_err(),
-        LayoutError::UnsupportedVersion(3)
+        LayoutError::UnsupportedVersion(2)
     );
     let mut layout = default_layout();
     layout.version = 0;
     assert_eq!(
         validate_layout(&layout).unwrap_err(),
         LayoutError::UnsupportedVersion(0)
-    );
-}
-
-#[test]
-fn version_3_is_unsupported() {
-    let value = json!({ "version": 3, "root": tile("main", &[], None) });
-    let error = load(&value).unwrap_err();
-    assert_eq!(error, LayoutError::UnsupportedVersion(3));
-    assert_eq!(
-        error.to_string(),
-        "layout version 3 isn't supported (expected 1 or 2)"
     );
 }
 

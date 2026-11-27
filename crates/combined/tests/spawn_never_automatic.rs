@@ -13,8 +13,8 @@ use combine_protocol::{ClientMessage, DaemonMessage, RequestId, WatchLayout};
 use combined::core::LAYOUT_FILE;
 use combined::ports::FileStore;
 use combined::testing::MemoryFileStore;
-use daemon_support::{server_on, wait_until, DaemonPaths, WireClient};
-use layout_support::{bytes_of, layout, layout_v1, split, tile};
+use daemon_support::{server_on, DaemonPaths, WireClient};
+use layout_support::{bytes_of, layout, split, tile};
 use spawn_support::*;
 
 const QUIET: Duration = Duration::from_millis(300);
@@ -175,31 +175,22 @@ fn no_spawn_on_layout_or_panel_file_change() {
 }
 
 #[test]
-fn terminal_tabs_and_the_migration_spawn_nothing() {
+fn terminal_tabs_spawn_nothing() {
     let (rig, store) = rig_with_templates();
     let before = settled_counts(&store, &rig);
     let mut client = rig.client();
     watch_terminals(&mut client, 1);
 
-    // A version 1 layout gains the follow-active tab, and a pinned terminal tab names a
-    // terminal that doesn't exist. Neither starts one.
+    // The follow-active tab and a pinned terminal tab naming a terminal that doesn't exist.
     let tiles = split(
         0.5,
-        tile("left", &["agent"], Some("agent")),
+        tile("left", &["agent", ".active-terminal"], Some("agent")),
         tile("right", &["build", ".terminal/instance/9"], Some("build")),
     );
-    store.write_outside(&rig.space, LAYOUT_FILE, bytes_of(&layout_v1(tiles)));
+    store.write_outside(&rig.space, LAYOUT_FILE, bytes_of(&layout(tiles)));
     watch_layout(&mut client, &rig, 2);
-    assert!(
-        wait_until(Duration::from_secs(5), || {
-            store.write_count(&rig.space, LAYOUT_FILE) == 1
-        }),
-        "the migration was never written"
-    );
     std::thread::sleep(QUIET);
 
-    let stored = String::from_utf8(store.bytes(&rig.space, LAYOUT_FILE).unwrap()).unwrap();
-    assert!(stored.contains("\"version\": 2"), "{stored}");
     assert_eq!(spawn_attempts(&rig.control), 1);
     assert_eq!(counts(&store, &rig), before);
 }

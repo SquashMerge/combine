@@ -124,7 +124,7 @@ fn outside_json(ratio: f64, panels: &[&str]) -> String {
         .first()
         .map_or("null".to_string(), |p| format!("\"{p}\""));
     format!(
-        r#"{{"version":2,"root":{{"type":"split","dir":"h","ratio":{ratio},
+        r#"{{"version":1,"root":{{"type":"split","dir":"h","ratio":{ratio},
         "a":{{"type":"tile","id":"main","panels":[{list}],"active":{active}}},
         "b":{{"type":"tile","id":"side","panels":[],"active":null}}}},"groups":[]}}"#
     )
@@ -441,7 +441,7 @@ fn held_change_is_written_once_the_file_can_be_read() {
     unlock_file(&file);
     outside_write(
         &server.work,
-        r#"{"version":2,"root":{"type":"tile","id":"main","panels":[],"active":null},"groups":[]}"#,
+        r#"{"version":1,"root":{"type":"tile","id":"main","panels":[],"active":null},"groups":[]}"#,
     );
     let push = layout_reply(&client, None);
     assert_eq!(push.error, None);
