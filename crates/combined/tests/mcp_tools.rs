@@ -13,6 +13,7 @@ use combine_protocol::{
     ClientMessage, DaemonMessage, LayoutOp, MutateLayout, PanelState, RequestId,
 };
 use combined::core::{LayoutTiming, LAYOUT_FILE, SCRATCH_TTL_MS};
+use combined::model::ACTIVE_TERMINAL_TAB;
 use combined::ports::{ScratchDir, StoreError};
 use daemon_support::wait_until;
 use mcp_support::{cwd_caller, wire_options, McpWire};
@@ -75,7 +76,9 @@ fn panel_ids(listed: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// The panels of tile `id` in the stored layout, `None` without a file or such a tile.
+/// The panels of tile `id` in the stored layout, `None` without a file or such a tile. The
+/// default layout's follow-active tab isn't a panel these tests create or remove, so it is left
+/// out.
 fn tile_panels(rig: &PanelRig, id: &str) -> Option<Vec<String>> {
     fn find(node: &Value, id: &str) -> Option<Vec<String>> {
         if node["type"] == "tile" {
@@ -85,6 +88,7 @@ fn tile_panels(rig: &PanelRig, id: &str) -> Option<Vec<String>> {
                     .unwrap()
                     .iter()
                     .map(|panel| panel.as_str().unwrap().to_string())
+                    .filter(|panel| panel != ACTIVE_TERMINAL_TAB)
                     .collect()
             });
         }

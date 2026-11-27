@@ -175,6 +175,27 @@ fn no_spawn_on_layout_or_panel_file_change() {
 }
 
 #[test]
+fn terminal_tabs_spawn_nothing() {
+    let (rig, store) = rig_with_templates();
+    let before = settled_counts(&store, &rig);
+    let mut client = rig.client();
+    watch_terminals(&mut client, 1);
+
+    // The follow-active tab and a pinned terminal tab naming a terminal that doesn't exist.
+    let tiles = split(
+        0.5,
+        tile("left", &["agent", ".active-terminal"], Some("agent")),
+        tile("right", &["build", ".terminal/instance/9"], Some("build")),
+    );
+    store.write_outside(&rig.space, LAYOUT_FILE, bytes_of(&layout(tiles)));
+    watch_layout(&mut client, &rig, 2);
+    std::thread::sleep(QUIET);
+
+    assert_eq!(spawn_attempts(&rig.control), 1);
+    assert_eq!(counts(&store, &rig), before);
+}
+
+#[test]
 fn no_spawn_on_backend_restart() {
     let (rig, _store) = rig_with_templates();
     let mut client = rig.client();

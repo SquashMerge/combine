@@ -45,6 +45,9 @@ const TWO_TILES: &str = r#"{"version":1,"root":{"type":"split","dir":"h","ratio"
     "a":{"type":"tile","id":"main","panels":[],"active":null},
     "b":{"type":"tile","id":"side","panels":[],"active":null}},"groups":[]}"#;
 
+/// The follow-active tab of a default layout, which a placement lands after.
+const FOLLOW: &str = ".active-terminal";
+
 /// One tile of a stored layout: its id, its panels and its active panel.
 type Tile = (String, Vec<String>, Option<String>);
 
@@ -136,7 +139,7 @@ fn show_diagram_with_no_client_writes_layout_json() {
     let shown = wire.tool("show_diagram", json!({"id": "d1", "source": MERMAID}));
     assert!(!shown.is_error, "{shown:?}");
 
-    wait_stored(&rig, &[tile("main", &["d1"], Some("d1"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "d1"], Some("d1"))]);
     assert_eq!(rig.write_count(LAYOUT_FILE), 1);
 }
 
@@ -150,7 +153,7 @@ fn create_panel_places_persistent_and_scratch_panels() {
     let scratch = wire.tool("create_panel", scratch);
     assert!(!scratch.is_error, "{scratch:?}");
 
-    wait_stored(&rig, &[tile("main", &["a", "b"], Some("b"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "a", "b"], Some("b"))]);
 }
 
 #[test]
@@ -192,7 +195,7 @@ fn a_late_client_sees_the_placed_tab() {
         &serde_json::to_value(&layout.layout.root).unwrap(),
         &mut tiles,
     );
-    assert_eq!(tiles, vec![tile("main", &["d1"], Some("d1"))]);
+    assert_eq!(tiles, vec![tile("main", &[FOLLOW, "d1"], Some("d1"))]);
     assert!(panels.panels.iter().any(|panel| panel.id == "d1"));
 }
 
@@ -210,7 +213,10 @@ fn shutdown_writes_a_pending_placement() {
     assert!(rig.server.shutdown().is_none());
 
     assert_eq!(rig.write_count(LAYOUT_FILE), 1);
-    assert_eq!(stored(&rig), Some(vec![tile("main", &["d1"], Some("d1"))]));
+    assert_eq!(
+        stored(&rig),
+        Some(vec![tile("main", &[FOLLOW, "d1"], Some("d1"))])
+    );
 }
 
 #[test]
@@ -282,7 +288,10 @@ fn a_placement_in_an_unwritable_project_writes_the_fallback() {
         "no fallback layout was written"
     );
     let written = fs::read(&files_named(&fallback, LAYOUT_FILE)[0]).unwrap();
-    assert_eq!(tiles_of(&written), vec![tile("main", &["d1"], Some("d1"))]);
+    assert_eq!(
+        tiles_of(&written),
+        vec![tile("main", &[FOLLOW, "d1"], Some("d1"))]
+    );
     assert!(!work.join(".workspace").exists());
 }
 
@@ -312,7 +321,7 @@ fn a_repeated_key_adds_no_second_tab() {
     let mut args = markdown_args("k1");
     args["idempotency_key"] = json!("K");
     assert!(!wire.tool("create_panel", args.clone()).is_error);
-    wait_stored(&rig, &[tile("main", &["k1"], Some("k1"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "k1"], Some("k1"))]);
     let writes = settle_without_the_tab(&rig);
 
     let again = wire.tool("create_panel", args);
@@ -327,7 +336,7 @@ fn a_repeated_key_adds_no_second_tab() {
 fn an_update_does_not_place_again() {
     let (rig, mut wire) = rig_and_wire(PROMPT);
     assert!(!wire.tool("create_panel", markdown_args("u")).is_error);
-    wait_stored(&rig, &[tile("main", &["u"], Some("u"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "u"], Some("u"))]);
     let writes = settle_without_the_tab(&rig);
 
     let updated = wire.tool("update_panel", json!({"panel": "u", "content": "two"}));
@@ -378,7 +387,7 @@ fn a_folder_made_outside_is_not_placed() {
 fn a_restart_places_nothing_again() {
     let (mut rig, mut wire) = rig_and_wire(PROMPT);
     assert!(!wire.tool("create_panel", markdown_args("r")).is_error);
-    wait_stored(&rig, &[tile("main", &["r"], Some("r"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "r"], Some("r"))]);
     let writes = settle_without_the_tab(&rig);
     let written = rig.bytes(LAYOUT_FILE);
     drop(wire);
@@ -396,12 +405,12 @@ fn a_restart_places_nothing_again() {
 fn a_handle_close_takes_the_id_out() {
     let (rig, mut wire) = rig_and_wire(PROMPT);
     assert!(!wire.tool("create_panel", markdown_args("c")).is_error);
-    wait_stored(&rig, &[tile("main", &["c"], Some("c"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "c"], Some("c"))]);
 
     let closed = rig.panels.close(&rig.space, "c").unwrap();
     assert_eq!(closed.state, PanelState::Removed);
 
-    wait_stored(&rig, &[tile("main", &[], None)]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW], Some(FOLLOW))]);
 }
 
 /// A close in a run that never held the layout queues its `Watch` and `Read` inside the panel
@@ -418,7 +427,7 @@ fn a_close_with_no_held_layout_reads_and_rewrites_it() {
         ..config(PROMPT)
     }));
     assert!(!wire.tool("create_panel", markdown_args("c")).is_error);
-    wait_stored(&rig, &[tile("main", &["c"], Some("c"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "c"], Some("c"))]);
     drop(wire);
     rig.restart();
     rig.wait_state("c", PanelState::Validated);
@@ -426,7 +435,7 @@ fn a_close_with_no_held_layout_reads_and_rewrites_it() {
     let closed = rig.panels.close(&rig.space, "c").unwrap();
     assert_eq!(closed.state, PanelState::Removed);
 
-    wait_stored(&rig, &[tile("main", &[], None)]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW], Some(FOLLOW))]);
 }
 
 #[test]
@@ -437,9 +446,9 @@ fn an_expired_scratch_panel_leaves_the_layout() {
             .tool("show_diagram", json!({"id": "d1", "source": MERMAID}))
             .is_error
     );
-    wait_stored(&rig, &[tile("main", &["d1"], Some("d1"))]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW, "d1"], Some("d1"))]);
 
     rig.wall.advance(SCRATCH_TTL_MS + 1);
 
-    wait_stored(&rig, &[tile("main", &[], None)]);
+    wait_stored(&rig, &[tile("main", &[FOLLOW], Some(FOLLOW))]);
 }
