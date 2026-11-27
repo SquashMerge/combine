@@ -45,8 +45,10 @@ Known limits, by design:
   expression-start position followed by a name or `>` (`<T,>` and `<T extends U>` are
   generic parameter lists), its attributes lex as strings and `{...}` expressions, and its
   children are raw text up to the next `<` or `{`, so quotes, backticks and slashes in
-  JSX text are text, never code. A mismatched or missing closing tag, or an element the
-  lexer can't place, is a `guard-parse`; it never continues silently. The residual: a
+  JSX text are text, never code: they can't hide a later import on the same line.
+  `</name>`, `</>` and the `/>` of a self-closing tag are tag syntax, so a one-line
+  `<div><Foo {...p} /></div>` lexes clean. A mismatched or missing closing tag, or an
+  element the lexer can't place, is a `guard-parse`; it never continues silently. The residual: a
   generic function type written `<T>(x: T) => T` in type position after `=` reads as an
   element and fails closed, and type arguments on a JSX tag (`<Foo<string> />`) fail
   closed too. `.ts`, `.mts` and `.cts` files lex with no JSX rule.
@@ -56,6 +58,11 @@ Known limits, by design:
   `export` load. Comments, strings and JSX text that spell those words are therefore a
   `guard-parse`, as are `import.meta`, `import x = require(...)`, member access such as
   `obj.import`, and keys or methods named `import` or `require`.
+  The residual in `.ts`, `.mts` and `.cts` files: a call `import(...)` or `require(...)`
+  whose `)` is followed by `{` is read as a method definition and skipped, so a load
+  statement followed by a block (`import('x')`, then `{}` on the next line) passes clean.
+  `.tsx` fails closed on the same source, and `app/web/test/dependencies.test.ts`, which
+  scans raw text, still catches it for `@tauri-apps/` and `node:` imports under `src/`.
 - Cargo: `[patch]`, `[replace]` and dependencies added by build scripts are not seen. A
   registry crate's library name is assumed to be its package name.
 - Frontend: a line comment is located by `\n` line numbers; text after U+2028/U+2029 is

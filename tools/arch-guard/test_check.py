@@ -1187,6 +1187,70 @@ class GuardTest(unittest.TestCase):
                 found = self.guard({self.PROBE: src})
                 self.assertTrue(found)
 
+    # --- issue #20: one-line closing and self-closing tags, and JSX text before an import
+
+    ONE_LINERS = (
+        "export const a = <div><Foo {...p} /></div>;",
+        "export const a = <div><Foo/></div>;",
+        "export const a = <><Foo /></>;",
+        "export const a = <div>{x}<br/>{y}</div>;",
+        "export const a = <a href=\"/x/y\">a/b</a>;",
+        "export const a = <div>{x}/{y}</div>;",
+        "export const a = <Foo a={x / 2} b={/re/.source} />;",
+        "export const a = x ? <Foo /> : <Bar />;",
+        "export const a = [<Foo key=\"1\" />, <Bar key=\"2\" />];",
+        "export const a = <p>x</p>; export const b = <i>y</i>;",
+    )
+    ONE_LINER_HEAD = "declare const p: object, x: number, y: number;\nfunction Foo() { return null; }\nfunction Bar() { return null; }\n"
+
+    def test_one_line_closing_and_self_closing_tags_are_clean(self):
+        for line in self.ONE_LINERS:
+            with self.subTest(line=line):
+                self.assertFlags({self.PROBE: f"{self.ONE_LINER_HEAD}{line}\n"})
+
+    def test_one_line_self_closing_tags_do_not_hide_an_import(self):
+        for line in self.ONE_LINERS:
+            for load, rule in (
+                ("import { invoke } from '@tauri-apps/api/core';", "tauri-only-in-ipc"),
+                ("export const l = import('@tauri-apps/api/core');", "tauri-only-in-ipc"),
+                ("import '../../test/support/snapshots';", "no-production-dependency-on-non-production"),
+                ("export const l = import('../ipc/' + 'tauri');", "frontend-imports-are-literal"),
+            ):
+                with self.subTest(line=line, load=load):
+                    self._tsx(f"{self.ONE_LINER_HEAD}{line} {load} // '\n", rule)
+
+    def test_self_closing_tag_syntax_in_attributes_and_text_does_not_hide_an_import(self):
+        for line in (
+            "export const a = <Foo a=\"/>\" />;",
+            "export const a = <Foo a='</div>' />;",
+            "export const a = <div><Foo /> it's </div>;",
+            "export const a = <div><Foo /> a/b </div>;",
+        ):
+            with self.subTest(line=line):
+                self._tsx(
+                    f"{self.ONE_LINER_HEAD}{line} import {{ invoke }} from '@tauri-apps/api/core';\n",
+                    "tauri-only-in-ipc",
+                )
+
+    def test_import_spelled_in_text_after_a_self_closing_tag_fails_closed(self):
+        self._tsx(f"{self.ONE_LINER_HEAD}export const a = <div><Foo /> import x from 'y' </div>;\n", "guard-parse")
+
+    def test_issue_20_quote_or_slash_in_jsx_text_does_not_hide_a_later_import(self):
+        for text in ("'", "/", "\"", "`", "//"):
+            with self.subTest(text=text):
+                self._tsx(
+                    f"export const a = <div><p>x</p>{text}</div>; import {{ invoke }} from '@tauri-apps/api/core'; // {text}\n",
+                    "tauri-only-in-ipc",
+                )
+
+    def test_ts_load_before_a_block_is_the_documented_method_residual(self):
+        # Known limits: in .ts a call whose `)` is followed by `{` reads as a method
+        # definition, so this load passes; .tsx fails closed on the same source. If the
+        # reader learns to tell the two apart, flip the .ts expectation and the docstring.
+        src = "import('@tauri-apps/api/core')\n{}\n"
+        self.assertFlags({"app/web/src/shell/probe.ts": src})
+        self.assertFlags({self.PROBE: src}, ("guard-parse", self.PROBE))
+
     def test_clean_tsx_lexes_clean(self):
         src = """\
         declare const p: object, a: number, b: number, c: number, s: string;
