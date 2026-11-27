@@ -40,7 +40,11 @@ export interface TerminalStream {
   ): Promise<void>;
   focus(attachment: DecimalU64): Promise<void>;
   setDisplay(attachment: DecimalU64, display: Display): Promise<void>;
-  requestOwnership(attachment: DecimalU64): Promise<void>;
+  /**
+   * `ifVacant` is the ownership generation under which the panel saw no owner: the daemon grants
+   * the request only if the terminal still has no owner under it. `null` always takes ownership.
+   */
+  requestOwnership(attachment: DecimalU64, ifVacant: DecimalU64 | null): Promise<void>;
   /** Ends the panel stream. */
   close(): Promise<void>;
 }

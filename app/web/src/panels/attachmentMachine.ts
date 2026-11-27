@@ -70,7 +70,11 @@ export type MachineEffect =
     }
   | { kind: 'focus'; attachment: DecimalU64 }
   | { kind: 'setDisplay'; attachment: DecimalU64; display: Display }
-  | { kind: 'requestOwnership'; attachment: DecimalU64 }
+  /**
+   * `ifVacant` is the generation under which an automatic claim saw no owner: the daemon grants
+   * it only if that is still so. `null` is a manual "Take input", which always takes ownership.
+   */
+  | { kind: 'requestOwnership'; attachment: DecimalU64; ifVacant: DecimalU64 | null }
   /** Disposes the current instance (WebGL addon first), creates one, then inputs `applied`. */
   | { kind: 'createInstance'; size: TerminalSize; cursor: Cursor }
   | { kind: 'disposeInstance' }
@@ -387,15 +391,15 @@ export class AttachmentMachine {
 
   private onTakeInput(): void {
     if (this.phase === 'live' && this.connected && this.attachment !== null && !this.isOwner()) {
-      this.requestInput(this.attachment);
+      this.requestInput(this.attachment, null);
     }
   }
 
   /**
    * Sends the fit as this attachment's resize first, so the daemon stores it and applies it on
-   * the grant, then asks for input.
+   * the grant, then asks for input. `ifVacant` makes the request conditional (see the effect).
    */
-  private requestInput(attachment: DecimalU64): void {
+  private requestInput(attachment: DecimalU64, ifVacant: DecimalU64 | null): void {
     if (this.ownership !== null && this.container !== null) {
       const fit = fitGrid(this.container, this.cell);
       if (fit !== null) {
@@ -409,10 +413,13 @@ export class AttachmentMachine {
         });
       }
     }
-    this.effects.push({ kind: 'requestOwnership', attachment });
+    this.effects.push({ kind: 'requestOwnership', attachment, ifVacant });
   }
 
-  /** A focused live panel claims a terminal that has no owner, once per ownership generation. */
+  /**
+   * A focused live panel claims a terminal that has no owner, once per ownership generation. The
+   * claim names that generation, so it can't take ownership from a viewer that acquired it since.
+   */
   private maybeClaim(): void {
     if (
       !this.visible ||
@@ -429,7 +436,7 @@ export class AttachmentMachine {
       return;
     }
     this.claimedGeneration = this.ownership.generation;
-    this.requestInput(this.attachment);
+    this.requestInput(this.attachment, this.ownership.generation);
   }
 
   private onResizeTimer(): void {

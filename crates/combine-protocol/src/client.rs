@@ -98,9 +98,16 @@ pub struct SetDisplay {
 
 /// Asks for input ownership without typing. Typed input from a non-owner is
 /// itself the request.
+///
+/// With `if_vacant: None` (a manual "Take input") the daemon grants it whoever owns the
+/// terminal. With `if_vacant: Some(generation)` (a panel claiming a terminal it saw with no
+/// owner) the daemon grants it only if the terminal still has no owner and its ownership
+/// generation is still `generation`; otherwise the request does nothing, with no error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestOwnership {
     pub attachment: AttachmentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_vacant: Option<OwnershipGeneration>,
 }
 
 /// Subscribes the connection to the host's terminals and spaces. The daemon

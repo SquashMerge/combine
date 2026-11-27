@@ -524,7 +524,7 @@ impl Core {
                 self.on_set_display(connection, set.attachment, set.display)
             }
             ClientMessage::RequestOwnership(request) => {
-                self.on_request_ownership(connection, request.attachment)
+                self.on_request_ownership(connection, request.attachment, request.if_vacant)
             }
             ClientMessage::Input(input) => self.on_input(connection, input.attachment, input.bytes),
             ClientMessage::AutomaticReply(reply) => self.on_automatic_reply(connection, reply),
@@ -841,13 +841,32 @@ impl Core {
             .is_some_and(|ownership| ownership.is_owner(id))
     }
 
-    fn on_request_ownership(&mut self, connection: ConnectionId, id: AttachmentId) {
+    /// A manual request (`if_vacant: None`) always grants. An automatic claim grants only while
+    /// the terminal still has no owner under the generation the client saw, so a claim that
+    /// arrives after someone else took input, or after another viewer's claim won, does nothing.
+    fn on_request_ownership(
+        &mut self,
+        connection: ConnectionId,
+        id: AttachmentId,
+        if_vacant: Option<OwnershipGeneration>,
+    ) {
         if !self.active(connection, id) || self.watch_only_error(connection, id) {
             return;
         }
-        if !self.is_owner(id) {
-            self.grant(id, None);
+        if self.is_owner(id) {
+            return;
         }
+        if let Some(seen) = if_vacant {
+            let vacant = self
+                .attachments
+                .get(&id)
+                .and_then(|a| self.ownerships.get(&a.terminal.0))
+                .is_some_and(|o| o.state().owner.is_none() && o.state().generation == seen);
+            if !vacant {
+                return;
+            }
+        }
+        self.grant(id, None);
     }
 
     fn on_input(&mut self, connection: ConnectionId, id: AttachmentId, bytes: Vec<u8>) {

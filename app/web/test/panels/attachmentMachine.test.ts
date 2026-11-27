@@ -51,14 +51,14 @@ describe('attachmentMachine claim', () => {
     const t = liveMachine({ focused: true });
     expect(claimOps(t.ownership(4, null))).toEqual([
       { kind: 'resize', attachment: '7', size: FIT, ownershipGeneration: '4' },
-      { kind: 'requestOwnership', attachment: '7' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: '4' },
     ]);
   });
 
   it('claims without a resize when there is no fit yet', () => {
     const t = liveMachine({ focused: true, container: false });
     expect(claimOps(t.ownership(4, null))).toEqual([
-      { kind: 'requestOwnership', attachment: '7' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: '4' },
     ]);
   });
 
@@ -81,7 +81,7 @@ describe('attachmentMachine claim', () => {
     t.ownership(4, null);
     expect(claimOps(t.feed({ kind: 'focused', focused: true }))).toEqual([
       { kind: 'resize', attachment: '7', size: FIT, ownershipGeneration: '4' },
-      { kind: 'requestOwnership', attachment: '7' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: '4' },
     ]);
   });
 
@@ -90,7 +90,7 @@ describe('attachmentMachine claim', () => {
     expect(claimOps(t.ownership(4, 8))).toEqual([]);
     expect(claimOps(t.ownership(5, null))).toEqual([
       { kind: 'resize', attachment: '7', size: FIT, ownershipGeneration: '5' },
-      { kind: 'requestOwnership', attachment: '7' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: '5' },
     ]);
   });
 
@@ -116,7 +116,7 @@ describe('attachmentMachine claim', () => {
     const effects = t.feed({ kind: 'event', event: ownershipEvent(8, 4, null) });
     expect(claimOps(effects)).toEqual([
       { kind: 'resize', attachment: '8', size: FIT, ownershipGeneration: '4' },
-      { kind: 'requestOwnership', attachment: '8' },
+      { kind: 'requestOwnership', attachment: '8', ifVacant: '4' },
     ]);
   });
 
@@ -125,7 +125,7 @@ describe('attachmentMachine claim', () => {
     t.ownership(4, 8);
     expect(claimOps(t.feed({ kind: 'takeInput' }))).toEqual([
       { kind: 'resize', attachment: '7', size: FIT, ownershipGeneration: '4' },
-      { kind: 'requestOwnership', attachment: '7' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: null },
     ]);
   });
 

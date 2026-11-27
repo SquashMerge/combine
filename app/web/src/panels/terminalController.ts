@@ -267,7 +267,7 @@ export class TerminalController {
       case 'setDisplay':
         return this.send(stream?.setDisplay(effect.attachment, effect.display));
       case 'requestOwnership':
-        return this.send(stream?.requestOwnership(effect.attachment));
+        return this.send(stream?.requestOwnership(effect.attachment, effect.ifVacant));
       case 'createInstance':
         return this.createInstance(effect.size, effect.cursor);
       case 'disposeInstance':

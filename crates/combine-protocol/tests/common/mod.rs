@@ -207,6 +207,7 @@ pub fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<u8>)> {
             "request_ownership",
             ClientMessage::RequestOwnership(RequestOwnership {
                 attachment: AttachmentId(7),
+                if_vacant: None,
             }),
             control_frame(r#"{"type":"request_ownership","attachment":7}"#),
         ),

@@ -194,7 +194,7 @@ export class ScriptedDaemon {
       case 'input':
         return this.input(command.attachment, command.bytes);
       case 'requestOwnership':
-        return this.takeOwnership(command.attachment);
+        return this.takeOwnership(command.attachment, command.ifVacant);
       case 'resize':
         return this.resize(command.attachment, command.size, command.ownershipGeneration);
       case 'automaticReply':
@@ -291,11 +291,13 @@ export class ScriptedDaemon {
     }
   }
 
-  private takeOwnership(id: DecimalU64): void {
+  /** As the daemon does: a claim naming `ifVacant` is granted only while nobody owns under it. */
+  private takeOwnership(id: DecimalU64, ifVacant: DecimalU64 | null): void {
     const attachment = this.attachments.get(Number(id));
     if (attachment === undefined) return;
     const state = this.terminal(attachment.terminal);
     if (state.owner === attachment.id) return;
+    if (ifVacant !== null && (state.owner !== null || String(state.generation) !== ifVacant)) return;
     state.owner = attachment.id;
     state.generation += 1;
     this.notifyOwnership(attachment.terminal);
@@ -305,7 +307,7 @@ export class ScriptedDaemon {
     const attachment = this.attachments.get(Number(id));
     if (attachment === undefined) return;
     this.terminal(attachment.terminal).typed.push({ attachment: id, text: decoder.decode(bytes) });
-    this.takeOwnership(id);
+    this.takeOwnership(id, null);
   }
 
   private resize(id: DecimalU64, size: TerminalSize, generation: DecimalU64): void {

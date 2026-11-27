@@ -117,7 +117,7 @@ describe('TerminalPanel', () => {
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     expect(t.stream().commands('requestOwnership')).toEqual([
-      { op: 'requestOwnership', attachment: '7' },
+      { op: 'requestOwnership', attachment: '7', ifVacant: null },
     ]);
     await t.emit(ownershipEvent(7, 2, 7));
     expect(button.disabled).toBe(true);
@@ -237,7 +237,7 @@ describe('TerminalPanel', () => {
     const t = await mount(true, { focused: true });
     await goLive(t, null);
     expect(t.stream().commands('requestOwnership')).toEqual([
-      { op: 'requestOwnership', attachment: '7' },
+      { op: 'requestOwnership', attachment: '7', ifVacant: '1' },
     ]);
   });
 

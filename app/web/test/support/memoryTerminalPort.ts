@@ -34,7 +34,7 @@ export type SentCommand =
   | { op: 'resize'; attachment: DecimalU64; size: TerminalSize; ownershipGeneration: DecimalU64 }
   | { op: 'focus'; attachment: DecimalU64 }
   | { op: 'setDisplay'; attachment: DecimalU64; display: Display }
-  | { op: 'requestOwnership'; attachment: DecimalU64 }
+  | { op: 'requestOwnership'; attachment: DecimalU64; ifVacant: DecimalU64 | null }
   | { op: 'close' };
 
 export type CommandOp = SentCommand['op'];
@@ -124,8 +124,8 @@ export class MemoryTerminalStream implements TerminalStream {
   setDisplay(attachment: DecimalU64, display: Display): Promise<void> {
     return this.record({ op: 'setDisplay', attachment, display });
   }
-  requestOwnership(attachment: DecimalU64): Promise<void> {
-    return this.record({ op: 'requestOwnership', attachment });
+  requestOwnership(attachment: DecimalU64, ifVacant: DecimalU64 | null): Promise<void> {
+    return this.record({ op: 'requestOwnership', attachment, ifVacant });
   }
   close(): Promise<void> {
     const result = this.record({ op: 'close' });

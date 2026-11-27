@@ -465,11 +465,25 @@ pub fn terminal_request_ownership(
     service: State<'_, HostsService>,
     stream: String,
     attachment: String,
+    if_vacant: Option<String>,
 ) -> Result<(), String> {
-    let message = ClientMessage::RequestOwnership(RequestOwnership {
-        attachment: AttachmentId(parse_decimal(&attachment)?),
-    });
+    let message = request_ownership_message(&attachment, if_vacant.as_deref())?;
     send(&service, stream_id(&stream)?, message)
+}
+
+/// `if_vacant` is the ownership generation, a decimal string, under which a panel saw the
+/// terminal with no owner: its automatic claim. `None` is a manual "Take input".
+fn request_ownership_message(
+    attachment: &str,
+    if_vacant: Option<&str>,
+) -> Result<ClientMessage, String> {
+    Ok(ClientMessage::RequestOwnership(RequestOwnership {
+        attachment: AttachmentId(parse_decimal(attachment)?),
+        if_vacant: if_vacant
+            .map(parse_decimal)
+            .transpose()?
+            .map(OwnershipGeneration),
+    }))
 }
 
 /// Typed input: the body is the bytes, and the headers name the stream and the attachment.
@@ -669,6 +683,31 @@ mod tests {
     }
 
     const MAX: &str = "18446744073709551615";
+
+    #[test]
+    fn a_claim_names_the_generation_it_saw_vacant_and_a_manual_take_names_none() {
+        assert_eq!(
+            request_ownership_message("7", Some(MAX)),
+            Ok(ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: AttachmentId(7),
+                if_vacant: Some(OwnershipGeneration(u64::MAX)),
+            }))
+        );
+        assert_eq!(
+            request_ownership_message("7", None),
+            Ok(ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: AttachmentId(7),
+                if_vacant: None,
+            }))
+        );
+        for bad in ["", "-1", "1.5", "18446744073709551616", "07"] {
+            assert_eq!(
+                request_ownership_message("7", Some(bad)),
+                Err(MALFORMED.to_string()),
+                "{bad}"
+            );
+        }
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

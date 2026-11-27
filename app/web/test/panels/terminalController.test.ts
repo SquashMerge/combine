@@ -908,7 +908,7 @@ describe('terminalController ownership and resize', () => {
     expect(t.controller.getView().canTakeInput).toBe(true);
     t.controller.takeInput();
     expect(t.stream().commands('requestOwnership')).toEqual([
-      { op: 'requestOwnership', attachment: '7' },
+      { op: 'requestOwnership', attachment: '7', ifVacant: null },
     ]);
     t.stream().emit(ownershipEvent(7, 2, 7));
     expect(t.controller.getView().canTakeInput).toBe(false);

@@ -75,6 +75,7 @@ impl Env {
             .unwrap();
         self.send(ClientMessage::RequestOwnership(RequestOwnership {
             attachment,
+            if_vacant: None,
         }));
         self.pump();
         let mut messages = messages;

@@ -150,7 +150,10 @@ impl Rig {
     fn request_ownership(&mut self, connection: ConnectionId, id: AttachmentId) {
         self.send(
             connection,
-            ClientMessage::RequestOwnership(RequestOwnership { attachment: id }),
+            ClientMessage::RequestOwnership(RequestOwnership {
+                attachment: id,
+                if_vacant: None,
+            }),
         );
     }
 
@@ -1152,6 +1155,90 @@ fn a_resume_naming_the_same_instance_resumes_and_another_is_backend_mismatch() {
     );
     let messages = rig.pull(c2);
     assert_eq!(names(&messages), ["resumed", "ownership"]);
+}
+
+fn claim(rig: &mut Rig, connection: ConnectionId, id: AttachmentId, seen: OwnershipGeneration) {
+    rig.send(
+        connection,
+        ClientMessage::RequestOwnership(RequestOwnership {
+            attachment: id,
+            if_vacant: Some(seen),
+        }),
+    );
+}
+
+#[test]
+fn of_two_claims_on_the_same_vacant_generation_only_the_first_is_granted() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    assert_eq!(rig.owner(1), None);
+    let seen = rig.generation(1);
+
+    claim(&mut rig, c1, a, seen);
+    assert_eq!(rig.owner(1), Some(a));
+    let granted = rig.generation(1);
+    rig.pull(c1);
+    rig.pull(c2);
+    rig.effects();
+
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(rig.owner(1), Some(a), "the second claim must not steal");
+    assert_eq!(
+        rig.generation(1),
+        granted,
+        "a refused claim takes no generation"
+    );
+    assert!(rig.pull(c1).is_empty());
+    assert!(
+        rig.pull(c2).is_empty(),
+        "a refused claim is answered with nothing"
+    );
+    assert!(
+        rig.effects().is_empty(),
+        "a refused claim resizes and focuses nothing"
+    );
+}
+
+#[test]
+fn a_manual_request_still_takes_ownership_from_an_owner() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    let seen = rig.generation(1);
+    claim(&mut rig, c1, a, seen);
+    assert_eq!(rig.owner(1), Some(a));
+    rig.request_ownership(c2, b);
+    assert_eq!(rig.owner(1), Some(b));
+}
+
+#[test]
+fn a_claim_after_someone_typed_or_at_an_older_vacant_generation_does_nothing() {
+    let mut rig = Rig::new();
+    let (c1, c2) = (rig.core.connect(), rig.core.connect());
+    let a = rig.open(c1, 1, false);
+    let b = rig.open(c2, 1, false);
+    let seen = rig.generation(1);
+    rig.input(c1, a, b"x");
+    assert_eq!(rig.owner(1), Some(a));
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(rig.owner(1), Some(a));
+
+    // The owner leaves with nobody focused to inherit: no owner again, at a newer generation.
+    rig.core.disconnect(c1, rig.now());
+    assert_eq!(rig.owner(1), None);
+    let vacant = rig.generation(1);
+    assert_ne!(vacant, seen);
+    claim(&mut rig, c2, b, seen);
+    assert_eq!(
+        rig.owner(1),
+        None,
+        "a claim must name the current generation"
+    );
+    claim(&mut rig, c2, b, vacant);
+    assert_eq!(rig.owner(1), Some(b));
 }
 
 #[test]

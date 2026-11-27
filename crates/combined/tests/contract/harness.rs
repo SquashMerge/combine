@@ -382,7 +382,10 @@ impl<'t, T: Target> Harness<'t, T> {
     ) -> Outcome {
         self.send(
             c,
-            ClientMessage::RequestOwnership(RequestOwnership { attachment }),
+            ClientMessage::RequestOwnership(RequestOwnership {
+                attachment,
+                if_vacant: None,
+            }),
         )
         .await
     }

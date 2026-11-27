@@ -81,8 +81,8 @@ function createStream(stream: string): TerminalStream {
     async setDisplay(attachment, display) {
       await invoke(TERMINAL_SET_DISPLAY_COMMAND, { stream, attachment, display });
     },
-    async requestOwnership(attachment) {
-      await invoke(TERMINAL_REQUEST_OWNERSHIP_COMMAND, { stream, attachment });
+    async requestOwnership(attachment, ifVacant) {
+      await invoke(TERMINAL_REQUEST_OWNERSHIP_COMMAND, { stream, attachment, ifVacant });
     },
     async close() {
       await invoke(TERMINAL_CLOSE_STREAM_COMMAND, { stream });

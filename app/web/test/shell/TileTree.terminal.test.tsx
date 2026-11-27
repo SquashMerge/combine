@@ -385,7 +385,9 @@ describe('TileTree terminal tabs', () => {
       }
     });
     await flush();
-    expect(one.commands('requestOwnership')).toEqual([{ op: 'requestOwnership', attachment: '7' }]);
+    expect(one.commands('requestOwnership')).toEqual([
+      { op: 'requestOwnership', attachment: '7', ifVacant: '1' },
+    ]);
     expect(two.commands('requestOwnership')).toEqual([]);
     const ops = one.sent.map((command) => command.op);
     expect(ops.indexOf('resize')).toBeGreaterThanOrEqual(0);
@@ -393,7 +395,9 @@ describe('TileTree terminal tabs', () => {
 
     view.rerender(tree(port, fake, both, {}, { focused: 't2' }));
     await flush();
-    expect(two.commands('requestOwnership')).toEqual([{ op: 'requestOwnership', attachment: '8' }]);
+    expect(two.commands('requestOwnership')).toEqual([
+      { op: 'requestOwnership', attachment: '8', ifVacant: '1' },
+    ]);
     expect(one.commands('requestOwnership')).toHaveLength(1);
   });
 
