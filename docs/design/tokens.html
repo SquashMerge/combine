@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Combine interface tokens</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap">
+<style>
+body{margin:0;font-variant-ligatures:none}
+button{font:inherit}
+</style>
+</head>
+<body>
+<div style="width: 960px; height: 900px; box-sizing: border-box; padding: 48px; background: #0B0C10; color: #F7F7FB; font-family: Inter, system-ui, sans-serif; font-size: 14px; line-height: 20px; display: flex; flex-direction: column; gap: 24px">
+
+<div style="display: flex; flex-direction: column; gap: 16px">
+<h2 style="margin: 0; font-family: Manrope, sans-serif; font-weight: 700; font-size: 18px; line-height: 26px">Colour roles</h2>
+<div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px">
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #0B0C10; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Ink</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#0B0C10</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Window, terminal screen</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #14151D; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Surface</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#14151D</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Rail, tiles</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #1D1E2A; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Raised</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#1D1E2A</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Controls, dividers</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #7770DC; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Purple</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#7770DC</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Selected space, focused tile</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #ABA5FF; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Lavender</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#ABA5FF</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Active tab, focus ring, prompt</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #FFAA10; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Amber</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#FFAA10</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">One primary action, cursor</div></div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px">
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #F7F7FB; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Primary text</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#F7F7FB</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Names, output</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #B8BAC8; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Muted text</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#B8BAC8</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Commands, states</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #777A8E; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Control border</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#777A8E</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Buttons, exited</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #5FD6A0; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Success</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#5FD6A0</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Proposed; not in the guide</div></div>
+<div style="display: flex; flex-direction: column; gap: 6px"><div style="height: 40px; border-radius: 8px; background: #FF8A80; border: 1px solid #1D1E2A"></div><div style="font-weight: 600; font-size: 13px; line-height: 18px">Danger</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 16px; color: #B8BAC8">#FF8A80</div><div style="font-size: 12px; line-height: 16px; color: #B8BAC8">Proposed; not in the guide</div></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 16px">
+<h2 style="margin: 0; font-family: Manrope, sans-serif; font-weight: 700; font-size: 18px; line-height: 26px">Type</h2>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 8px"><div style="font-family: Manrope, sans-serif; font-weight: 700; font-size: 24px; line-height: 32px">Space title</div><div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Manrope 700 · 24/32 and 18/26 · space and panel headings</div></div>
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 8px"><div style="font-size: 14px; line-height: 20px; height: 32px; display: flex; align-items: center">Tabs, labels and panel text</div><div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Inter 400/600 · 14/20 · interface; 12/18 captions</div></div>
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 8px"><div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 20px; height: 32px; display: flex; align-items: center">./tools/verify</div><div style="font-size: 12px; line-height: 18px; color: #B8BAC8">JetBrains Mono 400 · 13/20 · terminals, commands, paths, IDs</div></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 16px">
+<h2 style="margin: 0; font-family: Manrope, sans-serif; font-weight: 700; font-size: 18px; line-height: 26px">Components</h2>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Buttons · 8 px radius · one amber action per view</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+<button style="height: 40px; padding: 0 16px; border: 0; border-radius: 8px; background: #FFAA10; color: #0B0C10; font-weight: 600">Add terminal</button>
+<button style="height: 40px; padding: 0 16px; border: 1px solid #777A8E; border-radius: 8px; background: transparent; color: #F7F7FB">Take input</button>
+<button style="height: 40px; padding: 0 16px; border: 1px solid #777A8E; border-radius: 8px; background: transparent; color: #F7F7FB; outline: 2px solid #ABA5FF; outline-offset: 2px">Focused</button>
+</div>
+</div>
+
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Tabs · lavender rule marks the shown tab</div>
+<div style="display: flex; gap: 4px; border-bottom: 1px solid #1D1E2A">
+<button role="tab" aria-selected="true" style="white-space: nowrap; flex-shrink: 0; height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid #ABA5FF; background: transparent; color: #F7F7FB; font-weight: 600">Active terminal</button>
+<button role="tab" aria-selected="false" style="white-space: nowrap; flex-shrink: 0; height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #B8BAC8">Review notes</button>
+<button role="tab" aria-selected="false" style="white-space: nowrap; flex-shrink: 0; height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #B8BAC8">CI status · scratch</button>
+</div>
+</div>
+
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Terminal states · shape and word, never colour alone</div>
+<div style="display: flex; flex-wrap: wrap; gap: 24px">
+<span style="display: flex; align-items: center; gap: 8px; color: #FFAA10"><svg aria-hidden="true" viewBox="0 0 12 12" style="width: 12px; height: 12px"><circle cx="6" cy="6" r="5" fill="#FFAA10"/></svg>working</span>
+<span style="display: flex; align-items: center; gap: 8px; color: #B8BAC8"><svg aria-hidden="true" viewBox="0 0 12 12" style="width: 12px; height: 12px"><circle cx="6" cy="6" r="4" fill="none" stroke="#B8BAC8" stroke-width="2"/></svg>idle</span>
+<span style="display: flex; align-items: center; gap: 8px; color: #B8BAC8"><svg aria-hidden="true" viewBox="0 0 12 12" style="width: 12px; height: 12px"><rect x="2" y="2" width="8" height="8" rx="1" fill="#777A8E"/></svg>exited</span>
+<span style="display: flex; align-items: center; gap: 8px; color: #FF8A80"><svg aria-hidden="true" viewBox="0 0 12 12" style="width: 12px; height: 12px" fill="none" stroke="#FF8A80" stroke-width="2" stroke-linecap="round"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>gone</span>
+</div>
+</div>
+
+<div style="background: #14151D; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-size: 12px; line-height: 18px; color: #B8BAC8">Tiles · 12 px radius · purple border on the focused tile</div>
+<div style="display: flex; gap: 8px">
+<div style="flex: 1 1 0px; height: 48px; border-radius: 12px; background: #0B0C10; border: 1px solid #7770DC; display: flex; align-items: center; justify-content: center; font-size: 12px">Focused</div>
+<div style="flex: 1 1 0px; height: 48px; border-radius: 12px; background: #0B0C10; border: 1px solid #1D1E2A; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #B8BAC8">Resting</div>
+</div>
+</div>
+
+</div>
+</div>
+
+</div>
+</body>
+</html>
