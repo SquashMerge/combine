@@ -24,7 +24,7 @@ use crate::rpc::socket::{self, BindError};
 use crate::rpc::{self, ServeError, ServeOptions, ServerParts, ServerStats};
 use cli::Command;
 use clock::{MonotonicClock, SystemWallClock};
-use combine_protocol::HostId;
+use combine_protocol::{BackendInfo, HostId};
 use config::{DaemonConfigError, DaemonEnv};
 use fd_limit::FdLimits;
 use ids::IdReservation;
@@ -220,9 +220,13 @@ pub fn server_parts_with_panels(
         backend.capabilities(),
     )
     .map_err(|error| StartError::Runtime(format!("invalid core configuration: {error}")))?;
+    let backend_info = BackendInfo {
+        id: backend.id().to_string(),
+        instance: backend.instance(),
+    };
     Ok(ServerParts {
         driver: Driver::new(core, backend),
-        terminals: TerminalList::new(Box::new(FsGitProbe)),
+        terminals: TerminalList::new(Box::new(FsGitProbe), backend_info),
         host_id,
         ids,
         clock: MonotonicClock::new(),

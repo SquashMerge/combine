@@ -106,12 +106,7 @@ impl Inbox {
             DaemonMessage::Terminals(terminals) => {
                 let ids = terminals.terminals.iter().map(|t| t.id.clone()).collect();
                 self.listed.push(ids);
-                self.instances.push(
-                    terminals
-                        .backend
-                        .clone()
-                        .and_then(|backend| backend.instance),
-                );
+                self.instances.push(terminals.backend.instance.clone());
             }
             DaemonMessage::Ownership(ownership) => {
                 self.seen.entry(ownership.attachment).or_default().ownership =

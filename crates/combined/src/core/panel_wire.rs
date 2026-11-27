@@ -28,10 +28,10 @@ pub fn panel_summary(view: &PanelView) -> PanelSummary {
         state: view.state,
         error: failed_error(view),
         created_by: view.file.created_by.clone(),
-        lifetime: Some(match view.lifetime {
+        lifetime: match view.lifetime {
             Lifetime::Persistent => PanelLifetime::Persistent,
             Lifetime::Scratch => PanelLifetime::Scratch,
-        }),
+        },
     }
 }
 

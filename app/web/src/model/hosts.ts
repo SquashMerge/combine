@@ -41,8 +41,8 @@ export interface HostView {
   hostId: HostId | null;
   connection: ConnectionState;
   spaces: SpaceView[];
-  /** `null` until the host's daemon has named its backend. The parser always sets it. */
-  backend?: BackendView | null;
+  /** `null` until the host's first terminal list has arrived. */
+  backend: BackendView | null;
 }
 
 export interface ConfigStatus {
@@ -140,7 +140,7 @@ function parseSpace(value: unknown, what: string): SpaceView {
 }
 
 function parseBackend(value: unknown, what: string): BackendView | null {
-  if (value === undefined || value === null) return null;
+  if (value === null) return null;
   const r = record(value, what);
   return {
     id: str(r['id'], `${what}.id`),

@@ -8,7 +8,7 @@ use combine_protocol::McpCaller;
 use combined::core::{resolve_caller, CallerMatch, ResolvedCaller, TerminalList};
 use combined::model::{SpaceId, TermInfo, TermState};
 use combined::testing::FakeCallerIdentity;
-use common::FakeGitProbe;
+use common::{fake_backend_info, FakeGitProbe};
 
 const SOCKET: &str = "/tmp/c/core.sock";
 
@@ -25,7 +25,7 @@ fn info(term: &str, cwd: &str) -> TermInfo {
 }
 
 fn terminals() -> TerminalList {
-    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()));
+    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()), fake_backend_info());
     list.apply_list(&[
         info("t1", "/work/a"),
         info("t2", "/work/a/inner"),
@@ -106,7 +106,7 @@ fn relative_and_dotdot_cwds_give_none() {
 
 #[test]
 fn spaces_without_an_absolute_root_never_match_a_cwd() {
-    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()));
+    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()), fake_backend_info());
     list.apply_list(&[
         info("t1", "/work/a"),
         info("t2", ""),

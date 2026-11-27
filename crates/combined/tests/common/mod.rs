@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use combine_protocol::{AttachRequestOptions, Display};
+use combine_protocol::{AttachRequestOptions, BackendInfo, Display};
 use combined::model::SpawnSpec;
 use combined::ports::{GitEntry, GitProbe};
 
@@ -35,6 +35,14 @@ pub fn spawn_spec(cwd: &str, cols: u16, rows: u16) -> SpawnSpec {
         labels: BTreeMap::new(),
         cols,
         rows,
+    }
+}
+
+/// The backend a terminal list names: the fake's ID and instance.
+pub fn fake_backend_info() -> BackendInfo {
+    BackendInfo {
+        id: "fake".to_string(),
+        instance: Some("fake-core".to_string()),
     }
 }
 

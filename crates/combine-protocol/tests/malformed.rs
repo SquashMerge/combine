@@ -359,6 +359,20 @@ fn a_backend_that_is_not_an_object_is_bad_json() {
 }
 
 #[test]
+fn terminals_without_a_backend_is_bad_json() {
+    let base = golden_json("terminals");
+    for json in [
+        patched(&base, "/backend", None),
+        patched(&base, "/backend", Some(serde_json::json!(null))),
+    ] {
+        assert!(
+            is_bad_json(DaemonMessage::decode(&control_frame(&json))),
+            "{json}"
+        );
+    }
+}
+
+#[test]
 fn control_payload_that_is_not_an_object_has_a_fixed_detail() {
     assert_eq!(
         ClientMessage::decode(&control_frame("  [1]")),

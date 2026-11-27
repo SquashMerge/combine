@@ -163,6 +163,10 @@ impl TerminalBackend for Stub {
         "stub"
     }
 
+    fn instance(&self) -> Option<String> {
+        None
+    }
+
     fn capabilities(&self) -> Capabilities {
         caps()
     }

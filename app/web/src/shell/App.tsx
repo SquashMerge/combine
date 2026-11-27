@@ -26,7 +26,7 @@ import {
   shownTab,
   tileHolding,
 } from '../model/layout';
-import { type PanelLifetime, panelEntry, tabLabel } from '../model/panels';
+import { panelEntry, tabLabel } from '../model/panels';
 import {
   ACTIVE_TERMINAL_TAB,
   type TerminalTabsContext,
@@ -78,7 +78,6 @@ interface ConfirmClose {
   space: SpaceKey;
   panel: string;
   label: string;
-  lifetime: PanelLifetime | null;
 }
 
 interface PendingSelection {
@@ -450,9 +449,8 @@ export function App({
         return;
       }
       if (entry.kind === 'loading') return;
-      const { lifetime } = entry.summary;
-      if (lifetime === 'persistent') sendPanelAction('close', space, panel, label);
-      else setConfirmClose({ space, panel, label, lifetime });
+      if (entry.summary.lifetime === 'persistent') sendPanelAction('close', space, panel, label);
+      else setConfirmClose({ space, panel, label });
     },
     [layout, panelList, sendPanelAction, terminalTabs],
   );
@@ -664,7 +662,6 @@ export function App({
       {confirmClose !== null && (
         <ConfirmClosePanel
           label={confirmClose.label}
-          lifetime={confirmClose.lifetime}
           onCancel={() => setConfirmClose(null)}
           onConfirm={() => {
             sendPanelAction('close', confirmClose.space, confirmClose.panel, confirmClose.label);

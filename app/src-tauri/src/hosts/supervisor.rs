@@ -133,7 +133,7 @@ pub trait HostEvents: Send + Sync {
     fn connection(&self, name: &str, state: ConnectionState);
     fn host_id(&self, name: &str, host_id: &HostId);
     /// The seam S4 uses to publish a host's spaces.
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>);
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: BackendView);
     /// A space's layout: the reply to a request, or a push when `request` is `None`.
     fn layout(&self, _host_id: &HostId, _request: Option<RequestId>, _snapshot: LayoutSnapshot) {}
     /// The daemon refused a layout request. `message` is trimmed external text.
@@ -868,9 +868,16 @@ mod tests {
 
     struct SpacesPhase;
 
+    fn backend_a() -> BackendView {
+        BackendView {
+            id: "backend-a".to_string(),
+            instance: Some("core-a".to_string()),
+        }
+    }
+
     impl SessionPhase for SpacesPhase {
         fn run(&mut self, io: SessionIo<'_>) -> SessionEnd {
-            io.events.spaces(io.host_id, Vec::new(), None);
+            io.events.spaces(io.host_id, Vec::new(), backend_a());
             SessionEnd::Io("reset".to_string())
         }
     }
@@ -886,7 +893,7 @@ mod tests {
         let rig = rig;
         run_to_end(&rig, Some(a()), None);
         let events: Vec<Event> = rig.events.try_iter().collect();
-        assert!(events.contains(&Event::Spaces(a(), Vec::new(), None)));
+        assert!(events.contains(&Event::Spaces(a(), Vec::new(), backend_a())));
         assert_eq!(
             events.last(),
             Some(&Event::Connection(

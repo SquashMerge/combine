@@ -252,9 +252,9 @@ fn removed_panels_are_not_listed_and_the_rest_are_sorted() {
 fn a_summary_carries_the_views_lifetime() {
     let space = SpaceId("/work/app".to_owned());
     let mut v = view(&space, "p", PanelState::Validated);
-    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Persistent));
+    assert_eq!(panel_summary(&v).lifetime, PanelLifetime::Persistent);
     v.lifetime = Lifetime::Scratch;
-    assert_eq!(panel_summary(&v).lifetime, Some(PanelLifetime::Scratch));
+    assert_eq!(panel_summary(&v).lifetime, PanelLifetime::Scratch);
 }
 
 #[test]

@@ -15,23 +15,19 @@ use crate::ports::GitProbe;
 pub struct TerminalList {
     spaces: Spaces,
     terminals: Vec<TermInfo>,
-    backend: Option<BackendInfo>,
+    backend: BackendInfo,
     changed: bool,
 }
 
 impl TerminalList {
-    pub fn new(probe: Box<dyn GitProbe>) -> TerminalList {
+    /// An empty list of `backend`'s terminals. Every snapshot names `backend`.
+    pub fn new(probe: Box<dyn GitProbe>, backend: BackendInfo) -> TerminalList {
         TerminalList {
             spaces: Spaces::new(probe),
             terminals: Vec::new(),
-            backend: None,
+            backend,
             changed: false,
         }
-    }
-
-    /// Names the backend the snapshots report. It doesn't change what a watcher is owed.
-    pub fn set_backend(&mut self, backend: BackendInfo) {
-        self.backend = Some(backend);
     }
 
     /// Replaces the table with the backend's list, in its order. The first of any duplicate IDs wins.

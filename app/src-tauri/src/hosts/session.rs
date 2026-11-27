@@ -89,7 +89,7 @@ impl SessionPhase for LivePhase {
                     };
                     match message {
                         DaemonMessage::Terminals(list) => {
-                            let instance = list.backend.as_ref().and_then(|b| b.instance.clone());
+                            let instance = list.backend.instance.clone();
                             match (session, instance) {
                                 (None, instance) => {
                                     session =
@@ -289,7 +289,10 @@ mod tests {
                 kind: SpaceKind::Folder,
                 terminals: Vec::<TermId>::new(),
             }],
-            backend: None,
+            backend: BackendInfo {
+                id: "herdr-core".to_string(),
+                instance: None,
+            },
         }
     }
 
@@ -319,7 +322,7 @@ mod tests {
     impl HostEvents for RegistryEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+        fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: BackendView) {
             self.0
                 .lock()
                 .expect("registry")
@@ -425,13 +428,7 @@ mod tests {
     impl HostEvents for LayoutEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(
-            &self,
-            _host_id: &HostId,
-            _spaces: Vec<SpaceView>,
-            _backend: Option<BackendView>,
-        ) {
-        }
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>, _backend: BackendView) {}
         fn layout(&self, host_id: &HostId, request: Option<RequestId>, snapshot: LayoutSnapshot) {
             self.0.layout(host_id, request, snapshot);
         }
@@ -609,13 +606,7 @@ mod tests {
     impl HostEvents for SpawnEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(
-            &self,
-            _host_id: &HostId,
-            _spaces: Vec<SpaceView>,
-            _backend: Option<BackendView>,
-        ) {
-        }
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>, _backend: BackendView) {}
         fn spawn_reply(&self, host_id: &HostId, reply: SpawnReply) {
             self.0.spawn_reply(host_id, reply);
         }
@@ -627,13 +618,7 @@ mod tests {
     impl HostEvents for BothEvents {
         fn connection(&self, _name: &str, _state: ConnectionState) {}
         fn host_id(&self, _name: &str, _host_id: &HostId) {}
-        fn spaces(
-            &self,
-            _host_id: &HostId,
-            _spaces: Vec<SpaceView>,
-            _backend: Option<BackendView>,
-        ) {
-        }
+        fn spaces(&self, _host_id: &HostId, _spaces: Vec<SpaceView>, _backend: BackendView) {}
         fn layout_error(
             &self,
             host_id: &HostId,
@@ -808,7 +793,7 @@ mod tests {
                 state: PanelState::Validated,
                 error: None,
                 created_by: Some(CreatedBy::User),
-                lifetime: Some(PanelLifetime::Scratch),
+                lifetime: PanelLifetime::Scratch,
             }],
             skipped: Vec::new(),
             error: None,
@@ -967,10 +952,10 @@ mod tests {
 
     fn list_of(instance: Option<&str>) -> Terminals {
         Terminals {
-            backend: Some(BackendInfo {
+            backend: BackendInfo {
                 id: "herdr-core".to_string(),
                 instance: instance.map(str::to_string),
-            }),
+            },
             ..list()
         }
     }

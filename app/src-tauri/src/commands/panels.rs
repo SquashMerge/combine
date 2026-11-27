@@ -79,7 +79,7 @@ pub struct IpcPanelSummary {
     pub state: PanelState,
     pub error: Option<IpcPanelError>,
     pub created_by: Option<IpcCreatedBy>,
-    pub lifetime: Option<PanelLifetime>,
+    pub lifetime: PanelLifetime,
 }
 
 impl From<PanelSummary> for IpcPanelSummary {
@@ -433,7 +433,7 @@ mod tests {
                 created_by: Some(CreatedBy::Agent {
                     slot: Some("claude".to_string()),
                 }),
-                lifetime: Some(PanelLifetime::Persistent),
+                lifetime: PanelLifetime::Persistent,
             },
             PanelSummary {
                 id: "notes".to_string(),
@@ -443,7 +443,7 @@ mod tests {
                 state: PanelState::Validated,
                 error: None,
                 created_by: Some(CreatedBy::User),
-                lifetime: Some(PanelLifetime::Scratch),
+                lifetime: PanelLifetime::Scratch,
             },
         ]
     }
@@ -581,7 +581,7 @@ mod tests {
             created_by: Some(CreatedBy::Agent {
                 slot: Some("sl\not".to_string()),
             }),
-            lifetime: None,
+            lifetime: PanelLifetime::Scratch,
         };
         let panels: IpcPanelList = Panels {
             request: None,

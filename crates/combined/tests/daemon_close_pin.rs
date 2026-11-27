@@ -246,7 +246,7 @@ fn pin_keeps_the_tab_and_the_panel_listed_throughout() {
     let (after, panels) = watch_panels(&mut client, &rig.space, 3);
     assert_eq!(names(&after), ["s"]);
     let listed = panels.panels.iter().find(|panel| panel.id == "s").unwrap();
-    assert_eq!(listed.lifetime, Some(PanelLifetime::Persistent));
+    assert_eq!(listed.lifetime, PanelLifetime::Persistent);
     assert_eq!(rig.write_count(LAYOUT_FILE), writes);
     assert_eq!(stored_names(&rig), Some(vec!["s".to_string()]));
 }
@@ -453,7 +453,7 @@ fn a_close_whose_scratch_delete_fails_is_refused_and_keeps_the_panel() {
     assert_eq!(names(&layout), ["s"]);
     let listed = panels.panels.iter().find(|panel| panel.id == "s").unwrap();
     assert_ne!(listed.state, PanelState::Removed);
-    assert_eq!(listed.lifetime, Some(PanelLifetime::Scratch));
+    assert_eq!(listed.lifetime, PanelLifetime::Scratch);
     assert_eq!(rig.scratch.dirs().len(), 1);
     assert_eq!(stored_names(&rig), Some(vec!["s".to_string()]));
     assert_eq!(rig.write_count(LAYOUT_FILE), writes);

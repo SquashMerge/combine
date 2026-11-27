@@ -276,11 +276,18 @@ pub(super) fn diff(
 
 #[cfg(test)]
 mod tests {
-    use combine_protocol::{TermId, TerminalState};
+    use combine_protocol::{BackendInfo, TermId, TerminalState};
 
     use super::*;
     use crate::core::TerminalList;
     use crate::ports::{GitEntry, GitProbe};
+
+    fn core_a() -> BackendInfo {
+        BackendInfo {
+            id: "herdr-core".to_string(),
+            instance: Some("core-a".to_string()),
+        }
+    }
 
     const EVENTS: &str = include_str!("fixtures/events.jsonl");
     const SUBSCRIBE_1: &str = include_str!("fixtures/subscribe-1.json");
@@ -457,7 +464,7 @@ mod tests {
     #[test]
     fn a_finished_then_removed_terminal_leaves_the_daemon_snapshot() {
         let mut state = state_of(SUBSCRIBE_1);
-        let mut list = TerminalList::new(Box::new(NoGit));
+        let mut list = TerminalList::new(Box::new(NoGit), core_a());
         list.apply_list(&state.cache.values().cloned().collect::<Vec<_>>());
         let t2 = term_id("t2");
         let state_of_t2 = |list: &TerminalList| {
@@ -536,7 +543,7 @@ mod tests {
             last_seq: 0,
             cache: before,
         };
-        let mut list = TerminalList::new(Box::new(NoGit));
+        let mut list = TerminalList::new(Box::new(NoGit), core_a());
         list.apply_list(&state.cache.values().cloned().collect::<Vec<_>>());
         for event in state.reseed(
             &Snapshot {

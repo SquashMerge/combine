@@ -10,7 +10,7 @@ use combine_protocol::{
 use combined::core::{Core, CoreConfig, TerminalList};
 use combined::model::{Millis, SpaceId, TermEvent, TermInfo, TermState};
 use combined::ports::Capabilities;
-use common::FakeGitProbe;
+use common::{fake_backend_info, FakeGitProbe};
 
 fn id(text: &str) -> TermId {
     TermId(text.to_string())
@@ -29,9 +29,10 @@ fn info(term: &str, cwd: &str) -> TermInfo {
 }
 
 fn list() -> TerminalList {
-    TerminalList::new(Box::new(
-        FakeGitProbe::default().with_repository("/work/repo"),
-    ))
+    TerminalList::new(
+        Box::new(FakeGitProbe::default().with_repository("/work/repo")),
+        fake_backend_info(),
+    )
 }
 
 fn ids(list: &TerminalList) -> Vec<String> {

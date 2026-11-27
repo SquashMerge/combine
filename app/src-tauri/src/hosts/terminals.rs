@@ -29,12 +29,12 @@ pub fn space_views(host_id: &HostId, terminals: &Terminals) -> Vec<SpaceView> {
         .collect()
 }
 
-/// The backend the daemon named, if it did.
-pub fn backend_view(terminals: &Terminals) -> Option<BackendView> {
-    terminals.backend.as_ref().map(|backend| BackendView {
-        id: backend.id.clone(),
-        instance: backend.instance.clone(),
-    })
+/// The backend the daemon named.
+pub fn backend_view(terminals: &Terminals) -> BackendView {
+    BackendView {
+        id: terminals.backend.id.clone(),
+        instance: terminals.backend.instance.clone(),
+    }
 }
 
 fn summary(info: &TerminalInfo) -> TerminalSummary {
@@ -87,6 +87,13 @@ mod tests {
         }
     }
 
+    fn backend_a() -> BackendInfo {
+        BackendInfo {
+            id: "backend-a".to_string(),
+            instance: Some("0123abcd".to_string()),
+        }
+    }
+
     fn space(id: &str, terminals: &[&str]) -> SpaceInfo {
         SpaceInfo {
             id: id.to_string(),
@@ -101,7 +108,7 @@ mod tests {
             request: None,
             terminals: vec![terminal],
             spaces: vec![space("/work", &[&id])],
-            backend: None,
+            backend: backend_a(),
         };
         let mut views = space_views(&host_id(HOST_A), &list);
         views.remove(0).terminals.remove(0)
@@ -113,30 +120,22 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: Vec::new(),
-            backend: None,
+            backend: backend_a(),
         };
-        assert_eq!(backend_view(&list), None);
-        list.backend = Some(BackendInfo {
-            id: "backend-a".to_string(),
-            instance: Some("0123abcd".to_string()),
-        });
         assert_eq!(
             backend_view(&list),
-            Some(BackendView {
+            BackendView {
                 id: "backend-a".to_string(),
                 instance: Some("0123abcd".to_string()),
-            })
+            }
         );
-        list.backend = Some(BackendInfo {
-            id: "backend-a".to_string(),
-            instance: None,
-        });
+        list.backend.instance = None;
         assert_eq!(
             backend_view(&list),
-            Some(BackendView {
+            BackendView {
                 id: "backend-a".to_string(),
                 instance: None,
-            })
+            }
         );
     }
 
@@ -154,7 +153,7 @@ mod tests {
                 info("t2", &["zsh"], &[], WireState::Exited),
             ],
             spaces: vec![space("/work/a", &["t1", "t2"])],
-            backend: None,
+            backend: backend_a(),
         };
         let views = space_views(&host_id(HOST_A), &list);
         assert_eq!(
@@ -188,7 +187,7 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: vec![space("/empty", &[])],
-            backend: None,
+            backend: backend_a(),
         };
         let views = space_views(&host_id(HOST_A), &list);
         assert_eq!(views.len(), 1);

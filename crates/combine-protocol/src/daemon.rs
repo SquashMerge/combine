@@ -140,10 +140,8 @@ pub struct Terminals {
     pub request: Option<RequestId>,
     pub terminals: Vec<TerminalInfo>,
     pub spaces: Vec<SpaceInfo>,
-    /// The backend that owns these terminals. `None` from a daemon that
-    /// doesn't say.
-    #[serde(default)]
-    pub backend: Option<BackendInfo>,
+    /// The backend that owns these terminals.
+    pub backend: BackendInfo,
 }
 
 /// A space's layout. With `request: Some(..)` it answers a `watch_layout` or

@@ -921,7 +921,8 @@ mod tests {
                 "panels": [{
                     "id": "classes", "title": "Class diagram", "renderer": "mermaid",
                     "revision": 7, "state": "validated", "error": null,
-                    "created_by": { "type": "agent", "slot": "claude" }
+                    "created_by": { "type": "agent", "slot": "claude" },
+                    "lifetime": "persistent"
                 }],
                 "skipped": [], "error": null
             }),

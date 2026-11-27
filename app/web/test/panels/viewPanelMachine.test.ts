@@ -17,7 +17,7 @@ const rev = (n: string) => n as DecimalU64;
 function listed(revision: string, state: PanelState = 'validated', error: PanelEntryError = null): PanelEntry {
   return {
     kind: 'listed',
-    summary: { id: 'p', title: null, renderer: 'markdown', revision: rev(revision), state, error, createdBy: null, lifetime: null },
+    summary: { id: 'p', title: null, renderer: 'markdown', revision: rev(revision), state, error, createdBy: null, lifetime: 'persistent' },
   };
 }
 type PanelEntryError = Extract<PanelEntry, { kind: 'listed' }>['summary']['error'];

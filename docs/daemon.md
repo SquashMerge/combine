@@ -93,14 +93,14 @@ SIGTERM and SIGINT stop the daemon cleanly. It writes every pending layout chang
 
 ## Check the bridge over ssh
 
-This is a manual check. It is not part of the automated pass criteria: no automated test runs ssh or reads `~/.ssh`. `sh tools/verify-herdr-core` runs `combined connect` as a subprocess with piped stdio, which is what `ssh -T` runs on the far side. The general form is `ssh -T -o BatchMode=yes localhost <path>/combined connect`. Keep the daemon's `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`. With Remote Login on, this sends a `hello` for protocol version 6 through `combined connect` and prints the reply:
+This is a manual check. It is not part of the automated pass criteria: no automated test runs ssh or reads `~/.ssh`. `sh tools/verify-herdr-core` runs `combined connect` as a subprocess with piped stdio, which is what `ssh -T` runs on the far side. The general form is `ssh -T -o BatchMode=yes localhost <path>/combined connect`. Keep the daemon's `daemon.json` at `~/.config/combine/daemon.json`, or pass `--socket <path>` to `combined connect`. With Remote Login on, this sends a `hello` for protocol version 7 through `combined connect` and prints the reply:
 
 ```sh
-printf '\000\000\000\046\001{"type":"hello","protocol_version":6}' \
+printf '\000\000\000\046\001{"type":"hello","protocol_version":7}' \
   | ssh -T -o BatchMode=yes localhost /opt/homebrew/bin/combined connect | xxd | head
 ```
 
-Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":6}`. The reply is a control frame holding `{"type":"welcome","protocol_version":6,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
+Use the absolute path of `combined` on that machine in place of `<path>`. The frame is a 4-byte big-endian length (38), the kind byte (1, control) and a 37-byte JSON payload `{"type":"hello","protocol_version":7}`. The reply is a control frame holding `{"type":"welcome","protocol_version":7,"host_id":"..."}`, and the `host_id` is this host's ID, the one in `host.json`.
 
 ## Which ssh to use for the bridge
 

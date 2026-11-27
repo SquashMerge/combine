@@ -37,23 +37,23 @@ fn watch_terminals_names_the_backend_and_its_instance() {
     assert_eq!(snapshot.request, Some(RequestId(1)));
     assert_eq!(
         snapshot.backend,
-        Some(BackendInfo {
+        BackendInfo {
             id: "fake".to_string(),
             instance: Some("fake-core".to_string()),
-        })
+        }
     );
 }
 
 #[test]
-fn a_list_names_no_backend_until_it_is_told() {
-    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()));
-    assert_eq!(list.snapshot(None).backend, None);
+fn every_snapshot_names_the_backend_the_list_was_made_for() {
     let backend = BackendInfo {
         id: "fake".to_string(),
         instance: None,
     };
-    list.set_backend(backend.clone());
-    assert_eq!(list.snapshot(None).backend, Some(backend));
+    let mut list = TerminalList::new(Box::new(FakeGitProbe::default()), backend.clone());
+    assert_eq!(list.snapshot(None).backend, backend);
+    list.apply_list(&[]);
+    assert_eq!(list.snapshot(Some(RequestId(3))).backend, backend);
 }
 
 /// The server tells core its backend's instance, so a pinned panel's attach is checked against

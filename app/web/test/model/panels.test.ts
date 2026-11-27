@@ -22,7 +22,7 @@ function summary(overrides: Partial<PanelSummary> = {}): PanelSummary {
     state: 'validated',
     error: null,
     createdBy: null,
-    lifetime: null,
+    lifetime: 'persistent',
     ...overrides,
   };
 }
@@ -93,8 +93,7 @@ describe('parsePanelsChanged', () => {
       ...fixture.list,
       list: { ...(fixture.list['list'] as object), panels: [{ ...entry, lifetime }] },
     });
-    const parsed = parsePanelsChanged(withLifetime(null));
-    expect(parsed.kind === 'list' && parsed.list.panels[0]?.lifetime).toBeNull();
+    expect(() => parsePanelsChanged(withLifetime(null))).toThrow('lifetime');
     expect(() => parsePanelsChanged(withLifetime('forever'))).toThrow('lifetime');
     expect(() => parsePanelsChanged(withLifetime(undefined))).toThrow('lifetime');
     expect(() => parsePanelsChanged({ ...fixture.closed, space: 3 })).toThrow('space');

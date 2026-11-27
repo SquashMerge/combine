@@ -47,10 +47,10 @@ pub struct SpaceInfo {
 
 /// The backend that owns the host's terminals. `id` names the kind of
 /// backend; `instance` names which one of that kind, and is `None` when the
-/// backend can't say. Terminal IDs are only meaningful within one instance.
+/// backend names no instance, as when it reports no usable instance ID.
+/// Terminal IDs are only meaningful within one instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendInfo {
     pub id: String,
-    #[serde(default)]
     pub instance: Option<String>,
 }

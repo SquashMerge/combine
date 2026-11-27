@@ -15,11 +15,11 @@ use crate::error::{ReadError, WriteError};
 use crate::ids::HostId;
 use crate::stream::{read_message, write_message};
 
-/// The protocol version. One integer, starting at 1. Any change an older peer
-/// can't safely ignore bumps it: a new message type, frame kind or enum value,
-/// or a changed or removed field. A new optional field doesn't. There is no
-/// negotiation: the daemon accepts exactly its own version.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// The protocol version. One integer, starting at 1. Any change to the wire
+/// bumps it: a new message type, frame kind, enum value or field, or a changed
+/// or removed one. There is no negotiation: the daemon accepts exactly its own
+/// version.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The client and daemon versions differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

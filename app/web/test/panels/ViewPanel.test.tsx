@@ -21,7 +21,7 @@ export function listed(revision: string, state: PanelState = 'validated', error:
       state,
       error,
       createdBy: null,
-      lifetime: null,
+      lifetime: 'persistent',
     },
   };
 }

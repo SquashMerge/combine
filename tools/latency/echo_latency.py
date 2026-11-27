@@ -2,7 +2,7 @@
 """Keystroke-echo latency through a real `combined` daemon (S9, M1 acceptance).
 
 Starts a bridge command (argv after `--`) with piped stdin and stdout, speaks Combine's wire
-protocol over those pipes (SPEC.md, "Wire protocol", version 6), attaches to one terminal that
+protocol over those pipes (SPEC.md, "Wire protocol", version 7), attaches to one terminal that
 runs a raw-mode echo program (tools/latency/echo.py), and times single-byte input frames until
 a data frame carrying each byte's echo arrives. Timing stops when the data frame is read off
 the bridge's stdout, before any rendering.
@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
 # Frame kinds (SPEC.md, "Kinds").
 KIND_CONTROL = 1
