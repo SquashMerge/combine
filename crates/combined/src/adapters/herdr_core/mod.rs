@@ -38,7 +38,7 @@ use crate::ports::{
 
 pub use self::caller::HerdrCoreCallerIdentity;
 #[cfg(feature = "test-support")]
-pub use self::control::{DeliveryWait, HerdrCoreControl, PairHalf, PairStatus};
+pub use self::control::{DeliveryWait, HerdrCoreControl, PairStatus};
 
 /// The backend's `id()`.
 pub const ID: &str = "herdr-core";

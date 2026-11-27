@@ -9,6 +9,8 @@ mod project_dirs;
 mod scratch_store;
 mod wall_clock;
 
+#[cfg(feature = "test-support")]
+pub use backend::Half;
 pub use backend::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, BackendResult,
     Capabilities, TerminalBackend,

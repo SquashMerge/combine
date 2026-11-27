@@ -9,15 +9,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Context;
 
-use combine_protocol::{BackendGeneration, CloseReason, Fidelity, OwnershipGeneration, TermId};
+use combine_protocol::{
+    BackendGeneration, CloseReason, Display, Fidelity, OwnershipGeneration, TermId,
+};
 use combined::model::{SpaceId, TermEvent};
 use combined::ports::{
     AttachEvent, AttachEvents, AttachOptions, Attachment, BackendError, Capabilities, FileChange,
-    FileStore, StoreError, StoreRevision, TerminalBackend, WriteOutcome,
+    FileStore, Half, StoreError, StoreRevision, TerminalBackend, WriteOutcome,
 };
 use combined::testing::{
-    FakeAttachmentRef, FakeBackend, FakeCall, FakeConfig, FakeControl, Half, MemoryFileStore,
-    Mutation, ResyncMode, FAKE_PAINT_END, FAKE_PAINT_START, LATE_RESIZED,
+    FakeAttachmentRef, FakeBackend, FakeCall, FakeConfig, FakeControl, MemoryFileStore, Mutation,
+    ResyncMode, FAKE_PAINT_END, FAKE_PAINT_START, LATE_RESIZED,
 };
 use common::{display, request_options, spawn_spec};
 use futures::executor::block_on;
@@ -140,7 +142,7 @@ fn attach_opens_display_then_input_and_starts_once() {
     assert!(att.ordered_resizes());
     assert_eq!(
         control.requested(FakeAttachmentRef(1)),
-        ((100, 30), display())
+        Some(((100, 30), display()))
     );
     assert!(matches!(
         control.calls().as_slice(),
@@ -160,6 +162,10 @@ fn watch_only_has_no_input_half() {
     let term = spawn(&backend);
     let mut att = attach_sized(&backend, &term, 100, 30, true);
     assert_eq!(control.open_halves(&term), 1);
+    let other_display = Display {
+        cell_width: 9,
+        ..display()
+    };
 
     block_on(async {
         att.write(OWN, b"typed").await.unwrap();
@@ -168,19 +174,26 @@ fn watch_only_has_no_input_half() {
             .unwrap();
         att.resize(OWN, 120, 40).await.unwrap();
         att.focus(OWN).await.unwrap();
+        att.set_display(OWN, other_display.clone()).await.unwrap();
     });
     assert!(control.typed_input(&term).is_empty());
     assert!(control.automatic_input(&term).is_empty());
     assert_eq!(control.pty_size(&term), Some((80, 24)));
     assert_eq!(
         control.requested(FakeAttachmentRef(1)),
-        ((100, 30), display())
+        Some(((100, 30), display()))
     );
-    assert_eq!(control.calls().len(), 6);
+    assert_eq!(control.calls().len(), 7);
 
     let mut events = att.events();
     let first = drain(&mut events);
     assert_eq!(started_count(&first), 1);
+    assert!(
+        !first
+            .iter()
+            .any(|(_, e)| matches!(e, AttachEvent::Facts(_))),
+        "set_display on a watch-only attachment yields no Facts"
+    );
     block_on(att.credit(10)).unwrap();
 }
 
@@ -193,13 +206,15 @@ fn remote_twin_is_filtered_from_list_watch_and_calls() {
     assert_eq!(twin, TermId("fake:work/t1".to_string()));
     control.set_cwd(&twin, "/elsewhere");
     control.set_cwd(&term, "/here");
-    control.exit(&twin, Some(0));
-    control.restart_backend();
 
+    // The twin is still running, so only the remote filter keeps it out.
     let listed = block_on(backend.list()).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, term);
     assert_eq!(listed[0].cwd, "/here");
+
+    control.exit(&twin, Some(0));
+    control.restart_backend();
 
     let mut events = Vec::new();
     while let Some(Some(event)) = watch.next().now_or_never() {
@@ -403,7 +418,7 @@ fn half_failures_rebuild_from_latest_requested_size() {
     assert_eq!(control.open_halves(&term), 2);
     assert_eq!(
         control.requested(FakeAttachmentRef(1)),
-        ((120, 40), display())
+        Some(((120, 40), display()))
     );
     assert!(!control.step());
 
@@ -439,8 +454,12 @@ fn opening_failure_halfway_tears_down() {
     assert!(control.attachments(&term).is_empty());
     assert!(matches!(
         control.calls().last(),
-        Some(FakeCall::Attach { .. })
+        Some(FakeCall::Attach {
+            att: FakeAttachmentRef(1),
+            ..
+        })
     ));
+    assert_eq!(control.requested(FakeAttachmentRef(1)), None);
     let mut att = attach(&backend, &term);
     assert_eq!(control.open_halves(&term), 2);
 
@@ -799,6 +818,17 @@ fn capabilities_gate_facts_and_automatic_replies() {
 
 #[test]
 fn an_exited_terminal_with_credit_blocked_output_still_finishes() {
+    ends_behind_credit_blocked_output(|_, control, term| control.exit(term, Some(0)));
+}
+
+#[test]
+fn a_killed_terminal_with_credit_blocked_output_still_finishes() {
+    ends_behind_credit_blocked_output(|backend, _, term| block_on(backend.kill(term)).unwrap());
+}
+
+/// The program ends while `Data` waits on credit: the output still drains as credit comes,
+/// then `Closed(Exited)` arrives once and the stream ends.
+fn ends_behind_credit_blocked_output(end: impl FnOnce(&FakeBackend, &FakeControl, &TermId)) {
     let (backend, control) = fake(FakeConfig::default());
     let term = spawn(&backend);
     let mut att = attach(&backend, &term);
@@ -812,7 +842,7 @@ fn an_exited_terminal_with_credit_blocked_output_still_finishes() {
     assert!(waiting > 0);
     assert_eq!(program_output(&before).len() + waiting, allowance + 1_000);
 
-    control.exit(&term, Some(0));
+    end(&backend, &control, &term);
     let after_exit = drain(&mut events);
     assert!(after_exit.is_empty());
     assert!(!has_ended(&mut events));

@@ -4,10 +4,10 @@
 use combine_protocol::{Display, Fidelity, TermId};
 
 use crate::model::SpawnSpec;
-use crate::ports::BackendError;
+use crate::ports::{BackendError, Half};
 
 use super::world::{lock, Shared};
-use super::{FakeAttachmentRef, FakeCall, Half};
+use super::{FakeAttachmentRef, FakeCall};
 
 /// Drives the program in each fake terminal, injects faults and reports what the fake was
 /// asked to do. Clones share one world.
@@ -82,7 +82,9 @@ impl FakeControl {
         lock(&self.world).pending_output(term)
     }
 
-    pub fn requested(&self, att: FakeAttachmentRef) -> ((u16, u16), Display) {
+    /// The size and display the attachment last asked for. `None` for a ref whose attach
+    /// failed, which never opened an attachment.
+    pub fn requested(&self, att: FakeAttachmentRef) -> Option<((u16, u16), Display)> {
         lock(&self.world).requested(att)
     }
 

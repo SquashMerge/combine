@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use combine_protocol::TermId;
 use combined::model::SpawnSpec;
-use combined::ports::TerminalBackend;
+use combined::ports::{Half, TerminalBackend};
 use combined::testing::{
-    FakeBackend, FakeConfig, FakeControl, Half, Mutation, ResyncMode, FAKE_PAINT_START,
+    FakeBackend, FakeConfig, FakeControl, Mutation, ResyncMode, FAKE_PAINT_START,
 };
 
 use super::target::{Fault, Target, Unsupported};

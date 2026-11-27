@@ -4,7 +4,7 @@ use combine_protocol::{
     AttachmentId, ClientMessage, DaemonMessage, ErrorCode, OwnershipGeneration, Resize, TermId,
 };
 use combined::core::{BackendCommand, CoreConfig};
-use combined::testing::Half;
+use combined::ports::Half;
 use futures::FutureExt;
 
 use crate::common::{display, request_options};

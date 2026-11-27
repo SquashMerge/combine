@@ -11,8 +11,8 @@ use combine_protocol::{
 };
 use combined::core::{Core, CoreConfig, Driver};
 use combined::model::Millis;
-use combined::ports::TerminalBackend;
-use combined::testing::{FakeAttachmentRef, FakeBackend, FakeConfig, FakeControl, Half};
+use combined::ports::{Half, TerminalBackend};
+use combined::testing::{FakeAttachmentRef, FakeBackend, FakeConfig, FakeControl};
 use common::{request_options, spawn_spec};
 use futures::executor::block_on;
 

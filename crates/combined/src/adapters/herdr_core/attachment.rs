@@ -19,8 +19,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Notify};
 
 use super::connection::reserve_slot;
-#[cfg(feature = "test-support")]
-use super::control::PairHalf;
 use super::fencing::{Effect, Fence, Out, Phase, Request, ViewerSettings};
 use super::frame::{self, Frame, Kind};
 use super::jsonrpc::{self, fidelity_of};
@@ -28,6 +26,8 @@ use super::pair::{self, Halves, OpenError, OpenParams, Viewer};
 use super::Env;
 #[cfg(feature = "test-support")]
 use super::INITIAL_CREDIT;
+#[cfg(feature = "test-support")]
+use crate::ports::Half;
 use crate::ports::{AttachEvent, AttachEvents, Attachment, BackendError, BackendResult};
 
 /// Two halves that end within this window of each other were ended by one cause: the core.
@@ -385,13 +385,13 @@ impl Shared {
     /// for the other half, telling a core-wide failure from one half's; an injected failure is
     /// one half's by construction, so `rebuild` skips that wait and reopens at once.
     #[cfg(feature = "test-support")]
-    pub(super) fn fail(&self, half: PairHalf) -> bool {
+    pub(super) fn fail(&self, half: Half) -> bool {
         let generation = {
             let mut state = lock(&self.state);
             if state.fence.phase == Phase::Closed {
                 return false;
             }
-            if state.fence.watch_only && half == PairHalf::Input {
+            if state.fence.watch_only && half == Half::Input {
                 return true;
             }
             state.fence.begin_reopen();

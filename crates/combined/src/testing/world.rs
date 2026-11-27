@@ -12,11 +12,11 @@ use combine_protocol::{
 };
 
 use super::{
-    FakeAttachmentRef, FakeCall, FakeConfig, Half, Mutation, ResyncMode, FAKE_PAINT_END,
+    FakeAttachmentRef, FakeCall, FakeConfig, Mutation, ResyncMode, FAKE_PAINT_END,
     FAKE_PAINT_START, LATE_DATA, LATE_RESIZED,
 };
 use crate::model::{SpawnSpec, TermEvent, TermInfo, TermState};
-use crate::ports::{AttachEvent, AttachOptions, BackendError, BackendResult, Capabilities};
+use crate::ports::{AttachEvent, AttachOptions, BackendError, BackendResult, Capabilities, Half};
 
 pub(crate) const ID_PREFIX: &str = "fake";
 
@@ -1166,8 +1166,10 @@ impl World {
             .sum()
     }
 
-    pub(crate) fn requested(&self, att: FakeAttachmentRef) -> ((u16, u16), Display) {
-        self.attachments[&att.0].requested.clone()
+    pub(crate) fn requested(&self, att: FakeAttachmentRef) -> Option<((u16, u16), Display)> {
+        self.attachments
+            .get(&att.0)
+            .map(|att| att.requested.clone())
     }
 
     pub(crate) fn filtered_events(&self) -> usize {

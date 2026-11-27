@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 
 use combine_protocol::TermId;
 use combined::adapters::herdr_core::{
-    HerdrCoreBackend, HerdrCoreConfig, HerdrCoreControl, PairHalf, PairStatus,
+    HerdrCoreBackend, HerdrCoreConfig, HerdrCoreControl, PairStatus,
 };
 use combined::model::SpawnSpec;
-use combined::ports::TerminalBackend;
-use combined::testing::{Half, LATE_DATA, LATE_RESIZED};
+use combined::ports::{Half, TerminalBackend};
+use combined::testing::{LATE_DATA, LATE_RESIZED};
 use serde_json::{json, Value};
 
 use crate::contract::generator::Payload;
@@ -769,10 +769,6 @@ impl Target for HerdrCoreTarget {
     }
 
     fn fail_half(&mut self, term: &TermId, index: usize, half: Half) -> Result<(), Unsupported> {
-        let half = match half {
-            Half::Display => PairHalf::Display,
-            Half::Input => PairHalf::Input,
-        };
         if self.control.fail_half(Self::address_of(term)?, index, half) {
             Ok(())
         } else {
