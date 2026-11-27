@@ -911,7 +911,7 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 - **Fetching:** `get_panel` only for a `validated` or `validated_parser_only` revision newer than the one taken. At most 4 requests in flight per host. The focused tile's request goes first, then the others in request order. One waiting request per panel, with a newer request replacing it. A reply to a replaced request, or one no newer than the revision taken, is dropped. A failed fetch shows `Couldn't load panel <id>: <message>` and is retried only for a newer revision or after a reconnect.
 - **Drawing and reporting:** `renderSource`, with `attachRenderedLinks` on the content container. The revision shown is reported once per connection while connected: `rendered`, or `render_failed` with code `render_error`, the renderer's message and position, and no snippet. A render that finishes while disconnected, or a report that wasn't accepted, is reported once after the reconnect (D19). A revision never shown is never reported.
 - **Order:** never an older revision over a newer one.
-- **The focused tile:** a listed or skipped view panel shows instead of the active terminal. A tile shows a terminal only for a terminal tab (see `layout.json`). A tab naming a terminal template's folder shows as missing: a template is only an Add terminal menu item.
+- **The focused tile:** a tile shows a terminal only for a terminal tab (see `layout.json`). A tab naming a terminal template's folder shows as missing: a template is only an Add terminal menu item.
 
 **Loaders** (in the daemon, on the agent's host)
 

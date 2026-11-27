@@ -8,6 +8,7 @@ import {
   errorEvent,
   gapEvent,
   ownershipEvent,
+  resumedEvent,
   startedEvent,
 } from '../support/memoryTerminalPort';
 
@@ -120,6 +121,20 @@ describe('attachmentMachine claim', () => {
     ]);
   });
 
+  it('claims again after a resume at the same generation', () => {
+    const t = liveMachine({ focused: true });
+    expect(claimOps(t.ownership(4, null))).toHaveLength(2);
+    t.feed({ kind: 'event', event: connectionEvent(false) });
+    const reconnect = t.feed({ kind: 'event', event: connectionEvent(true) });
+    expect(reconnect.filter((effect) => effect.kind === 'resume')).toHaveLength(1);
+    t.feed({ kind: 'event', event: resumedEvent(2, 7, null) });
+    expect(claimOps(t.ownership(4, null))).toEqual([
+      { kind: 'resize', attachment: '7', size: FIT, ownershipGeneration: '4' },
+      { kind: 'requestOwnership', attachment: '7', ifVacant: '4' },
+    ]);
+    expect(claimOps(t.ownership(4, null))).toEqual([]);
+  });
+
   it('take input stores the fit first', () => {
     const t = liveMachine();
     t.ownership(4, 8);
@@ -191,11 +206,11 @@ describe('attachmentMachine pinned backend instance', () => {
     expect(machine.view()).toMatchObject({
       phase: 'waiting',
       connected: false,
-      status: { kind: 'gone', reason: 'backendGone' },
+      status: { kind: 'gone', why: 'other-instance' },
     });
     machine.handle({ kind: 'hide' });
     machine.handle({ kind: 'show' });
-    expect(machine.view().status).toEqual({ kind: 'gone', reason: 'backendGone' });
+    expect(machine.view().status).toEqual({ kind: 'gone', why: 'other-instance' });
     machine.handle({ kind: 'event', event: connectionEvent(false) });
     const effects = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
     expect(opsOf(effects)).toMatchObject([{ kind: 'attach', instance: 'core-a' }]);
@@ -217,7 +232,7 @@ describe('attachmentMachine pinned backend instance', () => {
     expect(effects.filter((effect) => effect.kind === 'disposeInstance')).toEqual([]);
     expect(t.machine.view()).toMatchObject({
       hasInstance: true,
-      status: { kind: 'gone', reason: 'backendGone' },
+      status: { kind: 'gone', why: 'other-instance' },
     });
   });
 
@@ -232,7 +247,7 @@ describe('attachmentMachine pinned backend instance', () => {
     expect(opsOf(effects)).toEqual([]);
     expect(machine.view()).toMatchObject({
       phase: 'ended',
-      status: { kind: 'gone', reason: 'backendGone' },
+      status: { kind: 'gone', why: 'other-instance' },
     });
     machine.handle({ kind: 'event', event: connectionEvent(false) });
     const again = machine.handle({ kind: 'event', event: connectionEvent(true, 'core-a') });
@@ -252,7 +267,7 @@ describe('attachmentMachine pinned backend instance', () => {
       phase: 'ended',
       hasInstance: true,
       stale: true,
-      status: { kind: 'gone', reason: 'backendGone' },
+      status: { kind: 'gone', why: 'other-instance' },
     });
   });
 

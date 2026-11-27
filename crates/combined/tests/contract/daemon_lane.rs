@@ -269,6 +269,12 @@ pub fn connect_attach_replay_resume(
         .cloned()
         .flatten()
         .ok_or("the daemon named no backend instance")?;
+    if instance != target.pinned_core_id() {
+        return Err(format!(
+            "the daemon named backend instance {instance:?}, not the lane's core {:?}",
+            target.pinned_core_id()
+        ));
+    }
 
     attach_pinned(&mut bridge, 2, &term, 80, 24, Some(instance.clone()));
     pump_until(
@@ -521,10 +527,13 @@ pub fn two_panels_across_a_restart(
         true,
         |inbox| inbox.instances.len() > before,
     )?;
-    let instance = inbox.instances.first().cloned().flatten();
-    if instance.is_none() || inbox.instances.iter().any(|seen| *seen != instance) {
+    // The restarted core is checked against the pinned core id, so every snapshot naming that id
+    // means the daemon reports the core it serves, before and after the restart.
+    target.checked_status()?;
+    let pinned = Some(target.pinned_core_id().to_string());
+    if inbox.instances.iter().any(|seen| *seen != pinned) {
         return Err(format!(
-            "the backend instance changed across the restart: {:?}",
+            "a terminals snapshot named another backend instance than the lane's core {pinned:?}: {:?}",
             inbox.instances
         ));
     }

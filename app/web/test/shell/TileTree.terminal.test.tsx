@@ -385,6 +385,19 @@ describe('TileTree terminal tabs', () => {
     expect(option.title).not.toContain('Already open');
   });
 
+  it('each disabled option names its own reason', async () => {
+    const long = terminal('x'.repeat(300), 'long', 'sh', 'idle');
+    const ctx = context({ spaceTerminals: [BUILD, DEPLOY, long] });
+    render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1]), tile('t2', [PIN_2])), {}, { ctx }));
+    await flush();
+    const select = within(bodyOf('t1')).getByTestId('terminal-switcher') as HTMLSelectElement;
+    expect([...select.options].map((o) => [o.value, o.disabled, o.title])).toEqual([
+      ['term-1', false, ''],
+      ['term-2', true, 'Already open in this layout'],
+      [long.id, true, "This terminal can't be pinned: its ID is invalid or too long"],
+    ]);
+  });
+
   it('shows the backend id in the header', async () => {
     render(tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', [PIN_1]))));
     await flush();

@@ -20,7 +20,7 @@ export interface TerminalControllerOptions {
   hostId: HostId;
   termId: TermId;
   /** The backend instance a pinned panel's terminal belongs to; `null` or absent to follow the active terminal. */
-  instance?: string | null;
+  backendInstance?: string | null;
   createAdapter: XtermAdapterFactory;
 }
 
@@ -36,7 +36,7 @@ function sameStatus(a: PanelView['status'], b: PanelView['status']): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind === 'error') return b.kind === 'error' && a.code === b.code;
   if (a.kind === 'streamFailed') return b.kind === 'streamFailed' && a.message === b.message;
-  if (a.kind === 'gone') return b.kind === 'gone' && a.reason === b.reason;
+  if (a.kind === 'gone') return b.kind === 'gone' && a.why === b.why;
   return a.kind === b.kind;
 }
 
@@ -85,7 +85,7 @@ export class TerminalController {
   private onHidden: (() => void) | null = null;
 
   constructor(private readonly options: TerminalControllerOptions) {
-    this.machine = new AttachmentMachine(options.termId, options.instance ?? null);
+    this.machine = new AttachmentMachine(options.termId, options.backendInstance ?? null);
     this.view = this.machine.view();
   }
 

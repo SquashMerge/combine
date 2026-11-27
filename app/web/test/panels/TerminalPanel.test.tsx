@@ -196,10 +196,9 @@ describe('TerminalPanel', () => {
         options: [
           { id: 'term-1', label: 'build', disabled: false },
           { id: 'term-2', label: 'logs', disabled: false },
-          { id: 'term-3', label: 'taken', disabled: true },
+          { id: 'term-3', label: 'taken', disabled: true, title: 'Already open' },
         ],
         onSwitch,
-        disabledTitle: 'Already open',
       },
     });
     const select = screen.getByRole('combobox', { name: 'Terminal' }) as HTMLSelectElement;
@@ -207,6 +206,7 @@ describe('TerminalPanel', () => {
     const taken = screen.getByRole('option', { name: 'taken' }) as HTMLOptionElement;
     expect(taken.disabled).toBe(true);
     expect(taken.title).toBe('Already open');
+    expect((screen.getByRole('option', { name: 'logs' }) as HTMLOptionElement).title).toBe('');
     fireEvent.change(select, { target: { value: 'term-2' } });
     expect(onSwitch).toHaveBeenCalledWith('term-2');
   });
@@ -292,10 +292,10 @@ describe('GoneTerminal', () => {
 
   it('has the three exact texts', () => {
     expect(goneText('unlisted', 't')).toBe('Terminal t is gone. The host no longer lists it.');
-    expect(goneText('backendGone', 't')).toBe(
+    expect(goneText('other-instance', 't')).toBe(
       'Terminal t is gone. It belonged to a terminal backend this host no longer runs.',
     );
-    expect(goneText('noInstance', 't')).toBe(
+    expect(goneText('no-instance', 't')).toBe(
       "Terminal t can't be shown: the host doesn't say which terminal backend instance it runs.",
     );
   });

@@ -529,10 +529,9 @@ export function App({
     (space: SpaceKey, tile: string) => {
       if (shownLayout === null || selectedId === null || spaceKeyId(space) !== selectedId) return;
       const holder = tileHolding(shownLayout.root, ACTIVE_TERMINAL_TAB);
-      if (holder === tile) {
-        // Already in this tile, perhaps as a hidden tab: only show it.
-      } else if (holder === null) layout.addPanelTo(ACTIVE_TERMINAL_TAB, tile);
-      else layout.movePanelTo(ACTIVE_TERMINAL_TAB, tile, layoutTiles(shownLayout.root).get(tile)?.panels.length ?? 0);
+      // A holder that is already this tile, perhaps as a hidden tab, is only shown.
+      if (holder === null) layout.addPanelTo(ACTIVE_TERMINAL_TAB, tile);
+      else if (holder !== tile) layout.movePanelTo(ACTIVE_TERMINAL_TAB, tile, layoutTiles(shownLayout.root).get(tile)?.panels.length ?? 0);
       changeSpaceState(space, (state) => ({
         ...state,
         focusedTile: tile,
@@ -577,7 +576,6 @@ export function App({
               ...(terminalEntry === null ? {} : { label: terminalTabLabel(panel, terminalEntry) }),
             },
       focusedTile: focusedTileData === undefined ? null : focusedId,
-      activeTerminalTile: tileHolding(shownLayout.root, ACTIVE_TERMINAL_TAB),
       editable: held === null && layout.snapshot !== null && !layout.snapshot.readOnly,
     };
   }, [selected, shownLayout, hostConnected, layout.panels, layout.snapshot, panelList, restoredTiles, snapshot, held, terminalTabs]);

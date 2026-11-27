@@ -42,8 +42,6 @@ export interface PalettePanels {
   focused: { tile: string; panel: string; label?: string } | null;
   /** The focused tile, even when it shows nothing. */
   focusedTile?: string | null;
-  /** The tile holding the follow-active tab, if any does. */
-  activeTerminalTile?: string | null;
   editable: boolean;
 }
 
