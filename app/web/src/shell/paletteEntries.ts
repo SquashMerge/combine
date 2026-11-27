@@ -1,6 +1,7 @@
 import type { HostsSnapshot } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import type { PanelSummary } from '../model/panels';
+import { ACTIVE_TERMINAL_TAB } from '../model/terminalTabs';
 import { type SpaceKey, folderName, spaceKeyId } from '../model/space';
 import type { Searchable } from './fuzzy';
 import { describeConnection } from './connectionText';
@@ -12,7 +13,8 @@ export type PaletteAction =
   | { kind: 'retry-host'; hostName: string }
   | { kind: 'show-panel'; space: SpaceKey; panel: string; tile: string | null }
   | { kind: 'close-panel'; space: SpaceKey; panel: string }
-  | { kind: 'pin-panel'; space: SpaceKey; panel: string };
+  | { kind: 'pin-panel'; space: SpaceKey; panel: string }
+  | { kind: 'show-active-terminal'; space: SpaceKey; tile: string };
 
 export interface PaletteEntry extends Searchable {
   id: string;
@@ -26,6 +28,7 @@ export interface PaletteHandlers {
   onShowPanel?: (space: SpaceKey, panel: string, tile: string | null) => void;
   onClosePanel?: (space: SpaceKey, panel: string) => void;
   onPinPanel?: (space: SpaceKey, panel: string) => void;
+  onShowActiveTerminal?: (space: SpaceKey, tile: string) => void;
 }
 
 /** The watched space's panels, as the shell knows them; `editable` is false while the layout is held. */
@@ -35,7 +38,12 @@ export interface PalettePanels {
   panels: readonly PanelSummary[];
   /** Panel ID to the ID of the tile holding it. */
   tiles: ReadonlyMap<string, string>;
-  focused: { tile: string; panel: string } | null;
+  /** The focused tile's shown tab; `label` is the tab's name when it isn't a listed panel's title. */
+  focused: { tile: string; panel: string; label?: string } | null;
+  /** The focused tile, even when it shows nothing. */
+  focusedTile?: string | null;
+  /** The tile holding the follow-active tab, if any does. */
+  activeTerminalTile?: string | null;
   editable: boolean;
 }
 
@@ -47,26 +55,38 @@ const GROUP_HOST = 4;
 
 function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
   const { focused, space } = panels;
-  if (!panels.editable || focused === null) return [];
-  const summary = panels.panels.find((panel) => panel.id === focused.panel);
+  if (!panels.editable) return [];
   const key = spaceKeyId(space);
-  const detail = `${summary?.title ?? focused.panel} in ${folderName(space.path)}`;
-  const entries: PaletteEntry[] = [
-    {
+  const folder = folderName(space.path);
+  const entries: PaletteEntry[] = [];
+  if (focused !== null) {
+    const summary = panels.panels.find((panel) => panel.id === focused.panel);
+    const detail = `${summary?.title ?? focused.label ?? focused.panel} in ${folder}`;
+    entries.push({
       id: `close-panel:${key}:${focused.panel}`,
       group: GROUP_PANEL_ACTION,
       label: 'Close panel',
       detail,
       action: { kind: 'close-panel', space, panel: focused.panel },
-    },
-  ];
-  if (summary?.lifetime === 'scratch') {
+    });
+    if (summary?.lifetime === 'scratch') {
+      entries.push({
+        id: `pin-panel:${key}:${focused.panel}`,
+        group: GROUP_PANEL_ACTION,
+        label: 'Pin panel',
+        detail,
+        action: { kind: 'pin-panel', space, panel: focused.panel },
+      });
+    }
+  }
+  const focusedTile = panels.focusedTile ?? focused?.tile ?? null;
+  if (focusedTile !== null && focused?.panel !== ACTIVE_TERMINAL_TAB) {
     entries.push({
-      id: `pin-panel:${key}:${focused.panel}`,
+      id: `show-active-terminal:${key}:${focusedTile}`,
       group: GROUP_PANEL_ACTION,
-      label: 'Pin panel',
-      detail,
-      action: { kind: 'pin-panel', space, panel: focused.panel },
+      label: 'Show the active terminal here',
+      detail: `in ${folder}`,
+      action: { kind: 'show-active-terminal', space, tile: focusedTile },
     });
   }
   return entries;
@@ -156,6 +176,9 @@ export function runPaletteAction(action: PaletteAction, handlers: PaletteHandler
       return;
     case 'pin-panel':
       handlers.onPinPanel?.(action.space, action.panel);
+      return;
+    case 'show-active-terminal':
+      handlers.onShowActiveTerminal?.(action.space, action.tile);
       return;
   }
 }

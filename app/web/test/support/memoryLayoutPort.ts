@@ -82,6 +82,18 @@ export class MemoryLayoutPort implements LayoutPort {
   }
 }
 
+/** The layout a fresh space starts with in the daemon: one tile, `main`, holding the follow-active tab. */
+export function defaultLayoutSnapshot(space: string, layoutRevision = '1' as DecimalU64): LayoutSnapshot {
+  return {
+    space,
+    layoutRevision,
+    root: { type: 'tile', id: 'main', panels: ['.active-terminal'], active: '.active-terminal' },
+    readOnly: false,
+    error: null,
+    dropped: null,
+  };
+}
+
 export interface LayoutEventFixture {
   snapshot: Record<string, unknown>;
   push: Record<string, unknown>;

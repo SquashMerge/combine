@@ -284,6 +284,59 @@ describe('LayoutQueue', () => {
     ]);
   });
 
+  it('open_beside_sends_split_and_add_in_one_batch', async () => {
+    const { queue, sent } = setup(() => 't-new');
+    queue.onSnapshot(null, snap('5'));
+    queue.openBeside('t1', '.terminal/core/term-2');
+    await flush();
+    expect(sent).toEqual([
+      {
+        base: '5',
+        request: rid(1),
+        ops: [
+          { op: 'split_tile', tile: 't1', dir: 'h', newTile: 't-new', ratio: 0.5, panel: null },
+          { op: 'add_panel', panel: '.terminal/core/term-2', tile: 't-new' },
+        ],
+      },
+    ]);
+  });
+
+  it('open_beside_is_dropped_whole_when_the_tile_is_gone', async () => {
+    const { queue, sent, notices } = setup(() => 't-new');
+    queue.onSnapshot(null, snap('5'));
+    queue.openBeside('t9', 'p');
+    await flush();
+    expect(sent).toEqual([]);
+    expect(notices).toEqual([STALE_NOTICE]);
+  });
+
+  it('replace_panel_sends_add_then_remove', async () => {
+    const { queue, sent } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.replacePanel('old', 'new', 't2');
+    await flush();
+    expect(sent.map((s) => s.ops)).toEqual([
+      [
+        { op: 'add_panel', panel: 'new', tile: 't2' },
+        { op: 'remove_panel', panel: 'old' },
+      ],
+    ]);
+  });
+
+  it('builds the add-to-tile and move ops', async () => {
+    const { queue, sent } = setup();
+    queue.onSnapshot(null, snap('5'));
+    queue.addPanelTo('p', 't2');
+    await flush();
+    queue.onSnapshot(rid(1), snap('6'));
+    queue.movePanelTo('p', 't1', 3);
+    await flush();
+    expect(sent.map((s) => s.ops)).toEqual([
+      [{ op: 'add_panel', panel: 'p', tile: 't2' }],
+      [{ op: 'move_panel', panel: 'p', toTile: 't1', index: 3 }],
+    ]);
+  });
+
   it.each(INHERITED)('sends a split of tile %s', async (id) => {
     const { queue, sent, notices } = setup(() => 't-new');
     queue.onSnapshot(null, snap('5', [id, 't2']));

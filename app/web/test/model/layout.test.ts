@@ -9,6 +9,7 @@ import {
   newlyActiveTiles,
   opTiles,
   parseLayoutEvent,
+  shownTab,
   tileHolding,
 } from '../../src/model/layout';
 import { loadLayoutEventFixture } from '../support/memoryLayoutPort';
@@ -177,5 +178,20 @@ describe('layoutTiles with tile IDs that name inherited properties', () => {
     );
     if (event.kind !== 'snapshot') throw new Error('expected a snapshot');
     expect(layoutTiles(event.snapshot.root).get('__proto__')).toEqual({ panels: [], active: null });
+  });
+});
+
+describe('shownTab', () => {
+  const tile = { id: 't1', panels: ['a', 'b'], active: 'b' };
+
+  it('prefers the stored choice, then the tile active tab, then its first panel', () => {
+    expect(shownTab(tile, { t1: 'a' })).toBe('a');
+    expect(shownTab(tile, {})).toBe('b');
+    expect(shownTab({ ...tile, active: null }, {})).toBe('a');
+    expect(shownTab({ id: 't1', panels: [], active: null }, {})).toBeNull();
+  });
+
+  it.each(INHERITED)('reads only own entries for tile %s', (id) => {
+    expect(shownTab({ id, panels: ['a'], active: null }, {})).toBe('a');
   });
 });
