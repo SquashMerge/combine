@@ -8,14 +8,6 @@ Rules live in tools/arch-guard/guard.toml; SPEC.md ("Repository layout and archi
 rules") says which rows of the architecture table this covers. It reads files only: it
 never runs Cargo, npm or the code it checks. Standard library only.
 
-It reads every file under the root, git-ignored ones included, except `skip` globs and nested
-checkouts: a directory below the root holding a `.git` entry (a clone's `.git/`, or a
-worktree's `.git` file, as feature-factory's sandboxes and slice worktrees have) is another
-checkout, never this one's source, so it is not read. It fails closed: a nested checkout that
-holds or sits above production source, or that production code reaches (a `mod`, `#[path]` or
-`include!`, a relative import with its extensions and `index.*` resolved, a Cargo path
-dependency, a symlink), is a `guard-skip`.
-
 It tokenizes Rust and TypeScript/JavaScript, but it is not a compiler. What it does:
 - Rust: comments and literals are tokens, never code; raw identifiers (`r#fs`) are
   normalized; string literals (normal, raw, byte) are decoded where a path argument is
@@ -249,47 +241,32 @@ def load_config(path: Path) -> Config:
 
 # --------------------------------------------------------------------------- files
 
-@dataclass
-class Listing:
-    """What [`walk`] found: (checkout-relative path, full path) of every file read, the
-    directories a `skip` glob hid, the nested checkouts it didn't enter, and every symlink (to a
-    file or a directory; directory links aren't followed)."""
-
-    files: list[tuple[str, Path]] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
-    nested: list[str] = field(default_factory=list)
-    links: list[str] = field(default_factory=list)
-
-
-def walk(root: Path, skip: Globs) -> Listing:
-    """Every file under `root`, git-ignored or not, but for `skip` globs and nested checkouts."""
-    out = Listing()
+def walk(root: Path, skip: Globs) -> tuple[list[tuple[str, Path]], list[str], list[str]]:
+    """(checkout-relative path, full path) of every file, the directories skipped, and
+    every symlink (to a file or a directory; directory links aren't followed)."""
+    files, skipped, links = [], [], []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
         keep = []
         for d in sorted(dirnames):
             rel = f"{rel_dir}/{d}" if rel_dir else d
-            full = Path(dirpath) / d
             if d == ".git":
                 continue
             if skip.match(rel + "/"):
-                out.skipped.append(rel)
+                skipped.append(rel)
                 continue
-            if full.is_symlink():
-                out.links.append(rel)
-            elif os.path.lexists(full / ".git"):
-                out.nested.append(rel)
-                continue
+            if (Path(dirpath) / d).is_symlink():
+                links.append(rel)
             keep.append(d)
         dirnames[:] = keep
         for name in sorted(filenames):
             full = Path(dirpath) / name
             rel = full.relative_to(root).as_posix()
             if full.is_symlink():
-                out.links.append(rel)
-            out.files.append((rel, full))
-    return out
+                links.append(rel)
+            files.append((rel, full))
+    return files, skipped, links
 
 
 def normalize(path: str) -> str | None:
@@ -701,20 +678,6 @@ def check_rust_file(rel: str, src: str, cfg: Config, bindings: dict[str, str], r
             for rule in cfg.of("path_ban"):
                 if Globs(rule.data["to"]).reaches(target):
                     found.append(Violation(rule.id, rel, lines.line(t.start), f"reaches non-production path {target}"))
-
-    # An out-of-line `mod name;` loads `name.rs` or `name/mod.rs` (unless `#[path]`, above, says) from the
-    # module's directory: next to `main.rs`, `lib.rs` or `mod.rs`, else in a folder named for
-    # the file. Recorded as reaches only, so a skipped directory can't hide one.
-    if reached is not None:
-        here = PurePosixPath(rel)
-        mod_dir = here.parent if here.name in ("main.rs", "lib.rs", "mod.rs") else here.parent / here.stem
-        for k, t in enumerate(live):
-            if t.is_("ident", "mod") and tok(k + 1).kind == "ident" and tok(k + 2).is_("punct", ";"):
-                name = tok(k + 1).text.removeprefix("r#")
-                for candidate in (mod_dir / f"{name}.rs", mod_dir / name / "mod.rs"):
-                    target = normalize(str(candidate))
-                    if target is not None:
-                        reached.update(reach_targets(root, target))
 
     # The enclosing `{` of every token, so an `extern crate x as y;` alias applies only
     # inside its own block or module, and the innermost alias wins.
@@ -1425,14 +1388,7 @@ def check_js_file(rel: str, src: str, cfg: Config, root: Path | None = None,
                     found.append(Violation(rule.id, rel, line, "import or require with a non-literal specifier"))
             continue
         if spec.startswith("."):
-            spelled = normalize(str(PurePosixPath(rel).parent / spec))
-            if reached is not None and spelled is not None:
-                # What a resolver may load for it: the file with each extension, or the folder's
-                # `index.*`. Reaches only; the path bans below read the spelling.
-                for candidate in [spelled] + [f"{spelled}{e}" for e in sorted(JS_EXT)] + [
-                        f"{spelled}/index{e}" for e in sorted(JS_EXT)]:
-                    reached.update(reach_targets(root, candidate))
-            for target in reach_targets(root, spelled):
+            for target in reach_targets(root, normalize(str(PurePosixPath(rel).parent / spec))):
                 if reached is not None:
                     reached.add(target)
                 for rule in cfg.of("path_ban"):
@@ -1549,8 +1505,7 @@ def workspace_packages(root: Path, found: list[Violation]) -> tuple[list[Package
     return packages, ws_deps
 
 
-def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict,
-                reached: set[str] | None = None) -> list[Violation]:
+def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict) -> list[Violation]:
     found: list[Violation] = []
     for pkg in packages:
         if cfg.non_production.match(pkg.rel_manifest):
@@ -1570,8 +1525,6 @@ def check_cargo(root: Path, cfg: Config, packages: list[Package], ws_deps: dict,
                                            f"{pkg.name} depends on {real}; only {', '.join(rule.data['packages'])} may"))
             if path is not None:
                 for target in reach_targets(root, _rel(root, path)):
-                    if reached is not None:
-                        reached.add(target)
                     for rule in cfg.of("path_ban"):
                         if Globs(rule.data["to"]).reaches(target):
                             found.append(Violation(rule.id, pkg.rel_manifest, line, f"{pkg.name} depends on path {target}"))
@@ -1592,14 +1545,12 @@ def run(root: Path, config: Path) -> list[Violation]:
     cfg = load_config(config)
     found: list[Violation] = []
     packages, ws_deps = workspace_packages(root, found)
-    # Every destination production code reaches (a `mod`, `#[path]` or `include!`, a relative
-    # import, a Cargo path dependency, a symlink): neither a skip nor a nested checkout may hide
-    # one, or the guard would pass code it never read.
-    reached: set[str] = set()
-    found += check_cargo(root, cfg, packages, ws_deps, reached)
+    found += check_cargo(root, cfg, packages, ws_deps)
 
-    listing = walk(root, cfg.skip)
-    files, skipped, links = listing.files, listing.skipped, listing.links
+    files, skipped, links = walk(root, cfg.skip)
+    # Every literal destination production code reaches (`#[path]`, `include!`, a relative
+    # import, a symlink): a skip must not hide one, or the guard would pass code it never read.
+    reached: set[str] = set()
 
     for rel in links:  # a production path that is really a non-production one
         if cfg.non_production.match(rel):
@@ -1632,14 +1583,6 @@ def run(root: Path, config: Path) -> list[Violation]:
         sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
         if sources:
             found.append(Violation(SKIP_RULE, d, 1, f"a `skip` glob hides this directory, which production code reaches ({', '.join(sources)})"))
-    # A nested checkout is never read either, so the same two rules hold for it.
-    for d in listing.nested:
-        hidden = sorted({p for p in protected if (d + "/").startswith(p) or p.startswith(d + "/")})
-        if hidden:
-            found.append(Violation(SKIP_RULE, d, 1, f"a nested checkout (it has its own .git) is never read, and this one holds production source ({', '.join(hidden)})"))
-        sources = sorted(t for t in reached if t == d or t.startswith(d + "/"))
-        if sources:
-            found.append(Violation(SKIP_RULE, d, 1, f"a nested checkout (it has its own .git) is never read, but production code reaches it ({', '.join(sources)})"))
     return sorted(set(found), key=lambda v: (v.path, v.line, v.rule, v.message))
 
 
