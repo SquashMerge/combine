@@ -208,6 +208,7 @@ impl Core {
     /// for the grace period, except a finished gap's, which go at once, and those still opening,
     /// which are abandoned.
     pub fn disconnect(&mut self, connection: ConnectionId, now: Millis) {
+        self.assert_drained();
         self.drop_connection(connection, now);
         self.drop_overflowed(now);
     }
@@ -218,6 +219,15 @@ impl Core {
         while let Some(connection) = self.overflowed.pop_first() {
             self.drop_connection(connection, now);
         }
+    }
+
+    /// Every public entry point drops the connections it marked before it returns, so none is
+    /// still marked when the next call starts.
+    fn assert_drained(&self) {
+        debug_assert!(
+            self.overflowed.is_empty(),
+            "a call returned with connections still marked for an overflow disconnect"
+        );
     }
 
     fn drop_connection(&mut self, connection: ConnectionId, now: Millis) {
@@ -261,6 +271,7 @@ impl Core {
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
+        self.assert_drained();
         std::mem::take(&mut self.effects)
     }
 
@@ -297,6 +308,7 @@ impl Core {
         max_bytes: usize,
         now: Millis,
     ) -> Vec<DaemonMessage> {
+        self.assert_drained();
         let out = self.pull_messages(connection, max_bytes);
         self.drop_overflowed(now);
         out
@@ -351,6 +363,7 @@ impl Core {
     /// Finishes unbound attachments whose grace ran out, then disconnects each bound client that
     /// has left a final gap unsent for longer than the gap timeout.
     pub fn tick(&mut self, now: Millis) {
+        self.assert_drained();
         self.expire(now);
         self.drop_overflowed(now);
     }
@@ -377,6 +390,10 @@ impl Core {
             .filter_map(|a| a.connection)
             .collect();
         for connection in stuck {
+            // One marked by an earlier drop in this loop is dropped when the tick finishes.
+            if self.overflowed.contains(&connection) {
+                continue;
+            }
             self.effects.push(Effect::Disconnect(connection));
             self.drop_connection(connection, now);
         }
@@ -423,6 +440,7 @@ impl Core {
         message: ClientMessage,
         now: Millis,
     ) {
+        self.assert_drained();
         self.dispatch(connection, message, now);
         self.drop_overflowed(now);
     }
@@ -967,6 +985,7 @@ impl Core {
         failure: &BackendError,
         now: Millis,
     ) {
+        self.assert_drained();
         if !matches!(failure, BackendError::Closed) {
             let text = match command {
                 RefusedCommand::Input => REFUSED_INPUT,
@@ -994,6 +1013,7 @@ impl Core {
         result: BackendResult<()>,
         now: Millis,
     ) {
+        self.assert_drained();
         self.settle_attach(attachment, result);
         self.drop_overflowed(now);
     }
@@ -1066,6 +1086,7 @@ impl Core {
         event: AttachEvent,
         now: Millis,
     ) {
+        self.assert_drained();
         self.apply_event(attachment, generation, event, now);
         self.drop_overflowed(now);
     }
@@ -1140,6 +1161,7 @@ impl Core {
 
     /// A stream that ends without a final event counts as the backend losing the terminal.
     pub fn backend_stream_ended(&mut self, attachment: AttachmentId, now: Millis) {
+        self.assert_drained();
         self.end_stream(attachment, now);
         self.drop_overflowed(now);
     }
@@ -1150,7 +1172,7 @@ impl Core {
         };
         match held.state {
             State::Live { generation, .. } => {
-                self.backend_event(attachment, generation, AttachEvent::Lost, now)
+                self.apply_event(attachment, generation, AttachEvent::Lost, now)
             }
             State::Attached => {
                 held.log.end_with_gap();
