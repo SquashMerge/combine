@@ -78,7 +78,10 @@ external = [
 app = "combined"
 order = 2
 paths = ["crates/combined/src/adapters/fs.rs", "crates/combined/src/adapters/fs/**"]
-external = [{ language = "rust", package = "notify", stdlib = false }]
+external = [
+  { language = "rust", package = "notify", stdlib = false },
+  { language = "rust", package = "rustix", stdlib = false },
+]
 
 # Spaces, panels, layout, trust, scheduling, cache, generations. Talks to the world only
 # through ports.

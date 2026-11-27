@@ -621,6 +621,156 @@ fn fs_file_store_refuses_to_write_a_symlinked_file() {
     assert_write_refused(Escape::File);
 }
 
+// ---- confinement against a concurrent swap (#29) ----
+
+/// What the swapping thread exchanges with a symlink to the outside folder or file.
+#[derive(Clone, Copy, Debug)]
+enum Swapped {
+    /// `<space>/.workspace`.
+    Workspace,
+    /// `<space>/.workspace/sub`, the folder of the path `sub/victim`.
+    Folder,
+    /// `<space>/.workspace/victim`.
+    File,
+}
+
+const INSIDE: &[u8] = b"inside";
+const OUTSIDE: &[u8] = b"OUTSIDE: never to be read or replaced";
+/// How long each race runs. Every assertion is a safety property that holds for any
+/// interleaving, so a slow or busy machine makes the race shorter, never a failure.
+const RACE: Duration = Duration::from_millis(400);
+
+/// Reads and writes through the store while another thread keeps exchanging one component of
+/// the path with a symlink to the outside. The exchange is atomic (`RENAME_SWAP` on macOS,
+/// `RENAME_EXCHANGE` on Linux), so the name always exists, as the real entry or the symlink. A
+/// read may be refused or see inside bytes, and a write may be refused or land inside; no read
+/// returns the outside bytes, and the outside folder never changes.
+fn race_against_a_swap(swapped: Swapped) {
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let scratch = ShortTempDir::new();
+    let space = scratch.path().join("space");
+    let outside = scratch.path().join("outside");
+    let target = outside.join("victim");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(&target, OUTSIDE).unwrap();
+    let workspace = space.join(".workspace");
+    let (path, real, decoy) = match swapped {
+        Swapped::Workspace => {
+            fs::create_dir_all(&workspace).unwrap();
+            fs::write(workspace.join("victim"), INSIDE).unwrap();
+            symlink(&outside, space.join("decoy")).unwrap();
+            ("victim", workspace.clone(), space.join("decoy"))
+        }
+        Swapped::Folder => {
+            fs::create_dir_all(workspace.join("sub")).unwrap();
+            fs::write(workspace.join("sub/victim"), INSIDE).unwrap();
+            symlink(&outside, workspace.join("decoy")).unwrap();
+            ("sub/victim", workspace.join("sub"), workspace.join("decoy"))
+        }
+        Swapped::File => {
+            fs::create_dir_all(&workspace).unwrap();
+            fs::write(workspace.join("victim"), INSIDE).unwrap();
+            symlink(&target, workspace.join("decoy")).unwrap();
+            ("victim", workspace.join("victim"), workspace.join("decoy"))
+        }
+    };
+    let space = SpaceId(space.to_str().unwrap().to_string());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swaps = Arc::new(AtomicU64::new(0));
+    let swapper = {
+        let (stop, swaps, target) = (Arc::clone(&stop), Arc::clone(&swaps), target.clone());
+        std::thread::spawn(move || {
+            use rustix::fs::{renameat_with, RenameFlags, CWD};
+            while !stop.load(Ordering::Relaxed) {
+                // A write replaces a symlink at the file with a regular file. When neither
+                // name is the symlink any more, make the decoy one again.
+                if let Swapped::File = swapped {
+                    let is_link = |name: &Path| {
+                        fs::symlink_metadata(name)
+                            .map(|meta| meta.file_type().is_symlink())
+                            .unwrap_or(false)
+                    };
+                    if !is_link(&real) && !is_link(&decoy) {
+                        let _ = fs::remove_file(&decoy);
+                        let _ = symlink(&target, &decoy);
+                    }
+                }
+                if renameat_with(CWD, &real, CWD, &decoy, RenameFlags::EXCHANGE).is_ok() {
+                    swaps.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        })
+    };
+    // Race only once the swapper runs.
+    let started = Instant::now();
+    while swaps.load(Ordering::Relaxed) == 0 && started.elapsed() < BOUND {
+        std::thread::yield_now();
+    }
+
+    let store = FsFileStore::new();
+    let (mut rounds, mut reads, mut writes, mut refused) = (0u64, 0u64, 0u64, 0u64);
+    let mut escape = None;
+    let deadline = Instant::now() + RACE;
+    while Instant::now() < deadline && escape.is_none() {
+        rounds += 1;
+        match block_on(store.read(&space, path, ANY_SIZE)) {
+            Ok(Some(file)) if file.bytes == OUTSIDE => {
+                escape = Some("a read returned the outside file".to_string());
+            }
+            Ok(_) => reads += 1,
+            Err(StoreError::Unavailable(_)) => refused += 1,
+            Err(error) => escape = Some(format!("unexpected read error {error:?}")),
+        }
+        // A write syncs to disk, so it is far slower than a read: one in four rounds.
+        if rounds % 4 == 0 {
+            match block_on(store.write(&space, path, INSIDE.to_vec())) {
+                Ok(_) => writes += 1,
+                Err(StoreError::Unavailable(_)) => refused += 1,
+                Err(error) => escape = Some(format!("unexpected write error {error:?}")),
+            }
+            if fs::read(&target).unwrap() != OUTSIDE {
+                escape = Some("a write replaced the outside file".to_string());
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let swaps = swaps.load(Ordering::Relaxed);
+    eprintln!(
+        "{swapped:?}: {swaps} swaps; {rounds} rounds, {reads} reads and {writes} writes done, \
+         {refused} refused"
+    );
+
+    assert!(swaps > 0, "the swapper never ran");
+    assert_eq!(escape, None, "{swapped:?}: the store escaped .workspace");
+    let mut names: Vec<_> = fs::read_dir(&outside)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["victim"], "nothing new appears outside");
+    assert_eq!(fs::read(&target).unwrap(), OUTSIDE);
+}
+
+#[test]
+fn fs_file_store_stays_inside_while_the_workspace_is_swapped_for_a_symlink() {
+    race_against_a_swap(Swapped::Workspace);
+}
+
+#[test]
+fn fs_file_store_stays_inside_while_a_folder_is_swapped_for_a_symlink() {
+    race_against_a_swap(Swapped::Folder);
+}
+
+#[test]
+fn fs_file_store_stays_inside_while_the_file_is_swapped_for_a_symlink() {
+    race_against_a_swap(Swapped::File);
+}
+
 // ---- the file store contract, for the real filesystem and the in-memory fake ----
 
 const LAYOUT: &str = "layout.json";

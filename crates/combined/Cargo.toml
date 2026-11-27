@@ -14,9 +14,11 @@ test-support = []
 combine-protocol = { path = "../combine-protocol" }
 async-trait = "=0.1.92"
 futures = { version = "=0.3.34", default-features = false, features = ["std", "executor"] }
-# Only for the O_NONBLOCK and O_NOFOLLOW open flags of the file store's reads.
+# Only for the daemon's open-file limit (getrlimit and setrlimit in main.rs).
 libc = "=0.2.191"
 notify = "=9.0.0"
+# Descriptor-relative, no-follow opens for the file store (openat, mkdirat, renameat, unlinkat), safe under forbid(unsafe_code).
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"] }
 # The JS engine, for the loader adapter only (tools/arch-guard: js-engine-only-in-loader).
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 serde = { version = "=1.0.229", features = ["derive"] }

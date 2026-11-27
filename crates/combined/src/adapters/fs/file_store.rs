@@ -4,9 +4,25 @@
 //! project's folder.
 //!
 //! A pulled repository can put a symlink at `.workspace`, at any directory under it or at the
-//! file itself, so the store refuses every symlink on the way: each component is checked with
-//! `symlink_metadata`, the verified directory is canonicalized and must still lie under the
-//! canonical `.workspace`, and the read or the atomic write then uses that canonical path.
+//! file itself, so the store never follows one there, and refuses it, dangling or not. Every
+//! call walks the path by descriptor: `<space>/.workspace` is opened as a directory with
+//! `O_NOFOLLOW | O_DIRECTORY`, each folder below it is opened (and, for a write, created with
+//! `mkdirat`) relative to the descriptor of the one above it, the same way, and the file is
+//! checked with `fstatat(AT_SYMLINK_NOFOLLOW)` and then read, replaced or removed relative to
+//! its parent's descriptor: a read opens it with `O_NOFOLLOW`, a write creates its temp file
+//! beside it with `O_EXCL | O_NOFOLLOW` and `renameat`s it over the name, and a remove
+//! `unlinkat`s it.
+//!
+//! This confinement is race-free. A process that swaps `.workspace`, a folder or the file for a
+//! symlink while a call runs can make the call fail, but can't make it read, create or replace
+//! anything outside `.workspace`: after the first open, every step resolves a single name
+//! relative to a descriptor already open on a folder inside it, and none follows a symlink in
+//! that name (a rename replaces a symlink at its target name; it doesn't follow it). The
+//! space's own path, above `.workspace`, is followed as given: it is the user's folder, not
+//! the repository's. A hard link is an ordinary file in its folder and is read as one; a write
+//! replaces the link, never the file it shares. Each folder on the way is opened for reading,
+//! so one the user can search but not list counts as denied. The fallback copies are in the
+//! daemon's own data folder and are reached by path.
 //!
 //! When the project can't be written (`PermissionDenied` or `ReadOnlyFilesystem`, whether from
 //! the folder check, from creating the folders or from the write itself) and the store has a fallback root, the bytes
@@ -20,30 +36,52 @@
 //! stall every client. The file is opened with `O_NONBLOCK`, so even a FIFO swapped in after
 //! the type check doesn't block the open, and `O_NOFOLLOW`; its type is then checked again on
 //! the opened handle, before any byte is read.
-//!
-//! The directory checks are not race-free. Std offers no descriptor-relative open without
-//! `unsafe`, so a process that can modify the space's folder while a call runs can still swap
-//! a directory component for a symlink between the check and the open. The checks close the
-//! case of a symlink already present in the working tree, not a concurrent attacker.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{self, Read as _};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use super::safe_write::write_atomic;
+use super::safe_write::{write_atomic, write_atomic_at};
 use super::watcher::SpaceWatcher;
 use crate::model::{ContentHash, SpaceId};
 use crate::ports::{
     valid_store_path, DirListing, EntryKind, FileChange, FileStore, ListedEntry, StoreError,
     StoreRevision, StoredFile, WriteOutcome,
 };
+
+/// Every folder on the way is opened like this: for reading, as a directory, and never through
+/// a symlink.
+const FOLDER_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// A file to read: never through a symlink, and without waiting on a FIFO.
+const READ_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// 0o777 before the umask, as `std::fs::create_dir` uses.
+const FOLDER_MODE: Mode = Mode::RWXU.union(Mode::RWXG).union(Mode::RWXO);
+
+/// 0o644 before the umask.
+const FILE_MODE: Mode = Mode::RUSR
+    .union(Mode::WUSR)
+    .union(Mode::RGRP)
+    .union(Mode::ROTH);
+
+const SYMLINK: &str = "is a symlink; the file store does not follow it";
 
 /// Files under each space's `.workspace/` folder. Revisions are kept in memory: each space's
 /// starts at 0 and goes up by 1 on every successful write by this store.
@@ -126,7 +164,8 @@ fn is_denied(error: &io::Error) -> bool {
     )
 }
 
-/// Why [`checked_folder`] gave up: the store refused the path, or creating a folder was denied.
+/// Why a walk under `.workspace` gave up: the store refused the path, or the project denied
+/// the access.
 enum Checked {
     Refused(StoreError),
     Denied(io::Error),
@@ -139,6 +178,14 @@ impl Checked {
             Checked::Denied(error) => unavailable(error),
         }
     }
+
+    /// The mapping of the calls with no fallback: a denial is `ReadOnly`.
+    fn into_read_only(self) -> StoreError {
+        match self {
+            Checked::Refused(error) => error,
+            Checked::Denied(error) => StoreError::ReadOnly(error.to_string()),
+        }
+    }
 }
 
 impl From<StoreError> for Checked {
@@ -147,7 +194,7 @@ impl From<StoreError> for Checked {
     }
 }
 
-/// A failure to create a folder: denied when the project can't be written there.
+/// A failed step: denied when the project can't be written or read there.
 fn created(error: io::Error) -> Checked {
     if is_denied(&error) {
         Checked::Denied(error)
@@ -156,104 +203,179 @@ fn created(error: io::Error) -> Checked {
     }
 }
 
-/// Verifies `<space>/.workspace` and every directory in `folders` below it, and returns the
-/// canonical path of the last one. `None` means a component is missing, which only a call
-/// without `create` reaches. A symlink or non-directory at any component is refused, and the
-/// canonical folder must still lie under the canonical `.workspace`.
-///
-/// The checks and the later open are separate steps: see the module note on the race.
-fn checked_folder(
-    space: &SpaceId,
-    folders: &[&str],
-    create: bool,
-) -> Result<Option<PathBuf>, Checked> {
-    let folder = Path::new(&space.0);
-    if !folder.is_absolute() {
-        return Err(StoreError::Unavailable(format!(
-            "space {} is not an absolute folder",
-            space.0
-        ))
-        .into());
-    }
-    let workspace = folder.join(".workspace");
-    let mut dir = workspace.clone();
-    for step in std::iter::once(None).chain(folders.iter().map(Some)) {
-        match step {
-            None if create => std::fs::create_dir_all(&dir).map_err(created)?,
-            None => {}
-            Some(segment) => {
-                dir.push(segment);
-                if create {
-                    match std::fs::create_dir(&dir) {
-                        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-                            return Err(created(error))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        match std::fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(refused(&dir, "is a symlink; the file store does not follow it").into())
-            }
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Err(refused(&dir, "is not a directory").into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(created(error)),
-        }
-    }
-    let root = std::fs::canonicalize(&workspace).map_err(created)?;
-    let canonical = std::fs::canonicalize(&dir).map_err(created)?;
-    if !canonical.starts_with(&root) {
-        return Err(refused(&dir, "resolves outside .workspace").into());
-    }
-    Ok(Some(canonical))
+/// A folder under `<space>/.workspace` (or `.workspace` itself), open by descriptor. `path`
+/// names it in messages only; nothing is resolved through it.
+struct Folder {
+    dir: File,
+    path: PathBuf,
 }
 
-/// Verifies the folders down to the file's parent with [`checked_folder`] and returns the
-/// file's path inside the canonical parent. `None` means a folder is missing. A symlink at the
-/// file itself is refused too.
-fn checked_file(space: &SpaceId, path: &str, create: bool) -> Result<Option<PathBuf>, Checked> {
+impl Folder {
+    /// Opens `<space>/.workspace` and each folder in `folders` below it, each relative to the
+    /// one above with [`FOLDER_FLAGS`], and returns the last. `None` means one is missing,
+    /// which only a call without `create` reaches. With `create`, the space's folder is made
+    /// as needed and each missing folder from `.workspace` down is made with `mkdirat` in its
+    /// parent. A symlink or a non-directory at any of them is refused.
+    fn walk(space: &SpaceId, folders: &[&str], create: bool) -> Result<Option<Folder>, Checked> {
+        let folder = Path::new(&space.0);
+        if !folder.is_absolute() {
+            return Err(StoreError::Unavailable(format!(
+                "space {} is not an absolute folder",
+                space.0
+            ))
+            .into());
+        }
+        if create {
+            std::fs::create_dir_all(folder).map_err(created)?;
+        }
+        let workspace = folder.join(".workspace");
+        // Absolute, so the walk starts from the space's path; only `.workspace` itself must not
+        // be a symlink.
+        let Some(mut dir) = open_folder(rustix::fs::CWD, &workspace, workspace.clone(), create)?
+        else {
+            return Ok(None);
+        };
+        for segment in folders {
+            let path = dir.path.join(segment);
+            match open_folder(dir.dir.as_fd(), Path::new(segment), path, create)? {
+                Some(next) => dir = next,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(dir))
+    }
+
+    /// The type of `name` in this folder, without following a symlink. `None` means it is
+    /// missing; a symlink there is refused.
+    fn entry(&self, name: &str) -> Result<Option<FileType>, Checked> {
+        match rustix::fs::statat(&self.dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Symlink => Err(refused(&self.path.join(name), SYMLINK).into()),
+                kind => Ok(Some(kind)),
+            },
+            Err(Errno::NOENT) => Ok(None),
+            Err(errno) => Err(created(errno.into())),
+        }
+    }
+}
+
+/// Opens `name` in `parent` as a folder, refusing a symlink; with `create`, makes it first
+/// if it is missing. `path` names it in messages. `None` means it is missing.
+fn open_folder(
+    parent: BorrowedFd<'_>,
+    name: &Path,
+    path: PathBuf,
+    create: bool,
+) -> Result<Option<Folder>, Checked> {
+    if create {
+        match rustix::fs::mkdirat(parent, name, FOLDER_MODE) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(errno) => return Err(created(errno.into())),
+        }
+    }
+    match rustix::fs::openat(parent, name, FOLDER_FLAGS, Mode::empty()) {
+        Ok(fd) => Ok(Some(Folder {
+            dir: File::from(fd),
+            path,
+        })),
+        Err(Errno::NOENT) => Ok(None),
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink is `ELOOP` on some systems and `ENOTDIR` on
+        // others: look at the entry, only to say which refusal it is.
+        Err(errno @ (Errno::LOOP | Errno::NOTDIR)) => {
+            match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map(|stat| FileType::from_raw_mode(stat.st_mode))
+            {
+                Ok(FileType::Symlink) => Err(refused(&path, SYMLINK).into()),
+                Ok(FileType::Directory) | Err(_) => Err(created(errno.into())),
+                Ok(_) => Err(refused(&path, "is not a directory").into()),
+            }
+        }
+        Err(errno) => Err(created(errno.into())),
+    }
+}
+
+/// Opens the folders down to the file's parent with [`Folder::walk`] and returns the parent
+/// with the file's name in it. `None` means a folder is missing.
+fn walk_to_file<'p>(
+    space: &SpaceId,
+    path: &'p str,
+    create: bool,
+) -> Result<Option<(Folder, &'p str)>, Checked> {
     file_path(space, path)?;
     let segments: Vec<&str> = path.split('/').collect();
     let (name, folders) = segments.split_last().ok_or(StoreError::InvalidPath)?;
-    let Some(parent) = checked_folder(space, folders, create)? else {
+    Ok(Folder::walk(space, folders, create)?.map(|parent| (parent, *name)))
+}
+
+/// Replaces `.workspace/<path>` atomically, making its folders as needed. A symlink at the
+/// file is refused, and the write never reaches the fallback.
+fn write_in_project(space: &SpaceId, path: &str, bytes: &[u8]) -> Result<(), Checked> {
+    let Some((parent, name)) = walk_to_file(space, path, true)? else {
+        return Err(StoreError::Unavailable("the folder could not be created".to_string()).into());
+    };
+    parent.entry(name)?;
+    write_atomic_at(&parent.dir, name, bytes, FILE_MODE).map_err(created)
+}
+
+/// Reads `.workspace/<path>`, bounded like [`read_bounded`]. `None` means it, or a folder on
+/// the way, is missing.
+fn read_in_project(
+    space: &SpaceId,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Option<Bounded>, StoreError> {
+    let Some((parent, name)) = walk_to_file(space, path, false).map_err(Checked::into_store)?
+    else {
         return Ok(None);
     };
-    let file = parent.join(name);
-    match std::fs::symlink_metadata(&file) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(refused(&file, "is a symlink; the file store does not follow it").into())
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(created(error)),
+    match parent.entry(name).map_err(Checked::into_store)? {
+        None => return Ok(None),
+        Some(FileType::RegularFile) => {}
+        Some(_) => return Ok(Some(Bounded::NotRegular)),
     }
-    Ok(Some(file))
+    let file = match rustix::fs::openat(&parent.dir, name, READ_FLAGS, Mode::empty()) {
+        Ok(fd) => File::from(fd),
+        Err(Errno::NOENT) => return Ok(None),
+        // Swapped for a symlink after the check.
+        Err(Errno::LOOP) => return Err(refused(&parent.path.join(name), SYMLINK)),
+        Err(errno) => return Err(unavailable(errno.into())),
+    };
+    read_open(file, max_bytes).map(Some).map_err(unavailable)
 }
 
 /// Lists the entries of `dir`, skipping names that aren't UTF-8. Stops after `max_entries + 1`
 /// kept entries, sorts them by name and cuts the list to `max_entries`.
-fn read_listing(dir: &Path, max_entries: usize) -> Result<DirListing, StoreError> {
+fn read_listing(dir: &Folder, max_entries: usize) -> Result<DirListing, StoreError> {
     let keep = max_entries.saturating_add(1);
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(unavailable)? {
-        let entry = entry.map_err(unavailable)?;
-        let Ok(name) = entry.file_name().into_string() else {
+    let reader = rustix::fs::Dir::read_from(&dir.dir).map_err(|errno| unavailable(errno.into()))?;
+    for entry in reader {
+        let entry = entry.map_err(|errno| unavailable(errno.into()))?;
+        let Ok(name) = entry.file_name().to_str() else {
             continue;
         };
-        let file_type = entry.file_type().map_err(unavailable)?;
-        let kind = if file_type.is_symlink() {
-            EntryKind::Symlink
-        } else if file_type.is_dir() {
-            EntryKind::Directory
-        } else if file_type.is_file() {
-            EntryKind::File
-        } else {
-            EntryKind::Other
+        if name == "." || name == ".." {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            // The file system doesn't report types in its listing: ask for this entry's.
+            FileType::Unknown => {
+                rustix::fs::statat(&dir.dir, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|stat| FileType::from_raw_mode(stat.st_mode))
+                    .map_err(|errno| unavailable(errno.into()))?
+            }
+            known => known,
         };
-        entries.push(ListedEntry { name, kind });
+        let kind = match file_type {
+            FileType::Symlink => EntryKind::Symlink,
+            FileType::Directory => EntryKind::Directory,
+            FileType::RegularFile => EntryKind::File,
+            _ => EntryKind::Other,
+        };
+        entries.push(ListedEntry {
+            name: name.to_string(),
+            kind,
+        });
         if entries.len() >= keep {
             break;
         }
@@ -280,10 +402,13 @@ pub(super) fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Bounded>
     if !std::fs::symlink_metadata(path)?.file_type().is_file() {
         return Ok(Bounded::NotRegular);
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)?;
+    let file = File::from(rustix::fs::open(path, READ_FLAGS, Mode::empty())?);
+    read_open(file, max_bytes)
+}
+
+/// The bounded read of a file already opened with `O_NONBLOCK`: its type is checked on the
+/// handle before any byte is read.
+fn read_open(file: File, max_bytes: usize) -> io::Result<Bounded> {
     let meta = file.metadata()?;
     if !meta.file_type().is_file() {
         return Ok(Bounded::NotRegular);
@@ -325,15 +450,11 @@ impl FileStore for FsFileStore {
                 Err(error) => return Err(unavailable(error)),
             }
         }
-        let Some(file) = checked_file(space, path, false).map_err(Checked::into_store)? else {
-            return Ok(None);
-        };
-        match read_bounded(&file, max_bytes) {
-            Ok(found) => {
+        match read_in_project(space, path, max_bytes)? {
+            Some(found) => {
                 found_file(found, revision, false, &format!(".workspace/{path}")).map(Some)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(unavailable(error)),
+            None => Ok(None),
         }
     }
 
@@ -354,17 +475,8 @@ impl FileStore for FsFileStore {
             .filter(|copy| copy.is_file())
             .map(|_| "the fallback copy is authoritative".to_string());
         if aside.is_none() {
-            aside = match checked_file(space, path, true) {
-                Ok(Some(file)) => match write_atomic(&file, &bytes, 0o644) {
-                    Ok(()) => None,
-                    Err(error) if is_denied(&error) => Some(error.to_string()),
-                    Err(error) => return Err(unavailable(error)),
-                },
-                Ok(None) => {
-                    return Err(StoreError::Unavailable(
-                        "the folder could not be created".to_string(),
-                    ))
-                }
+            aside = match write_in_project(space, path, &bytes) {
+                Ok(()) => None,
                 Err(Checked::Denied(error)) => Some(error.to_string()),
                 Err(Checked::Refused(error)) => return Err(error),
             };
@@ -398,22 +510,7 @@ impl FileStore for FsFileStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         file_path(space, path)?;
-        match checked_file(space, path, true) {
-            Ok(Some(file)) => match write_atomic(&file, &bytes, 0o644) {
-                Ok(()) => {}
-                Err(error) if is_denied(&error) => {
-                    return Err(StoreError::ReadOnly(error.to_string()))
-                }
-                Err(error) => return Err(unavailable(error)),
-            },
-            Ok(None) => {
-                return Err(StoreError::Unavailable(
-                    "the folder could not be created".to_string(),
-                ))
-            }
-            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
-            Err(Checked::Refused(error)) => return Err(error),
-        }
+        write_in_project(space, path, &bytes).map_err(Checked::into_read_only)?;
         let revision = revisions.entry(space.clone()).or_insert(0);
         *revision += 1;
         Ok(WriteOutcome {
@@ -425,13 +522,14 @@ impl FileStore for FsFileStore {
 
     async fn remove_file(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
         file_path(space, path)?;
-        let file = match checked_file(space, path, false) {
-            Ok(Some(file)) => file,
-            Ok(None) => return Ok(()),
-            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
-            Err(Checked::Refused(error)) => return Err(error),
+        let walked = walk_to_file(space, path, false).map_err(Checked::into_read_only)?;
+        let Some((parent, name)) = walked else {
+            return Ok(());
         };
-        match std::fs::remove_file(&file) {
+        let Some(_) = parent.entry(name).map_err(Checked::into_read_only)? else {
+            return Ok(());
+        };
+        match rustix::fs::unlinkat(&parent.dir, name, AtFlags::empty()).map_err(io::Error::from) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) if is_denied(&error) => Err(StoreError::ReadOnly(error.to_string())),
@@ -441,14 +539,19 @@ impl FileStore for FsFileStore {
 
     async fn remove_dir(&self, space: &SpaceId, path: &str) -> Result<(), StoreError> {
         file_path(space, path)?;
-        let folders: Vec<&str> = path.split('/').collect();
-        let dir = match checked_folder(space, &folders, false) {
-            Ok(Some(dir)) => dir,
-            Ok(None) => return Ok(()),
-            Err(Checked::Denied(error)) => return Err(StoreError::ReadOnly(error.to_string())),
-            Err(Checked::Refused(error)) => return Err(error),
+        let walked = walk_to_file(space, path, false).map_err(Checked::into_read_only)?;
+        let Some((parent, name)) = walked else {
+            return Ok(());
         };
-        match std::fs::remove_dir(&dir) {
+        // Checked without opening it, so an empty folder the user can't list still goes; the
+        // removal doesn't follow a symlink swapped in after the check.
+        match parent.entry(name).map_err(Checked::into_read_only)? {
+            None => return Ok(()),
+            Some(FileType::Directory) => {}
+            Some(_) => return Err(refused(&parent.path.join(name), "is not a directory")),
+        }
+        let removed = rustix::fs::unlinkat(&parent.dir, name, AtFlags::REMOVEDIR);
+        match removed.map_err(io::Error::from) {
             Ok(()) => Ok(()),
             Err(error)
                 if matches!(
@@ -471,7 +574,7 @@ impl FileStore for FsFileStore {
     ) -> Result<Option<DirListing>, StoreError> {
         file_path(space, path)?;
         let folders: Vec<&str> = path.split('/').collect();
-        let Some(dir) = checked_folder(space, &folders, false).map_err(Checked::into_store)? else {
+        let Some(dir) = Folder::walk(space, &folders, false).map_err(Checked::into_store)? else {
             return Ok(None);
         };
         read_listing(&dir, max_entries).map(Some)
