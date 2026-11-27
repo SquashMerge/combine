@@ -358,7 +358,7 @@ fn decoding_stays_within_its_allocation_bounds() {
 
     let terminal = r#"{"id":"t","cwd":"","argv":[],"state":"running","exit_code":null,"labels":{},"cols":1,"rows":1}"#;
     let full_terminals = full_control_frame(
-        r#"{"type":"terminals","request":null,"spaces":[],"terminals":["#,
+        r#"{"type":"terminals","request":null,"spaces":[],"backend":{"id":"b","instance":null},"terminals":["#,
         |_| format!("{terminal},"),
         &format!("{terminal}]"),
     );
@@ -412,7 +412,7 @@ fn decoding_stays_within_its_allocation_bounds() {
     // Version 5 messages. Each case asserts the smallest tier that is at least 1.25 times what
     // was measured; a "measured" note gives the slice decode's largest allocation and live peak.
     // A JSON tree of an `mcp` message would hold far more than its text.
-    let entry = r#"{"id":"p","title":null,"renderer":"mermaid","revision":1,"state":"validated","error":null,"created_by":{"type":"agent","slot":null}}"#;
+    let entry = r#"{"id":"p","title":null,"renderer":"mermaid","revision":1,"state":"validated","error":null,"created_by":{"type":"agent","slot":null},"lifetime":"persistent"}"#;
     let panels = full_control_frame(
         r#"{"type":"panels","request":null,"space":"s","skipped":[],"error":null,"panels":["#,
         |_| format!("{entry},"),
@@ -452,7 +452,7 @@ fn decoding_stays_within_its_allocation_bounds() {
 
     // Unknown keys are skipped, never stored.
     let created_by_keys = full_control_frame(
-        r#"{"type":"panels","request":null,"space":"s","skipped":[],"error":null,"panels":[{"id":"p","renderer":"mermaid","revision":1,"state":"validated","created_by":{"type":"user","#,
+        r#"{"type":"panels","request":null,"space":"s","skipped":[],"error":null,"panels":[{"id":"p","renderer":"mermaid","revision":1,"state":"validated","lifetime":"persistent","created_by":{"type":"user","#,
         |i| format!(r#""u{i}":0,"#),
         r#""last":0}}]"#,
     );

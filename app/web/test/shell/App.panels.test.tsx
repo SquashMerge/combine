@@ -24,7 +24,7 @@ function saved(): ClientState {
 }
 
 function summary(id: string, title: string | null = null): PanelSummary {
-  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null, lifetime: null };
+  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state: 'validated', error: null, createdBy: null, lifetime: 'persistent' };
 }
 
 function content(id: string): PanelContent {
@@ -175,7 +175,7 @@ describe('App panel placement and close', () => {
             lived('p3', 'persistent'),
             lived('p4', 'persistent'),
             lived('p5', 'scratch'),
-            lived('p6', null),
+            lived('p6', 'scratch'),
           ],
           skipped: [],
           error: null,
@@ -305,18 +305,6 @@ describe('App panel placement and close', () => {
     act(() => layoutPort.emit({ kind: 'disconnected', hostId: HOST_A }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(panelPort.actions).toEqual([]);
-  });
-
-  it('closing a panel with no recorded lifetime asks with the may-delete copy', async () => {
-    const { panelPort } = await setup(twoTiles);
-    fireEvent.click(button('Close panel p6'));
-    const dialog = screen.getByRole('alertdialog');
-    expect(dialog.querySelector('h2')?.textContent).toBe('Close panel?');
-    expect(dialog.querySelector('p')?.textContent).toBe("Closing p6 may delete its content, and it can't be restored.");
-    expect(screen.queryByRole('button', { name: 'Close and delete' })).toBeNull();
-    expect(panelPort.actions).toEqual([]);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
-    expect(panelPort.actions.map((a) => [a.kind, a.panel])).toEqual([['close', 'p6']]);
   });
 
   it('Tab cycles between the two buttons of the confirm dialog', async () => {

@@ -92,8 +92,8 @@ pub enum PanelLifetime {
 }
 
 /// One panel of a space, as `panels` lists it: its current revision, and that
-/// revision's state. `error` is set while `state` is `failed`. `lifetime` is
-/// `None` from a daemon that doesn't say where the panel lives.
+/// revision's state. `error` is set while `state` is `failed`. `lifetime` says
+/// where the panel lives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanelSummary {
     pub id: String,
@@ -103,6 +103,5 @@ pub struct PanelSummary {
     pub state: PanelState,
     pub error: Option<PanelError>,
     pub created_by: Option<CreatedBy>,
-    #[serde(default)]
-    pub lifetime: Option<PanelLifetime>,
+    pub lifetime: PanelLifetime,
 }

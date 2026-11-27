@@ -32,7 +32,7 @@ export interface PanelSummary {
   state: PanelState;
   error: PanelError | null;
   createdBy: CreatedBy | null;
-  lifetime: PanelLifetime | null;
+  lifetime: PanelLifetime;
 }
 
 export interface PanelList {
@@ -151,10 +151,9 @@ function parseCreatedBy(value: unknown, what: string): CreatedBy | null {
   }
 }
 
-function parseLifetime(value: unknown, what: string): PanelLifetime | null {
-  if (value === null) return null;
+function parseLifetime(value: unknown, what: string): PanelLifetime {
   if (value !== 'persistent' && value !== 'scratch') {
-    throw new ModelError(`${what} must be "persistent", "scratch" or null`);
+    throw new ModelError(`${what} must be "persistent" or "scratch"`);
   }
   return value;
 }

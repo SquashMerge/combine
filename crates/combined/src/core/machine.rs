@@ -152,7 +152,7 @@ impl Core {
     }
 
     /// Names the backend instance whose terminals the attachments open. It doesn't change while
-    /// the daemon runs; `None` for a backend that can't say.
+    /// the daemon runs; `None` when the backend names none.
     pub fn set_backend_instance(&mut self, instance: Option<String>) {
         self.backend_instance = instance;
     }

@@ -118,12 +118,10 @@ pub enum AttachEvent {
 #[async_trait]
 pub trait TerminalBackend: Send + Sync {
     fn id(&self) -> &'static str;
-    /// Which instance of this kind of backend the terminals belong to, when it can say. Terminal
-    /// IDs mean something only within one instance: another instance may hand out the same ID
-    /// again. `None` for a backend that has no such notion.
-    fn instance(&self) -> Option<String> {
-        None
-    }
+    /// Which instance of this kind of backend the terminals belong to. Terminal IDs mean
+    /// something only within one instance: another instance may hand out the same ID again.
+    /// `None` when the backend names no instance.
+    fn instance(&self) -> Option<String>;
     fn capabilities(&self) -> Capabilities;
     async fn list(&self) -> BackendResult<Vec<TermInfo>>;
     async fn watch(&self) -> BackendResult<BoxStream<'static, TermEvent>>;

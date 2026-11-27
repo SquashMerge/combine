@@ -375,41 +375,6 @@ fn terminals_round_trips() {
 }
 
 #[test]
-fn terminals_without_a_backend_round_trips() {
-    round_trip!(
-        daemon_goldens(),
-        "terminals_no_backend",
-        "terminals",
-        DaemonMessage
-    );
-}
-
-#[test]
-fn terminals_from_an_older_daemon_read_no_backend() {
-    let json = golden_json("terminals_no_backend");
-    let older = patched(&json, "/backend", None);
-    assert_eq!(
-        decode_daemon(&older).unwrap(),
-        decode_daemon(&json).unwrap()
-    );
-    let nameless = patched(
-        &golden_json("terminals"),
-        "/backend",
-        Some(serde_json::json!({"id": "backend-a"})),
-    );
-    match decode_daemon(&nameless).unwrap() {
-        DaemonMessage::Terminals(list) => assert_eq!(
-            list.backend,
-            Some(BackendInfo {
-                id: s("backend-a"),
-                instance: None
-            })
-        ),
-        other => panic!("expected terminals, got {other:?}"),
-    }
-}
-
-#[test]
 fn panels_round_trips() {
     round_trip!(daemon_goldens(), "panels", "panels", DaemonMessage);
 }
@@ -577,7 +542,6 @@ fn cursor_helper_names_each_event_cursor() {
         ("ownership_none", None),
         ("error", None),
         ("terminals", None),
-        ("terminals_no_backend", None),
         ("panels", None),
         ("panels_push", None),
         ("panel", None),

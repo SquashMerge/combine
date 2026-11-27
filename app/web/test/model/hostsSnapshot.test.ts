@@ -25,10 +25,7 @@ describe('parseHostsSnapshot', () => {
     expect(parseHostsSnapshot(json)).toEqual(parseHostsSnapshot(fixture));
   });
 
-  it('reads a host with no backend field as null', () => {
-    const json = clone();
-    delete json.hosts[0].backend;
-    expect(parseHostsSnapshot(json).hosts[0]?.backend).toBeNull();
+  it('reads the backend, null before the host has named one', () => {
     expect(parseHostsSnapshot(fixture).hosts[0]?.backend).toEqual({
       id: 'herdr-core',
       instance: '4bcff4a58f4d97d505396e5a43a807e6',
@@ -69,7 +66,10 @@ describe('parseHostsSnapshot', () => {
       'space keyed by another host',
       (j: any) => (j.hosts[0].spaces[0].key.hostId = j.hosts[1].hostId),
     ],
+    ['missing backend', (j: any) => delete j.hosts[0].backend],
+    ['missing backend on a host with none yet', (j: any) => delete j.hosts[1].backend],
     ['non-object backend', (j: any) => (j.hosts[0].backend = 'herdr-core')],
+    ['backend without an instance', (j: any) => delete j.hosts[0].backend.instance],
     ['backend without an id', (j: any) => delete j.hosts[0].backend.id],
     ['non-string backend instance', (j: any) => (j.hosts[0].backend.instance = 7)],
     ['non-u32 retryInMs', (j: any) => (j.hosts[1].connection.retryInMs = 4294967296)],

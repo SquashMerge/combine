@@ -532,7 +532,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                         created_by: Some(CreatedBy::Agent {
                             slot: Some(s("claude")),
                         }),
-                        lifetime: Some(PanelLifetime::Persistent),
+                        lifetime: PanelLifetime::Persistent,
                     },
                     PanelSummary {
                         id: s("flow"),
@@ -548,7 +548,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                             snippet: Some(s("  A -> B")),
                         }),
                         created_by: Some(CreatedBy::User),
-                        lifetime: Some(PanelLifetime::Scratch),
+                        lifetime: PanelLifetime::Scratch,
                     },
                 ],
                 skipped: vec![],
@@ -577,25 +577,13 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                     kind: SpaceKind::Repository,
                     terminals: vec![TermId(s("t8"))],
                 }],
-                backend: Some(BackendInfo {
+                backend: BackendInfo {
                     id: s("backend-a"),
                     instance: Some(s("0123abcd")),
-                }),
+                },
             }),
             control_frame(
                 r#"{"type":"terminals","request":7,"terminals":[{"id":"t8","cwd":"/Users/me/src/trellis","argv":["zsh"],"state":"running","exit_code":null,"labels":{},"cols":80,"rows":24}],"spaces":[{"id":"/Users/me/src/trellis","kind":"repository","terminals":["t8"]}],"backend":{"id":"backend-a","instance":"0123abcd"}}"#,
-            ),
-        ),
-        (
-            "terminals_no_backend",
-            DaemonMessage::Terminals(Terminals {
-                request: None,
-                terminals: vec![],
-                spaces: vec![],
-                backend: None,
-            }),
-            control_frame(
-                r#"{"type":"terminals","request":null,"terminals":[],"spaces":[],"backend":null}"#,
             ),
         ),
         (
@@ -611,7 +599,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                     state: PanelState::Validating,
                     error: None,
                     created_by: None,
-                    lifetime: None,
+                    lifetime: PanelLifetime::Scratch,
                 }],
                 skipped: vec![SkippedPanel {
                     panel: s("build"),
@@ -620,7 +608,7 @@ pub fn daemon_goldens() -> Vec<(&'static str, DaemonMessage, Vec<u8>)> {
                 error: None,
             }),
             control_frame(
-                r#"{"type":"panels","request":null,"space":"/Users/me/src/trellis","panels":[{"id":"notes","title":"Notes","renderer":"markdown","revision":3,"state":"validating","error":null,"created_by":null,"lifetime":null}],"skipped":[{"panel":"build","reason":"not a view panel"}],"error":null}"#,
+                r#"{"type":"panels","request":null,"space":"/Users/me/src/trellis","panels":[{"id":"notes","title":"Notes","renderer":"markdown","revision":3,"state":"validating","error":null,"created_by":null,"lifetime":"scratch"}],"skipped":[{"panel":"build","reason":"not a view panel"}],"error":null}"#,
             ),
         ),
         (

@@ -98,6 +98,10 @@ impl TerminalBackend for StallingBackend {
         self.inner.id()
     }
 
+    fn instance(&self) -> Option<String> {
+        self.inner.instance()
+    }
+
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }

@@ -66,7 +66,7 @@ impl HostRegistry {
         &mut self,
         host_id: &HostId,
         spaces: Vec<SpaceView>,
-        backend: Option<BackendView>,
+        backend: BackendView,
     ) {
         let spaces: Vec<SpaceView> = spaces
             .into_iter()
@@ -85,7 +85,7 @@ impl HostRegistry {
             .find(|h| h.host_id.as_ref() == Some(host_id))
         {
             host.spaces = spaces;
-            host.backend = backend.map(|backend| BackendView {
+            host.backend = Some(BackendView {
                 id: display_text(&backend.id),
                 instance: backend.instance,
             });
@@ -131,6 +131,13 @@ mod tests {
             connection: ConnectionState::Connecting,
             spaces: Vec::new(),
             backend: None,
+        }
+    }
+
+    fn backend() -> BackendView {
+        BackendView {
+            id: "backend-a".to_string(),
+            instance: Some("core-a".to_string()),
         }
     }
 
@@ -294,7 +301,7 @@ mod tests {
                 "/work/app",
                 vec![terminal("t1", "  a\u{1b}[0m\nb ", &"c".repeat(400))],
             )],
-            None,
+            backend(),
         );
         let terminals = &registry.snapshot().hosts[0].spaces[0].terminals;
         assert_eq!(terminals[0].name, "a [0m b");
@@ -308,10 +315,10 @@ mod tests {
         registry.replace_spaces(
             &host_id(HOST_A),
             Vec::new(),
-            Some(BackendView {
+            BackendView {
                 id: " core\u{1b}[0m\nx ".to_string(),
                 instance: Some("  4bcf\n/ ".to_string()),
-            }),
+            },
         );
         assert_eq!(
             registry.snapshot().hosts[0].backend,
@@ -320,8 +327,6 @@ mod tests {
                 instance: Some("  4bcf\n/ ".to_string()),
             })
         );
-        registry.replace_spaces(&host_id(HOST_A), Vec::new(), None);
-        assert_eq!(registry.snapshot().hosts[0].backend, None);
     }
 
     #[test]
@@ -330,7 +335,7 @@ mod tests {
         registry.replace_spaces(
             &host_id(HOST_A),
             vec![space(HOST_A, "/work/app", Vec::new())],
-            None,
+            backend(),
         );
         let before = registry.snapshot().revision;
         registry.set_connection(
@@ -355,12 +360,12 @@ mod tests {
         registry.replace_spaces(
             &host_id(HOST_A),
             vec![space(HOST_A, "/work/app", Vec::new())],
-            None,
+            backend(),
         );
         registry.replace_spaces(
             &host_id(HOST_B),
             vec![space(HOST_B, "/work/app", Vec::new())],
-            None,
+            backend(),
         );
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.hosts[0].spaces[0].key.host_id, host_id(HOST_A));
@@ -378,7 +383,7 @@ mod tests {
                 space(HOST_A, "/mine", Vec::new()),
                 space(HOST_B, "/foreign", Vec::new()),
             ],
-            None,
+            backend(),
         );
         let spaces = registry.snapshot().hosts[0].spaces.clone();
         assert_eq!(spaces.len(), 1);
@@ -388,7 +393,7 @@ mod tests {
         registry.replace_spaces(
             &host_id(HOST_B),
             vec![space(HOST_B, "/x", Vec::new())],
-            None,
+            backend(),
         );
         assert_eq!(registry.snapshot(), before);
     }

@@ -129,7 +129,7 @@ impl HostEvents for Inner {
         self.mutate(|r| r.set_host_id(name, host_id));
     }
 
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: BackendView) {
         self.mutate(|r| r.replace_spaces(host_id, spaces, backend));
     }
 

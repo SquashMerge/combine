@@ -1,18 +1,16 @@
 import { useEffect, useRef } from 'react';
 import type { KeyboardEvent } from 'react';
-import type { PanelLifetime } from '../model/panels';
 
 interface ConfirmClosePanelProps {
   label: string;
-  lifetime: PanelLifetime | null;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-export function ConfirmClosePanel({ label, lifetime, onConfirm, onCancel }: ConfirmClosePanelProps) {
+/** Asks before a scratch panel is closed, since closing deletes its content. */
+export function ConfirmClosePanel({ label, onConfirm, onCancel }: ConfirmClosePanelProps) {
   const cancel = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
-  const scratch = lifetime === 'scratch';
 
   useEffect(() => {
     const previous = document.activeElement;
@@ -49,18 +47,16 @@ export function ConfirmClosePanel({ label, lifetime, onConfirm, onCancel }: Conf
         aria-labelledby="confirm-close-title"
         aria-describedby="confirm-close-text"
       >
-        <h2 id="confirm-close-title">{scratch ? 'Close scratch panel?' : 'Close panel?'}</h2>
+        <h2 id="confirm-close-title">Close scratch panel?</h2>
         <p id="confirm-close-text">
-          {scratch
-            ? `Closing ${label} deletes its content, and it can't be restored. Pin it first to keep it in the project.`
-            : `Closing ${label} may delete its content, and it can't be restored.`}
+          {`Closing ${label} deletes its content, and it can't be restored. Pin it first to keep it in the project.`}
         </p>
         <div className="confirm-actions">
           <button ref={cancel} type="button" onClick={onCancel}>
             Cancel
           </button>
           <button ref={confirm} type="button" onClick={onConfirm}>
-            {scratch ? 'Close and delete' : 'Close'}
+            Close and delete
           </button>
         </div>
       </div>

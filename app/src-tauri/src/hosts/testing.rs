@@ -554,7 +554,7 @@ impl Clock for FakeClock {
 pub enum Event {
     Connection(String, ConnectionState),
     HostId(String, HostId),
-    Spaces(HostId, Vec<SpaceView>, Option<BackendView>),
+    Spaces(HostId, Vec<SpaceView>, BackendView),
 }
 
 /// Sends every [`HostEvents`] call to a channel.
@@ -582,7 +582,7 @@ impl HostEvents for RecordingEvents {
         self.send(Event::HostId(name.to_string(), host_id.clone()));
     }
 
-    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: Option<BackendView>) {
+    fn spaces(&self, host_id: &HostId, spaces: Vec<SpaceView>, backend: BackendView) {
         self.send(Event::Spaces(host_id.clone(), spaces, backend));
     }
 }

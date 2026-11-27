@@ -30,7 +30,7 @@ function layout(panels: string[], active: string | null = panels[0] ?? null): La
 }
 
 function summary(id: string, title: string | null = null, state: PanelState = 'validating'): PanelSummary {
-  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state, error: null, createdBy: null, lifetime: null };
+  return { id, title, renderer: 'markdown', revision: '1' as DecimalU64, state, error: null, createdBy: null, lifetime: 'persistent' };
 }
 
 function view(panels: PanelSummary[], skipped: PanelList['skipped'] = [], listError: string | null = null): SpacePanelsView {

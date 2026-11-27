@@ -521,7 +521,7 @@ impl Attachments {
 mod tests {
     use std::sync::mpsc::{self, Receiver};
 
-    use combine_protocol::{Attached, BackendGeneration, Fidelity};
+    use combine_protocol::{Attached, BackendGeneration, BackendInfo, Fidelity};
     use combine_protocol::{
         AutomaticReply, CloseReason, Closed, Data, Display, Epoch, ErrorCode, ErrorMessage, Focus,
         Gap, Input, Lost, Ownership, OwnershipGeneration, Resumed, Seq, Started, Terminals,
@@ -979,7 +979,10 @@ mod tests {
             request: None,
             terminals: Vec::new(),
             spaces: Vec::new(),
-            backend: None,
+            backend: BackendInfo {
+                id: "herdr-core".to_string(),
+                instance: Some("core-a".to_string()),
+            },
         });
         assert_eq!(rig.route(terminals.clone()), Some(terminals));
         assert_eq!(rig.route(error(None, None)), Some(error(None, None)));
