@@ -38,7 +38,7 @@ A client that attaches afterwards must see `rendered`. SPEC.md, rev 36, is the s
 
 The prompt asked for a Mermaid class diagram titled "Combine daemon": Daemon, Core, TerminalBackend and its two implementations, TerminalList, LayoutSync and Layout. Real agents usually write valid Mermaid first time, so to make the failure path certain the prompt also asked that **the first version contain exactly one deliberate syntax error**. It then asked the agent to repair the same panel with `update_panel` until `validated`.
 
-`combine mcp` resolved the caller through `HC_TERMINAL_ID`, because `HC_TERMINAL_SOCKET` is the daemon's own herdr-core socket. The panel's space is the demo project.
+`combine mcp` forwarded `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` in `mcp_open`, and `combined` resolved the caller from them: the socket is its own herdr-core socket, and its terminal list holds `hc:t5` in the demo project's space. That space is the panel's.
 
 | Step | Call | Panel | Revision | Result |
 | --- | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ The x86_64 `Combine.app` was opened on the MBP. Its `hosts.json` is unchanged fr
   - the labelled `writes` association.
 
   Pele's styles survived the packaged app's CSP and sanitizing, on the Intel machine the app ships for. That was the S5 step left to S9 (`docs/m2-s5-csp.md`).
-- **`rendered`.** The same `panel_status` check through `combine mcp` then returned:
+- **`rendered`.** The same `panel_status` check through `combine mcp` then returned the following. This is an excerpt; the full reply has more fields:
 
 ```json
 { "panel": "panel-1048577", "revision": 1048579, "state": "validated", "error": null,
