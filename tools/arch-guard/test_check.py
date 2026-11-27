@@ -1301,6 +1301,12 @@ class GuardTest(unittest.TestCase):
             "export class C extends Object { static async import(v: string) { return v; } }\n",
             "export class C implements I { public require(v: string): string { return v; } }\ninterface I { a?: 1 }\n",
             "export const K = class { require(v: string) { return v; } };\n",
+            "export class C { m() {} *require(v: string) { yield v; } }\n",
+            "export class C { static {} *import(v: string) { yield v; } }\n",
+            "export class C { x = {}; *import(v: string) { yield v; } }\n",
+            "export class C { x: { a: 1 }\n  *import(v: string) { yield v; } }\n",
+            "export class C<T extends { a: 1 }> { import(v: T) { return v; } }\n",
+            "export class C extends Array<{ a: 1 }> { *require(v: string) { yield v; } }\n",
             "export type T = { import(v: string): string, require(v: string): void };\n",
         ):
             with self.subTest(src=src):
@@ -1354,6 +1360,24 @@ class GuardTest(unittest.TestCase):
                 with self.subTest(src=src):
                     self.assertFlags({self.TS_PROBE: src}, (rule, self.TS_PROBE))
 
+    def test_an_object_or_class_closing_brace_in_an_initializer_is_not_a_member_boundary(self):
+        # opencode review 77: `+{} * require(...)` in a class field; the `}` of the
+        # object is not the end of a member, so the `*` is multiplication.
+        for load, rule in self.LOAD_SHAPES:
+            for src in (
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? +{{}} * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? <any>{{}} * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? (+{{}}) * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport const o = {{ x: c ? +{{}} * {load} : 0 }};\n",
+                f"declare const c: boolean;\nexport class C {{ m() {{}} x = c ? +{{}} * {load} : 0 }}\n",
+                f"export class C {{ x = class {{}}\n  * {load}; }}\n",
+                f"export class C {{ x = () => {{}}\n  * {load}; }}\n",
+                f"export class C {{ x = {{ a: 1 }}\n  * {load}; }}\n",
+                f"export class C {{ static {{}} x = +{{}} * {load}; }}\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, (rule, self.TS_PROBE))
+
     def test_ambiguous_member_positions_are_read_as_loads(self):
         # The documented false positives: real methods or signatures named `import`
         # or `require` whose position the reader can't prove is a member head. Each is
@@ -1362,7 +1386,9 @@ class GuardTest(unittest.TestCase):
             "export function f() { return { require(v: string) { return v; } }; }\n",
             "declare const c: boolean;\nexport const o = c ? 1 : { import(v: string) { return v; } };\n",
             "export class C { x = 1\n  import(v: string) { return v; } }\n",
-            "export class C<T extends { a: 1 }> { import(v: T) { return v; } }\n",
+            "export const K = class<T> { import(v: T) { return v; } };\n",
+            "declare function dec(...a: unknown[]): any;\nexport class C { @dec\n  import(v: string) { return v; } }\n",
+            "export class C { x = 1\n  m() { return 1; }\n  *import(v: string) { yield v; } }\n",
             "export interface I { import(v: string): string }\n",
             "export type T = { import(v: string): string; require(v: string): void };\n",
         ):
