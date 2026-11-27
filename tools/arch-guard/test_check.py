@@ -1187,6 +1187,214 @@ class GuardTest(unittest.TestCase):
                 found = self.guard({self.PROBE: src})
                 self.assertTrue(found)
 
+    # --- issue #20: one-line closing and self-closing tags, and JSX text before an import
+
+    ONE_LINERS = (
+        "export const a = <div><Foo {...p} /></div>;",
+        "export const a = <div><Foo/></div>;",
+        "export const a = <><Foo /></>;",
+        "export const a = <div>{x}<br/>{y}</div>;",
+        "export const a = <a href=\"/x/y\">a/b</a>;",
+        "export const a = <div>{x}/{y}</div>;",
+        "export const a = <Foo a={x / 2} b={/re/.source} />;",
+        "export const a = x ? <Foo /> : <Bar />;",
+        "export const a = [<Foo key=\"1\" />, <Bar key=\"2\" />];",
+        "export const a = <p>x</p>; export const b = <i>y</i>;",
+    )
+    ONE_LINER_HEAD = "declare const p: object, x: number, y: number;\nfunction Foo() { return null; }\nfunction Bar() { return null; }\n"
+
+    def test_one_line_closing_and_self_closing_tags_are_clean(self):
+        for line in self.ONE_LINERS:
+            with self.subTest(line=line):
+                self.assertFlags({self.PROBE: f"{self.ONE_LINER_HEAD}{line}\n"})
+
+    def test_one_line_self_closing_tags_do_not_hide_an_import(self):
+        for line in self.ONE_LINERS:
+            for load, rule in (
+                ("import { invoke } from '@tauri-apps/api/core';", "tauri-only-in-ipc"),
+                ("export const l = import('@tauri-apps/api/core');", "tauri-only-in-ipc"),
+                ("import '../../test/support/snapshots';", "no-production-dependency-on-non-production"),
+                ("export const l = import('../ipc/' + 'tauri');", "frontend-imports-are-literal"),
+            ):
+                with self.subTest(line=line, load=load):
+                    self._tsx(f"{self.ONE_LINER_HEAD}{line} {load} // '\n", rule)
+
+    def test_self_closing_tag_syntax_in_attributes_and_text_does_not_hide_an_import(self):
+        for line in (
+            "export const a = <Foo a=\"/>\" />;",
+            "export const a = <Foo a='</div>' />;",
+            "export const a = <div><Foo /> it's </div>;",
+            "export const a = <div><Foo /> a/b </div>;",
+        ):
+            with self.subTest(line=line):
+                self._tsx(
+                    f"{self.ONE_LINER_HEAD}{line} import {{ invoke }} from '@tauri-apps/api/core';\n",
+                    "tauri-only-in-ipc",
+                )
+
+    def test_import_spelled_in_text_after_a_self_closing_tag_fails_closed(self):
+        self._tsx(f"{self.ONE_LINER_HEAD}export const a = <div><Foo /> import x from 'y' </div>;\n", "guard-parse")
+
+    def test_issue_20_quote_or_slash_in_jsx_text_does_not_hide_a_later_import(self):
+        for text in ("'", "/", "\"", "`", "//"):
+            with self.subTest(text=text):
+                self._tsx(
+                    f"export const a = <div><p>x</p>{text}</div>; import {{ invoke }} from '@tauri-apps/api/core'; // {text}\n",
+                    "tauri-only-in-ipc",
+                )
+
+    # --- issue #20 follow-up: a load followed by a block is not a method definition
+
+    TS_PROBE = "app/web/src/shell/probe.ts"
+
+    def test_ts_load_before_a_block_is_read_as_a_load(self):
+        for load in ("import('@tauri-apps/api/core')", "require('@tauri-apps/api/core')",
+                     "import<any>('@tauri-apps/api/core')"):
+            body = f"{load}\n{{}}\n"
+            for src in (
+                body,
+                f"{{\n{body}}}\n",
+                f"export function f() {{\n{body}}}\n",
+                f"export async function f(): Promise<void> {{\n{body}}}\n",
+                f"export function f(): string[] {{\n{body}return []; }}\n",
+                f"declare const c: boolean;\nif (c) {{ }} else {{\n{body}}}\n",
+                f"do {{\n{body}}} while (false);\n",
+                f"declare const c: number;\nswitch (c) {{ case 1: {{\n{body}}} }}\n",
+                f"label: {{\n{body}}}\n",
+                f"export const f = () => {{\n{body}}};\n",
+                f"namespace N {{\n{body}}}\n",
+                f"export class C {{ m() {{\n{body}}} }}\n",
+                f"export class C {{ static {{\n{body}}} }}\n",
+                f"export class C<T extends {{ a: 1 }}> {{ m() {{\n{body}}} }}\n",
+                f"export const o = {{ m() {{\n{body}}} }};\n",
+                f"export const t = `${{(() => {{ {load} {{}} }})()}}`;\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, ("tauri-only-in-ipc", self.TS_PROBE))
+        self.assertFlags({self.PROBE: "import('@tauri-apps/api/core')\n{}\n"}, ("tauri-only-in-ipc", self.PROBE))
+
+    def test_ts_load_before_a_colon_is_read_as_a_load(self):
+        for src in (
+            "declare const c: boolean, x: any;\nexport const y = c ? await import('@tauri-apps/api/core') : x;\n",
+            "declare const c: boolean, x: any;\nexport const y = c ? import('@tauri-apps/api/core') : x;\n",
+            "export class C { x = 1 ? await import('@tauri-apps/api/core') : 2; }\n",
+            "export const o = { a: 1 ? import('@tauri-apps/api/core') : 2 };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src}, ("tauri-only-in-ipc", self.TS_PROBE))
+
+    def test_method_definitions_in_classes_and_object_literals_are_not_loads(self):
+        for src in (
+            "export const o = { import(v: string) { return v; }, require(v: string) { return v; } };\n",
+            "export const o = { async import(v: string) { return v; }, *require(v: string) { yield v; } };\n",
+            "export const o = { *import(v: string) { yield v; }, async *require(v: string) { yield v; } };\n",
+            "export const o = { get import() { return 1; }, set require(v: number) { void v; } };\n",
+            "export const o = { a: 1, import<T>(v: T): T { return v; } };\n",
+            "export const o = { a: { import(v: string) { return v; } } };\n",
+            "export const o = [{ import(v: string) { return v; } }];\n",
+            "f({ import(v: string) { return v; } });\nfunction f(x: object) { return x; }\n",
+            "export default { import(v: string) { return v; } };\n",
+            "export class C { import(v: string) { return v; } require(v: string): string { return v; } }\n",
+            "export class C { *import(v: string) { yield v; } static async *require(v: string) { yield v; } }\n",
+            "export class C { x = 1; import(v: string) { return v; } }\n",
+            "export class C { m() { return 1; } import(v: string): string { return v; } }\n",
+            "export class C extends Object { static async import(v: string) { return v; } }\n",
+            "export class C implements I { public require(v: string): string { return v; } }\ninterface I { a?: 1 }\n",
+            "export const K = class { require(v: string) { return v; } };\n",
+            "export class C { m() {} *require(v: string) { yield v; } }\n",
+            "export class C { static {} *import(v: string) { yield v; } }\n",
+            "export class C { x = {}; *import(v: string) { yield v; } }\n",
+            "export class C { x: { a: 1 }\n  *import(v: string) { yield v; } }\n",
+            "export class C<T extends { a: 1 }> { import(v: T) { return v; } }\n",
+            "export class C extends Array<{ a: 1 }> { *require(v: string) { yield v; } }\n",
+            "export type T = { import(v: string): string, require(v: string): void };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src})
+
+    # --- opencode review 76: an exemption only where the member head is unambiguous
+
+    LOAD_SHAPES = (
+        ("import('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("require('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("require?.('@tauri-apps/api/core')", "tauri-only-in-ipc"),
+        ("import('../../test/support/snapshots')", "no-production-dependency-on-non-production"),
+        ("import('../ipc/' + 'tauri')", "frontend-imports-are-literal"),
+    )
+
+    def test_a_word_then_a_line_break_then_a_block_is_not_an_object(self):
+        # `of`, `async`, `type` and `get` can be identifiers, and a line break after
+        # `return`, `await x`, `yield` or `throw 1` ends the statement: the `{` that
+        # follows is a block, so its first call is a load. The `;` forms are controls.
+        for ext in (".ts", ".mts", ".cts"):
+            path = f"app/web/src/shell/probe{ext}"
+            for load, rule in self.LOAD_SHAPES:
+                block = f"{{\n  {load}\n  {{}}\n}}\n"
+                for src in (
+                    f"const of = 1;\nof\n{block}export {{}};\n",
+                    f"const of = 1;\nof;\n{block}export {{}};\n",
+                    f"const async = 1;\nasync\n{block}export {{}};\n",
+                    f"const type = 1;\ntype\n{block}export {{}};\n",
+                    f"const get = 1;\nget\n{block}export {{}};\n",
+                    f"export function f() {{ return\n{block}}}\n",
+                    f"export function f() {{ return;\n{block}}}\n",
+                    f"export async function f(x: number) {{ await\nx\n{block}}}\n",
+                    f"export function* g() {{ yield\n{block}}}\n",
+                    f"export function f() {{ throw 1\n{block}}}\n",
+                ):
+                    with self.subTest(path=path, src=src):
+                        self.assertFlags({path: src}, (rule, path))
+
+    def test_a_call_in_an_initializer_is_not_a_method(self):
+        for load, rule in self.LOAD_SHAPES:
+            for src in (
+                f"declare const c: boolean;\nexport const o = {{\n  x: c ? 2 * {load} : 0\n}};\n",
+                f"declare const c: boolean;\nexport class C {{ x = c ? 2 * {load} : 0; }}\n",
+                f"declare const c: boolean;\nexport class C {{ static x = c ? 2 * {load} : 0 }}\n",
+                f"declare const c: boolean, a: number;\nexport const o = {{ x: c ? a\n* {load} : 0 }};\n",
+                f"declare const c: boolean;\nexport const o = {{ x: c ? f(1, {load}) : 0 }};\nfunction f(...a: unknown[]) {{ return a; }}\n",
+                f"declare const c: boolean;\nexport class C {{ x = c ? [1, {load}] : 0 }}\n",
+                f"declare const c: boolean, get: number;\nexport class C {{ x = c ? get\n* {load} : 0 }}\n",
+                f"declare const c: boolean;\nexport const y = c ? 2 * {load} : 0;\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, (rule, self.TS_PROBE))
+
+    def test_an_object_or_class_closing_brace_in_an_initializer_is_not_a_member_boundary(self):
+        # opencode review 77: `+{} * require(...)` in a class field; the `}` of the
+        # object is not the end of a member, so the `*` is multiplication.
+        for load, rule in self.LOAD_SHAPES:
+            for src in (
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? +{{}} * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? <any>{{}} * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport class C {{\n  x = c ? (+{{}}) * {load} : 0;\n}}\n",
+                f"declare const c: boolean;\nexport const o = {{ x: c ? +{{}} * {load} : 0 }};\n",
+                f"declare const c: boolean;\nexport class C {{ m() {{}} x = c ? +{{}} * {load} : 0 }}\n",
+                f"export class C {{ x = class {{}}\n  * {load}; }}\n",
+                f"export class C {{ x = () => {{}}\n  * {load}; }}\n",
+                f"export class C {{ x = {{ a: 1 }}\n  * {load}; }}\n",
+                f"export class C {{ static {{}} x = +{{}} * {load}; }}\n",
+            ):
+                with self.subTest(src=src):
+                    self.assertFlags({self.TS_PROBE: src}, (rule, self.TS_PROBE))
+
+    def test_ambiguous_member_positions_are_read_as_loads(self):
+        # The documented false positives: real methods or signatures named `import`
+        # or `require` whose position the reader can't prove is a member head. Each is
+        # reported, here as a non-literal load, never skipped.
+        for src in (
+            "export function f() { return { require(v: string) { return v; } }; }\n",
+            "declare const c: boolean;\nexport const o = c ? 1 : { import(v: string) { return v; } };\n",
+            "export class C { x = 1\n  import(v: string) { return v; } }\n",
+            "export const K = class<T> { import(v: T) { return v; } };\n",
+            "declare function dec(...a: unknown[]): any;\nexport class C { @dec\n  import(v: string) { return v; } }\n",
+            "export class C { x = 1\n  m() { return 1; }\n  *import(v: string) { yield v; } }\n",
+            "export interface I { import(v: string): string }\n",
+            "export type T = { import(v: string): string; require(v: string): void };\n",
+        ):
+            with self.subTest(src=src):
+                self.assertFlags({self.TS_PROBE: src}, ("frontend-imports-are-literal", self.TS_PROBE))
+
     def test_clean_tsx_lexes_clean(self):
         src = """\
         declare const p: object, a: number, b: number, c: number, s: string;
