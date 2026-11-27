@@ -1,7 +1,7 @@
 //! Cases 40-42: the terminal's queries are answered once, by the owner, for live output only.
 
 use combine_protocol::{
-    AttachmentId, AutomaticReply, ClientMessage, Epoch, OwnershipGeneration, Seq, TermId,
+    AttachmentId, AutomaticReply, ClientMessage, Epoch, OwnershipGeneration, Resume, Seq, TermId,
 };
 use combined::core::CoreConfig;
 use futures::FutureExt;
@@ -107,10 +107,35 @@ pub async fn replayed_then_live_query_gets_one_reply_for_the_live_one<T: Target>
 
     c.read = ReadPolicy::Paused;
     h.emit(&term, QUERY).await?;
-    h.reconnect(&mut c).await?;
+    h.settle(&mut [&mut c]).await?;
+    // Resumes by hand: `Harness::reconnect` reads the first queued event, and sending it seals
+    // the open entry. Here nothing is read before the second query, so only the resume sealing
+    // the open entry keeps the live query out of the replayed entry.
+    let cursor = c
+        .view(a)
+        .and_then(|view| view.last_applied)
+        .ok_or_else(|| Failure::new("harness", "the client has applied nothing"))?;
+    c.connection = Some(h.driver.core_mut().connect());
+    let request = c.next_request();
+    h.send(
+        &mut c,
+        ClientMessage::Resume(Resume {
+            request,
+            cursor,
+            instance: None,
+        }),
+    )
+    .await?;
     h.emit(&term, QUERY).await?;
+    h.settle(&mut [&mut c]).await?;
     c.read = ReadPolicy::Auto;
     h.settle(&mut [&mut c]).await?;
+    ensure!(
+        "resumed",
+        c.resume_answered(request) && !c.resume_refused(a),
+        "the resume should have been answered with Resumed; got {:?}",
+        c.controls
+    );
 
     let view = c
         .view(a)

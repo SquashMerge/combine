@@ -1,7 +1,9 @@
 //! Cases 22-28 and 44: a client that reads slowly, or not at all, never makes the daemon's memory
 //! grow past its bounds, and a stream that does overflow ends cleanly.
 
-use combine_protocol::{AttachmentId, ClientMessage, CloseReason, Resume, TermId};
+use combine_protocol::{
+    Ack, AttachmentId, ClientMessage, CloseReason, DaemonMessage, Resume, TermId,
+};
 use combined::core::{BackendCommand, CoreConfig, LogEnd, LogStats};
 use futures::FutureExt;
 
@@ -14,6 +16,8 @@ const PIECE: usize = 65_536;
 const SMALL_FRAMES: usize = 20_000;
 const FRAME: usize = 16;
 const FLOOD: usize = 2_000;
+/// Case 25's first entry: acking it alone frees less than `credit_min_grant`.
+const SMALL_ACK: usize = 1_024;
 
 pub fn cases<T: Target>() -> Vec<Case<T>> {
     vec![
@@ -153,9 +157,11 @@ async fn settle_through<T: Target>(
     total: u64,
 ) -> Outcome {
     h.settle_until(&mut [&mut *c], "all the output", |clients| {
-        clients[0]
-            .view(att)
-            .is_some_and(|view| view.measured_len == total)
+        clients.iter().all(|client| {
+            client
+                .view(att)
+                .is_some_and(|view| view.measured_len == total)
+        })
     })
     .await
 }
@@ -176,7 +182,9 @@ fn exact(view: &View, payload: &Payload) -> Outcome {
     Ok(())
 }
 
-/// Case 22.
+/// Case 22. Its output coalesces into a few large entries, so the log never comes near the
+/// event bound; case 26 (`event_flood_ends_with_a_final_gap_once_drained`) is the case that
+/// stresses it.
 pub async fn slow_client_output_stays_bounded<T: Target>(t: &mut T) -> Outcome {
     let mut h = Harness::new(t, Harness::<T>::small_caps())?;
     let term = h.spawn("p", 80, 24).await?;
@@ -321,7 +329,17 @@ pub async fn credit_is_granted_only_while_the_log_has_room<T: Target>(t: &mut T)
     let byte_credit = h.driver.backend().capabilities().byte_credit;
     let (mut c, att) = marked_client(&mut h, &term).await?;
     c.read = ReadPolicy::Paused;
+    c.ack = AckPolicy::Never;
     h.journal();
+
+    // The client takes a small first entry and holds back its ack, so that acking it later
+    // frees less than `credit_min_grant`.
+    h.emit(&term, Payload::new(125, SMALL_ACK).bytes()).await?;
+    h.read_until(&mut c, |message| matches!(message, DaemonMessage::Data(_)))
+        .await?;
+    let small = view_of(&c, att)?
+        .last_applied
+        .ok_or_else(|| Failure::new("harness", "nothing was applied"))?;
 
     let payload = Payload::new(25, 8 * PIECE);
     for chunk in payload.pieces(PIECE) {
@@ -341,6 +359,41 @@ pub async fn credit_is_granted_only_while_the_log_has_room<T: Target>(t: &mut T)
         "credit-room",
         early == 0,
         "credit was granted {early} time(s) while the log had no room"
+    );
+
+    h.send(&mut c, ClientMessage::Ack(Ack { cursor: small }))
+        .await?;
+    h.settle(&mut [&mut c]).await?;
+    let journal = h.journal();
+    if byte_credit {
+        // The room `take_credit` saw after the ack: the bytes outside the reserve that were
+        // neither retained nor outstanding, before any grant it made.
+        let granted: u64 = journal
+            .iter()
+            .filter_map(|command| match command {
+                BackendCommand::Credit { bytes, .. } => Some(u64::from(*bytes)),
+                _ => None,
+            })
+            .sum();
+        let accounted = stats_of(&h, att)?.accounted_bytes;
+        let room = h.config.log_max_bytes as i128 - h.config.credit_reserve as i128
+            + i128::from(granted)
+            - accounted as i128;
+        if room <= 0 || room >= i128::from(h.config.credit_min_grant) {
+            return Err(Failure::new(
+                "harness",
+                format!(
+                    "the partial ack should leave room under credit_min_grant {}; it left {room}",
+                    h.config.credit_min_grant
+                ),
+            ));
+        }
+    }
+    let partial = credits(&journal);
+    ensure!(
+        "credit-min-grant",
+        partial == 0,
+        "an ack that freed less than credit_min_grant brought {partial} credit grant(s)"
     );
 
     resume_reading(&mut c);
@@ -394,9 +447,9 @@ pub async fn event_flood_ends_with_a_final_gap_once_drained<T: Target>(t: &mut T
 
     resume_reading(&mut c);
     h.settle_until(&mut [&mut c], "the final gap", |clients| {
-        clients[0]
-            .view(att)
-            .is_some_and(|view| view.ending.is_some())
+        clients
+            .iter()
+            .all(|client| client.view(att).is_some_and(|view| view.ending.is_some()))
     })
     .await?;
     let ending = view_of(&c, att)?.ending.clone();
