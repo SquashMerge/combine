@@ -312,7 +312,7 @@ describe('LayoutQueue', () => {
 
   it('replace_panel_sends_add_then_remove', async () => {
     const { queue, sent } = setup();
-    queue.onSnapshot(null, snap('5'));
+    queue.onSnapshot(null, withPanels('5', ['old']));
     queue.replacePanel('old', 'new', 't2');
     await flush();
     expect(sent.map((s) => s.ops)).toEqual([
@@ -321,6 +321,88 @@ describe('LayoutQueue', () => {
         { op: 'remove_panel', panel: 'old' },
       ],
     ]);
+  });
+
+  /** Tiles `t1` and `t2`, with `panels` in `t2` (`t1` empty), at `revision`. */
+  function withPanels(revision: string, t2: string[], tiles: string[] = ['t1', 't2']): LayoutSnapshot {
+    const base = snap(revision, tiles);
+    const fill = (node: LayoutSnapshot['root']): LayoutSnapshot['root'] =>
+      node.type === 'tile'
+        ? node.id === 't2'
+          ? { ...node, panels: t2, active: t2[0] ?? null }
+          : node
+        : { ...node, a: fill(node.a), b: fill(node.b) };
+    return { ...base, root: fill(base.root) };
+  }
+
+  it('replace_panel_is_not_sent_once_the_tile_no_longer_holds_the_old_pin', async () => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, withPanels('5', ['other']));
+    queue.replacePanel('old', 'new', 't2');
+    await flush();
+    expect(sent).toEqual([]);
+    expect(notices).toEqual([STALE_NOTICE]);
+  });
+
+  it('a_stale_re_pin_is_not_retried_after_another_client_moved_the_old_pin_and_closed_its_tile', async () => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, withPanels('5', ['old']));
+    queue.replacePanel('old', 'new', 't2');
+    await flush();
+    expect(sent).toHaveLength(1);
+    // Revision 6: another client moved `old` into t1 and closed t2.
+    const moved: LayoutSnapshot = {
+      ...snap('6', ['t1']),
+      root: { type: 'tile', id: 't1', panels: ['old'], active: 'old' },
+    };
+    queue.onSnapshot(null, moved);
+    queue.onError(rid(1), 'stale_layout', 'stale');
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(notices).toEqual([STALE_NOTICE]);
+  });
+
+  it('a_stale_re_pin_is_not_retried_after_the_old_pin_moved_out_of_a_tile_that_remains', async () => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, withPanels('5', ['old']));
+    queue.replacePanel('old', 'new', 't2');
+    await flush();
+    const moved: LayoutSnapshot = {
+      ...withPanels('6', []),
+      root: {
+        type: 'split',
+        dir: 'h',
+        ratio: 0.5,
+        a: { type: 'tile', id: 't1', panels: ['old'], active: 'old' },
+        b: { type: 'tile', id: 't2', panels: [], active: null },
+      },
+    };
+    queue.onSnapshot(null, moved);
+    queue.onError(rid(1), 'stale_layout', 'stale');
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(notices).toEqual([STALE_NOTICE]);
+  });
+
+  it('a_stale_re_pin_is_retried_while_its_tile_still_holds_the_old_pin', async () => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, withPanels('5', ['old']));
+    queue.replacePanel('old', 'new', 't2');
+    await flush();
+    queue.onSnapshot(null, withPanels('6', ['old', 'more']));
+    queue.onError(rid(1), 'stale_layout', 'stale');
+    await flush();
+    expect(sent.map((s) => s.base)).toEqual(['5', '6']);
+    expect(notices).toEqual([]);
+  });
+
+  it('add_panel_to_a_tile_that_is_gone_is_not_sent', async () => {
+    const { queue, sent, notices } = setup();
+    queue.onSnapshot(null, snap('5', ['t1']));
+    queue.addPanelTo('p', 't2');
+    await flush();
+    expect(sent).toEqual([]);
+    expect(notices).toEqual([STALE_NOTICE]);
   });
 
   it('builds the add-to-tile and move ops', async () => {
