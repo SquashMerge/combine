@@ -147,6 +147,14 @@ describe('App terminal tabs', () => {
     await waitFor(() => expect(terminalPort.streams).toHaveLength(1));
   });
 
+  it('a_default_layout_shows_the_active_terminal_in_its_one_tile', async () => {
+    const { terminalPort } = await mountApp();
+    const panel = await screen.findByTestId('terminal-panel');
+    expect(document.querySelector('[data-tile-id="main"]')?.contains(panel)).toBe(true);
+    expect(panel.textContent).toContain('build');
+    await waitFor(() => expect(terminalPort.streams).toHaveLength(1));
+  });
+
   it('keeps the panel mounted through a host drop, and the reconnect resumes the same stream', async () => {
     const { hostsPort, layoutPort, terminalPort } = await mountApp();
     await screen.findByTestId('terminal-panel');
