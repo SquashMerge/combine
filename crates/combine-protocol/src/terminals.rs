@@ -52,5 +52,8 @@ pub struct SpaceInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendInfo {
     pub id: String,
+    /// Always present on the wire, `null` when the backend names none: a field with
+    /// `deserialize_with` gets no implicit `None` when it is missing.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
     pub instance: Option<String>,
 }

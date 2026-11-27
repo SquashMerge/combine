@@ -364,11 +364,35 @@ fn terminals_without_a_backend_is_bad_json() {
     for json in [
         patched(&base, "/backend", None),
         patched(&base, "/backend", Some(serde_json::json!(null))),
+        patched(
+            &base,
+            "/backend",
+            Some(serde_json::json!({"id": "backend-a"})),
+        ),
     ] {
         assert!(
             is_bad_json(DaemonMessage::decode(&control_frame(&json))),
             "{json}"
         );
+    }
+}
+
+#[test]
+fn a_backend_naming_no_instance_says_null() {
+    let json = patched(
+        &golden_json("terminals"),
+        "/backend",
+        Some(serde_json::json!({"id": "backend-a", "instance": null})),
+    );
+    match DaemonMessage::decode(&control_frame(&json)).unwrap().0 {
+        DaemonMessage::Terminals(list) => assert_eq!(
+            list.backend,
+            BackendInfo {
+                id: "backend-a".to_string(),
+                instance: None
+            }
+        ),
+        other => panic!("expected terminals, got {other:?}"),
     }
 }
 
