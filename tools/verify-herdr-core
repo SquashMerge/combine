@@ -64,6 +64,7 @@ fi
 # Further default-core ids to refuse besides the hard-coded one, for a machine whose default
 # core has another id: COMBINE_DEFAULT_CORE_IDS, space-separated. A malformed entry refuses.
 default_extra=${COMBINE_DEFAULT_CORE_IDS:-}
+set -f
 for id in $default_extra; do
   case $id in
     *[!A-Za-z0-9_-]*)
@@ -72,6 +73,7 @@ for id in $default_extra; do
       ;;
   esac
 done
+set +f
 
 # Tests that restart or crash the core. Each runs alone against a core of its own.
 restart_tests="backend_crash_starts_one_new_inexact_epoch backend_restart_starts_one_new_exact_epoch inexact_terminal_stays_inexact program_exit_is_final stale_replies_are_dropped_silently two_panels_recover_across_a_herdr_core_restart watch_reports_real_core_changes"

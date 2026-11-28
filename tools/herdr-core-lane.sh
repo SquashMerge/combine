@@ -24,9 +24,15 @@ lane_default_core_id() { printf '%s' 4bcff4a58f4d97d505396e5a43a807e6; }
 # (COMBINE_DEFAULT_CORE_IDS, validated by the caller to letters, digits, `_` and `-`).
 lane_check_not_default() {
   [ -n "$1" ] && [ "$1" != "$(lane_default_core_id)" ] || return 1
+  # The list splits on spaces but is never expanded as a pattern.
+  set -f
   for other in ${2:-}; do
-    [ "$1" != "$other" ] || return 1
+    if [ "$1" = "$other" ]; then
+      set +f
+      return 1
+    fi
   done
+  set +f
   return 0
 }
 
@@ -102,4 +108,3 @@ lane_hc_socket() {
     XDG_CONFIG_HOME="$LANE_ROOT/config" XDG_RUNTIME_DIR="$LANE_ROOT/run" \
     HC_SOCKET="$LANE_SOCKET" "$LANE_HC" "$@"
 }
-
