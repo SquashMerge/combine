@@ -1,3 +1,4 @@
+import { type MarkedText, plainText } from '../model/markedText';
 import type { GoneWhy } from '../model/terminalTabs';
 import type { PanelView } from './attachmentMachine';
 
@@ -44,13 +45,29 @@ export function badges(view: PanelView): string[] {
   return result;
 }
 
-export function goneText(why: GoneWhy, termId: string): string {
+export function goneMarked(why: GoneWhy, termId: string): MarkedText {
   switch (why) {
     case 'unlisted':
-      return `Terminal ${termId} is gone. The host no longer lists it.`;
+      return ['Terminal ', { code: termId }, ' is gone. The host no longer lists it.'];
     case 'other-instance':
-      return `Terminal ${termId} is gone. It belonged to a terminal backend this host no longer runs.`;
+      return [
+        'Terminal ',
+        { code: termId },
+        ' is gone. It belonged to a terminal backend this host no longer runs.',
+      ];
     case 'no-instance':
-      return `Terminal ${termId} can't be shown: the host doesn't say which terminal backend instance it runs.`;
+      return [
+        'Terminal ',
+        { code: termId },
+        " can't be shown: the host doesn't say which terminal backend instance it runs.",
+      ];
   }
+}
+
+export function goneText(why: GoneWhy, termId: string): string {
+  return plainText(goneMarked(why, termId));
+}
+
+export function panelStatusMarked(view: PanelView, termId: string): MarkedText | null {
+  return view.status?.kind === 'gone' ? goneMarked(view.status.why, termId) : statusText(view);
 }

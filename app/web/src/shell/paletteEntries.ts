@@ -1,5 +1,6 @@
 import type { HostsSnapshot } from '../model/hosts';
 import type { TermId } from '../model/ids';
+import { type MarkedText, plainText } from '../model/markedText';
 import type { PanelSummary } from '../model/panels';
 import { ACTIVE_TERMINAL_TAB } from '../model/terminalTabs';
 import { type SpaceKey, folderName, spaceKeyId } from '../model/space';
@@ -19,6 +20,8 @@ export type PaletteAction =
 export interface PaletteEntry extends Searchable {
   id: string;
   action: PaletteAction;
+  /** `detail` with its paths, IDs and commands marked. */
+  detailMarked?: MarkedText;
 }
 
 export interface PaletteHandlers {
@@ -51,6 +54,10 @@ const GROUP_TERMINAL = 2;
 const GROUP_PANEL = 3;
 const GROUP_HOST = 4;
 
+function described(marked: MarkedText): Pick<PaletteEntry, 'detail' | 'detailMarked'> {
+  return { detail: plainText(marked), detailMarked: marked };
+}
+
 function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
   const { focused, space } = panels;
   if (!panels.editable) return [];
@@ -59,12 +66,12 @@ function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
   const entries: PaletteEntry[] = [];
   if (focused !== null) {
     const summary = panels.panels.find((panel) => panel.id === focused.panel);
-    const detail = `${summary?.title ?? focused.label ?? focused.panel} in ${folder}`;
+    const detail = described([summary?.title ?? focused.label ?? focused.panel, ' in ', { code: folder }]);
     entries.push({
       id: `close-panel:${key}:${focused.panel}`,
       group: GROUP_PANEL_ACTION,
       label: 'Close panel',
-      detail,
+      ...detail,
       action: { kind: 'close-panel', space, panel: focused.panel },
     });
     if (summary?.lifetime === 'scratch') {
@@ -72,7 +79,7 @@ function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
         id: `pin-panel:${key}:${focused.panel}`,
         group: GROUP_PANEL_ACTION,
         label: 'Pin panel',
-        detail,
+        ...detail,
         action: { kind: 'pin-panel', space, panel: focused.panel },
       });
     }
@@ -83,7 +90,7 @@ function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
       id: `show-active-terminal:${key}:${focusedTile}`,
       group: GROUP_PANEL_ACTION,
       label: 'Show the active terminal here',
-      detail: `in ${folder}`,
+      ...described(['in ', { code: folder }]),
       action: { kind: 'show-active-terminal', space, tile: focusedTile },
     });
   }
@@ -103,9 +110,11 @@ function panelEntries(panels: PalettePanels): PaletteEntry[] {
       id: `panel:${key}:${summary.id}`,
       group: GROUP_PANEL,
       label: summary.title ?? summary.id,
-      detail:
-        `${panels.hostName} ${folderName(space.path)} ${summary.renderer} ${state}` +
-        (tile === null ? ', not in a tile' : ''),
+      ...described([
+        `${panels.hostName} `,
+        { code: folderName(space.path) },
+        ` ${summary.renderer} ${state}` + (tile === null ? ', not in a tile' : ''),
+      ]),
       action: { kind: 'show-panel', space, panel: summary.id, tile },
     });
   }
@@ -123,7 +132,7 @@ export function buildPaletteEntries(
         id: `space:${spaceKeyId(space.key)}`,
         group: GROUP_SPACE,
         label: folderName(space.key.path),
-        detail: `${host.name} ${space.key.path}`,
+        ...described([`${host.name} `, { code: space.key.path }]),
         action: { kind: 'switch-space', space: space.key },
       });
     }
@@ -135,7 +144,7 @@ export function buildPaletteEntries(
           id: `terminal:${spaceKeyId(space.key)}:${terminal.id}`,
           group: GROUP_TERMINAL,
           label: terminal.name,
-          detail: `${host.name} ${folderName(space.key.path)} ${terminal.command}`,
+          ...described([`${host.name} `, { code: folderName(space.key.path) }, ' ', { code: terminal.command }]),
           action: { kind: 'focus-terminal', space: space.key, terminalId: terminal.id },
         });
       }
@@ -148,7 +157,7 @@ export function buildPaletteEntries(
       id: `retry:${host.name}`,
       group: GROUP_HOST,
       label: `Retry ${host.name}`,
-      detail: describeConnection(host.connection),
+      ...described(describeConnection(host.connection)),
       action: { kind: 'retry-host', hostName: host.name },
     });
   }

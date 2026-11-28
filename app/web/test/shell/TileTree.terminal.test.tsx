@@ -211,6 +211,7 @@ describe('TileTree terminal tabs', () => {
     await flush();
     expect(screen.queryByTestId('terminal-panel')).toBeNull();
     expect(bodyOf('t1').textContent).toContain('Panel ghost is missing');
+    expect(bodyOf('t1').querySelector('code')?.textContent).toBe('ghost');
     expect(port.streams).toHaveLength(0);
   });
 
@@ -221,6 +222,7 @@ describe('TileTree terminal tabs', () => {
     );
     await flush();
     expect(bodyOf('t1').textContent).toBe('Panel .bogus is missing');
+    expect(bodyOf('t1').querySelector('code')?.textContent).toBe('.bogus');
     expect(tabButton('.bogus').getAttribute('data-panel-entry')).toBe('missing');
     view.rerender(tree(port, fakeXtermFactory(), layout(tile('t1', [PIN_1])), {}, { panels: true }));
     await flush();
@@ -249,24 +251,27 @@ describe('TileTree terminal tabs', () => {
     const port = new MemoryTerminalPort();
     const onCloseTab = vi.fn();
     const texts: string[] = [];
-    const cases: [TerminalTabsContext, string, string][] = [
-      [context(), '.terminal/core-a/term-9', 'Terminal term-9 is gone. The host no longer lists it.'],
+    const cases: [TerminalTabsContext, string, string, string][] = [
+      [context(), '.terminal/core-a/term-9', 'Terminal term-9 is gone. The host no longer lists it.', 'term-9'],
       [
         context({ backend: { id: 'herdr-core', instance: 'core-b' } }),
         PIN_1,
         'Terminal term-1 is gone. It belonged to a terminal backend this host no longer runs.',
+        'term-1',
       ],
       [
         context({ backend: { id: 'herdr-core', instance: null } }),
         PIN_1,
         "Terminal term-1 can't be shown: the host doesn't say which terminal backend instance it runs.",
+        'term-1',
       ],
     ];
-    for (const [ctx, tab, text] of cases) {
+    for (const [ctx, tab, text, termId] of cases) {
       const view = render(tree(port, fakeXtermFactory(), layout(tile('t1', [tab])), { onCloseTab }, { ctx }));
       await flush();
       texts.push(screen.getByTestId('gone-terminal-message').textContent ?? '');
       expect(text).toBe(texts.at(-1));
+      expect(screen.getByTestId('gone-terminal-message').querySelector('code')?.textContent).toBe(termId);
       expect(screen.queryByTestId('terminal-panel')).toBeNull();
       expect(screen.queryByTestId('terminal-switcher')).toBeNull();
       fireEvent.click(within(document.querySelector('[data-testid="gone-terminal"]') as HTMLElement).getByRole('button', { name: 'Close' }));

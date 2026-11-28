@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { dictWith, emptyDict } from '../../src/model/dict';
-import { type LayoutSnapshot, parseLayoutEvent } from '../../src/model/layout';
+import { type LayoutNode, type LayoutSnapshot, parseLayoutEvent } from '../../src/model/layout';
 import type { DecimalU64 } from '../../src/model/ids';
 import type { PanelSummary } from '../../src/model/panels';
 import { HELD_NOTICE, HELD_TITLE, type HeldReason } from '../../src/shell/heldLayout';
@@ -53,6 +53,27 @@ describe('TileTree', () => {
     expect(tile('t1').getByRole('tab', { name: 'p1' }).getAttribute('aria-selected')).toBe('true');
     expect(tile('t1').getByRole('tab', { name: 'p2' }).getAttribute('aria-selected')).toBe('false');
     expect(tile('t2').getByRole('tabpanel').textContent).toBe('No panels');
+  });
+
+  it('shows the bare tab ID as code when there is no panel port', () => {
+    const root: LayoutNode = { type: 'tile', id: 't1', panels: ['a'], active: 'a' };
+    render(
+      <TileTree
+        layout={fixtureLayout({ root, error: null, dropped: null })}
+        notice={null}
+        error={null}
+        focusedTile="t1"
+        activeTabs={{ t1: 'a' }}
+        onFocus={vi.fn()}
+        onSelectTab={vi.fn()}
+        onSplit={vi.fn()}
+        onClose={vi.fn()}
+        terminalPort={new MemoryTerminalPort()}
+      />,
+    );
+    const body = tile('t1').getByRole('tabpanel');
+    expect(body.textContent).toBe('a');
+    expect(body.querySelector('code')?.textContent).toBe('a');
   });
 
   it('shows invalid-file error banner', () => {

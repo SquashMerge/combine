@@ -93,11 +93,11 @@ export function SpaceRail({
         <>
           <p role="alert">{config.error}</p>
           <p className="config-hint">
-            Fix {config.path} and restart Combine. Combine has not changed the file.
+            Fix <code>{config.path}</code> and restart Combine. Combine has not changed the file.
           </p>
         </>
       ) : hosts.length === 0 ? (
-        <p className="config-hint">No hosts yet. Add them to {config.path}.</p>
+        <p className="config-hint">No hosts yet. Add them to <code>{config.path}</code>.</p>
       ) : (
         hosts.map((host) => (
           <HostSection

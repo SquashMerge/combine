@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { HostsSnapshot } from '../model/hosts';
+import { MarkedTextView } from '../panels/MarkedTextView';
 import { fuzzyFilter } from './fuzzy';
 import {
   type PaletteHandlers,
@@ -105,7 +106,9 @@ function PaletteDialog({ snapshot, panels = null, onClose, ...handlers }: Palett
               }}
             >
               <span className="label">{entry.label}</span>
-              <span className="detail">{entry.detail}</span>
+              <span className="detail">
+                <MarkedTextView text={entry.detailMarked ?? entry.detail} />
+              </span>
             </li>
           ))}
         </ul>

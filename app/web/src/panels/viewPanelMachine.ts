@@ -1,4 +1,5 @@
 import { type DecimalU64, compareDecimalU64 } from '../model/ids';
+import { type MarkedText, plainText } from '../model/markedText';
 import type { PanelContent, PanelEntry, PanelError, PanelState, RenderStatus } from '../model/panels';
 import type { RenderOutcome, RendererName } from '../model/render';
 
@@ -249,15 +250,23 @@ export interface ViewText {
   snippet: string | null;
 }
 
+export interface ViewMarked {
+  /** The `role="status"` line, or null. */
+  status: MarkedText | null;
+  /** The `role="alert"` line, or null. */
+  error: MarkedText | null;
+  snippet: string | null;
+}
+
 /** The exact copy of the brief's section 5.5. */
-export function viewText(state: MachineState, entry: PanelEntry, id: string): ViewText {
+export function viewMarked(state: MachineState, entry: PanelEntry, id: string): ViewMarked {
   const view = viewState(state, entry);
-  const none: ViewText = { status: null, error: null, snippet: null };
+  const none: ViewMarked = { status: null, error: null, snippet: null };
   switch (view) {
     case 'missing':
-      return { ...none, status: `Panel ${id} is missing` };
+      return { ...none, status: ['Panel ', { code: id }, ' is missing'] };
     case 'skipped':
-      return { ...none, status: `Panel ${id} isn't loaded: ${entry.kind === 'skipped' ? entry.reason : ''}` };
+      return { ...none, status: ['Panel ', { code: id }, ` isn't loaded: ${entry.kind === 'skipped' ? entry.reason : ''}`] };
     case 'loading':
       return { ...none, status: 'Loading…' };
     case 'rendering':
@@ -281,8 +290,17 @@ export function viewText(state: MachineState, entry: PanelEntry, id: string): Vi
       };
     }
     case 'fetch_failed':
-      return { ...none, error: `Couldn't load panel ${id}: ${state.fetchFailed?.message ?? ''}` };
+      return { ...none, error: ["Couldn't load panel ", { code: id }, `: ${state.fetchFailed?.message ?? ''}`] };
     case 'rendered':
       return none;
   }
+}
+
+export function viewText(state: MachineState, entry: PanelEntry, id: string): ViewText {
+  const { status, error, snippet } = viewMarked(state, entry, id);
+  return {
+    status: status === null ? null : plainText(status),
+    error: error === null ? null : plainText(error),
+    snippet,
+  };
 }

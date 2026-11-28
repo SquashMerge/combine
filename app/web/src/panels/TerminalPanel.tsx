@@ -3,7 +3,8 @@ import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import { TerminalView } from '../renderers/terminal/TerminalView';
 import { createXtermAdapter } from '../renderers/terminal/xtermAdapter';
-import { badges, goneText, overlayText, ownershipText, statusText } from './panelText';
+import { MarkedTextView } from './MarkedTextView';
+import { badges, overlayText, ownershipText, panelStatusMarked } from './panelText';
 import { useTerminalPanel } from './useTerminalPanel';
 import './terminalPanel.css';
 
@@ -51,7 +52,7 @@ export function TerminalPanel({
     focused,
     createAdapter,
   });
-  const status = view.status?.kind === 'gone' ? goneText(view.status.why, termId) : statusText(view);
+  const status = panelStatusMarked(view, termId);
   const canClose =
     onClose !== undefined &&
     (label.state === 'exited' || view.status?.kind === 'exited' || view.status?.kind === 'gone');
@@ -102,7 +103,11 @@ export function TerminalPanel({
         </div>
         {(status !== null || view.canReattach || view.canRetry || canClose) && (
           <div className="terminal-panel__status">
-            {status !== null && <span data-testid="terminal-status">{status}</span>}
+            {status !== null && (
+              <span data-testid="terminal-status">
+                <MarkedTextView text={status} />
+              </span>
+            )}
             {view.canReattach && (
               <button type="button" onClick={reattach}>
                 Reattach

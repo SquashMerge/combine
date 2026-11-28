@@ -42,14 +42,16 @@ describe('SpaceRail', () => {
     await mount(new MemoryHostsPort(snapshot([host('a', HOST_A, connected)], '1', error)));
     expect(screen.getByRole('alert').textContent).toBe(error);
     const hint = document.querySelector('.config-hint');
-    expect(hint?.textContent).toContain('/cfg/hosts.json');
-    expect(hint?.textContent).toContain('Combine has not changed the file.');
+    expect(hint?.textContent).toBe('Fix /cfg/hosts.json and restart Combine. Combine has not changed the file.');
+    expect(hint?.querySelector('code')?.textContent).toBe('/cfg/hosts.json');
     expect(document.querySelectorAll('section[data-connection]')).toHaveLength(0);
   });
 
   it('shows where to add hosts when there are none', async () => {
     await mount(new MemoryHostsPort(snapshot([])));
-    expect(screen.getByText('No hosts yet. Add them to /cfg/hosts.json.')).toBeTruthy();
+    const hint = document.querySelector('.config-hint');
+    expect(hint?.textContent).toBe('No hosts yet. Add them to /cfg/hosts.json.');
+    expect(hint?.querySelector('code')?.textContent).toBe('/cfg/hosts.json');
   });
 
   it("shows a failed host's version mismatch message with Retry", async () => {
