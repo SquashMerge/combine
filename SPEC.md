@@ -890,7 +890,7 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
 | Renderer | Shows | Input | Notes |
 | --- | --- | --- | --- |
 | Terminal | A live herdr/Rex terminal | A terminal tab: follow-active or pinned | xterm.js with WebGL; shown in any tile |
-| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele 1.13.0 `render()`; Mermaid 12.1.0 syntax (as Pele's README states); `--pele-*` variables mapped to system colours on the renderer's container; sanitized with DOMPurify's SVG profile (Renderer contract) |
+| Mermaid | Class, sequence, flow, ER, state diagrams | Mermaid source | Pele 1.13.0 `render()`; Mermaid 12.1.0 syntax (as Pele's README states); `--pele-*` variables mapped to the brand tokens on the renderer's container; sanitized with DOMPurify's SVG profile (Renderer contract) |
 | Markdown | Notes, summaries, agent reports | Markdown text | markdown-it `html: false`; fenced code highlighted with highlight.js core (bash, json, rust, typescript, javascript, python, toml, yaml, diff), other languages escaped; sanitized with DOMPurify (Renderer contract) |
 | View | A kind's view, or an inline one | View tree + data | The view language below; arranges the other renderers as nodes |
 | Table | Lists of records | JSON rows + column hints | Sort, filter, copy; keyboard navigation; virtualized; a row click can set group state |
@@ -915,7 +915,7 @@ A panel is a loader (optional JS, run in the daemon) that produces data, plus a 
   - Pele's `rel` and `target` on links are dropped, because links become link markers; its `data-*` attributes such as `data-id` are dropped too.
   - A link whose raw `href` is an absolute `https:` or `http:` URL with no edge whitespace and no C0 control character (U+0000 to U+001F) becomes a link marker: `data-combine-open-url` holds the normalized URL, with `role="link"` and `tabindex="0"`. Any other link has no marker and does nothing.
 - **Links.** `attachRenderedLinks(container, port)` in `src/panels/renderedLinks.ts` routes a click or an Enter press on a marked link to `open_url` and prevents the default action. Other anchors are never followed. The view panel host mounts it on the container that holds the fragment.
-- **Theme.** The container maps Pele's `--pele-*` variables to CSS system colours. Those colours resolve to their light values until the app declares `color-scheme`; declaring it is an app-wide follow-up.
+- **Theme.** The container maps Pele's `--pele-*` variables to the brand tokens from `shell/tokens.css`. `mermaid.css` declares no `:root` and no `color-scheme`.
 
 **View panel host (M2-S5).** `src/panels/ViewPanel.tsx` shows the view panel a tile's active tab names.
 
