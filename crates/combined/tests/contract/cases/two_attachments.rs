@@ -111,7 +111,7 @@ pub async fn two_attachments_route_operations_and_show_the_pty_size<T: Target>(
     );
     let to_b = sent_to(&journal, att_b);
     ensure!(
-        "route-a",
+        "route-a-not-b",
         to_b.is_empty(),
         "A's typing sent B commands: {to_b:?}"
     );

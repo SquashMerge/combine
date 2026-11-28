@@ -324,6 +324,32 @@ fn mutated_target_describes_and_applies_its_mutation() {
     })
     .expect("scenario");
     assert_eq!(resizes, 0, "DropResized should hide the first Resized");
+
+    let mut moving = FakeTarget::mutated(Mutation::MoveResized);
+    let transcript = FakeTarget::block_on(async {
+        let mut h = Harness::new(&mut moving, combined::core::CoreConfig::default())?;
+        h.target.set_paint_after_resize(false)?;
+        let term = h.spawn("p", 80, 24).await?;
+        let mut c = h.client();
+        let att = h
+            .attach(&mut c, &term, request_options(80, 24, false))
+            .await?;
+        h.type_input(&mut c, att, b"x").await?;
+        h.settle(&mut [&mut c]).await?;
+        h.mark(&term, &mut [&mut c]).await?;
+        h.target.delay_output(&term)?;
+        h.emit(&term, b"old").await?;
+        h.resize(&mut c, att, 100, 30).await?;
+        h.target.release_output(&term)?;
+        h.settle(&mut [&mut c]).await?;
+        Ok::<Vec<Applied>, Failure>(c.view(att).expect("attached").transcript.clone())
+    })
+    .expect("scenario");
+    assert_eq!(
+        transcript,
+        [Applied::Resized(100, 30), Applied::Bytes(b"old".to_vec())],
+        "MoveResized should send the first Resized before the output still waiting"
+    );
 }
 
 fn explode(message: &str) -> Outcome {

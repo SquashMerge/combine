@@ -9,7 +9,7 @@ use futures::FutureExt;
 
 use crate::common::{display, request_options};
 use crate::contract::client::ReadPolicy;
-use crate::contract::{Case, ClientSim, Failure, Fault, Harness, Outcome, Target};
+use crate::contract::{Case, Failure, Fault, Harness, Outcome, Target};
 
 pub fn cases<T: Target>() -> Vec<Case<T>> {
     vec![
@@ -67,15 +67,6 @@ enum Trigger {
     ReopenFailsOnce,
 }
 
-/// Takes every message the daemon has for the client, applying each.
-async fn drain<T: Target>(h: &mut Harness<'_, T>, c: &mut ClientSim) -> Vec<DaemonMessage> {
-    let mut messages = Vec::new();
-    while let Some(message) = h.read_step(c, true).await {
-        messages.push(message);
-    }
-    messages
-}
-
 /// The sizes of the `Resized` messages, in order.
 fn resized_sizes(messages: &[DaemonMessage]) -> Vec<(u16, u16)> {
     messages
@@ -117,7 +108,7 @@ async fn one_new_epoch<T: Target>(t: &mut T, trigger: Trigger) -> Outcome {
         }
     }
     h.settle(&mut [&mut c]).await?;
-    let messages = drain(&mut h, &mut c).await;
+    let messages = h.drain(&mut c).await;
 
     let started = messages
         .iter()
@@ -268,7 +259,7 @@ pub async fn requests_while_reopening_apply_in_order<T: Target>(t: &mut T) -> Ou
     h.set_display(&mut c, att, changed.clone()).await?;
     h.type_input(&mut c, att, b"x").await?;
     h.settle(&mut [&mut c]).await?;
-    let messages = drain(&mut h, &mut c).await;
+    let messages = h.drain(&mut c).await;
 
     let journal = h.journal();
     let requested: Vec<&BackendCommand> = journal

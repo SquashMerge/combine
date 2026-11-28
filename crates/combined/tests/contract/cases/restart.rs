@@ -1,10 +1,12 @@
 //! Cases 18-21: what a client sees when the daemon or the backend restarts.
 
-use combine_protocol::{Epoch, Fidelity, OwnershipGeneration};
+use combine_protocol::{DaemonMessage, Epoch, Fidelity, OwnershipGeneration};
 use combined::core::{BackendCommand, CoreConfig};
+use combined::testing::{LATE_DATA, LATE_RESIZED};
 use futures::FutureExt;
 
 use crate::common::request_options;
+use crate::contract::client::ReadPolicy;
 use crate::contract::{Case, Failure, Fault, Harness, Outcome, Target};
 
 pub fn cases<T: Target>() -> Vec<Case<T>> {
@@ -17,13 +19,13 @@ pub fn cases<T: Target>() -> Vec<Case<T>> {
         },
         Case {
             name: "backend_restart_starts_one_new_exact_epoch",
-            needs: &[Fault::BackendRestart],
+            needs: &[Fault::BackendRestart, Fault::LateOldGenerationEvents],
             heavy: false,
             run: |t| backend_restart_starts_one_new_exact_epoch(t).boxed_local(),
         },
         Case {
             name: "backend_crash_starts_one_new_inexact_epoch",
-            needs: &[Fault::BackendCrash],
+            needs: &[Fault::BackendCrash, Fault::LateOldGenerationEvents],
             heavy: false,
             run: |t| backend_crash_starts_one_new_inexact_epoch(t).boxed_local(),
         },
@@ -88,7 +90,8 @@ pub async fn daemon_restart_answers_resume_with_gap_then_attaches_fresh<T: Targe
 }
 
 /// The shared body of cases 19 and 20: a backend that restarts or crashes gives each
-/// attachment exactly one new epoch with the stated fidelity.
+/// attachment exactly one new epoch with the stated fidelity and, with the backend sending old
+/// generation events after the new one starts, none of those events.
 async fn one_new_epoch<T: Target>(t: &mut T, crash: bool, fidelity: Fidelity) -> Outcome {
     let mut h = Harness::new(t, CoreConfig::default())?;
     let term = h.spawn("p", 80, 24).await?;
@@ -109,6 +112,8 @@ async fn one_new_epoch<T: Target>(t: &mut T, crash: bool, fidelity: Fidelity) ->
         "typing should have made the attachment the owner"
     );
     h.journal();
+    h.target.set_late_old_generation_events(true)?;
+    c.read = ReadPolicy::Paused;
 
     if crash {
         h.target.crash_backend().await?;
@@ -116,6 +121,28 @@ async fn one_new_epoch<T: Target>(t: &mut T, crash: bool, fidelity: Fidelity) ->
         h.target.restart_backend().await?;
     }
     h.settle(&mut [&mut c]).await?;
+    let messages = h.drain(&mut c).await;
+    let late = messages.iter().any(|message| {
+        matches!(message, DaemonMessage::Data(data)
+            if data.bytes.windows(LATE_DATA.len()).any(|window| window == LATE_DATA))
+    });
+    ensure!(
+        "late-output",
+        !late,
+        "output from the old generation reached the client: {messages:?}"
+    );
+    let late_resized = messages.iter().any(|message| {
+        matches!(message, DaemonMessage::Resized(resized)
+            if (resized.cols, resized.rows) == LATE_RESIZED)
+    });
+    ensure!(
+        "late-resized",
+        !late_resized,
+        "the old generation's late Resized {LATE_RESIZED:?} reached the client: {messages:?}"
+    );
+    // After the late checks, so a late event that leaked is reported as a failure first.
+    h.target.late_events_delivered()?;
+    c.read = ReadPolicy::Auto;
 
     let view = c
         .view(att)

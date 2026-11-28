@@ -296,17 +296,17 @@ impl<'t, T: Target> Harness<'t, T> {
         .await?;
         let saved = std::mem::replace(&mut c.read, ReadPolicy::Auto);
         let waited = self
-            .settle_until(
-                &mut [&mut *c],
-                "attached and started",
-                |clients| match clients[0].attach_answer(request) {
-                    None => false,
-                    Some(Err(_)) => true,
-                    Some(Ok(attachment)) => clients[0]
-                        .view(attachment)
-                        .is_some_and(|view| !view.started.is_empty()),
-                },
-            )
+            .settle_until(&mut [&mut *c], "attached and started", |clients| {
+                clients
+                    .iter()
+                    .all(|client| match client.attach_answer(request) {
+                        None => false,
+                        Some(Err(_)) => true,
+                        Some(Ok(attachment)) => client
+                            .view(attachment)
+                            .is_some_and(|view| !view.started.is_empty()),
+                    })
+            })
             .await;
         let settled = match waited {
             Ok(()) => self.settle(&mut [&mut *c]).await,
@@ -492,6 +492,15 @@ impl<'t, T: Target> Harness<'t, T> {
             "settle",
             format!("no message satisfied the wait through {max_rounds} rounds"),
         ))
+    }
+
+    /// Takes every message the daemon has for the client, applying each.
+    pub async fn drain(&mut self, c: &mut ClientSim) -> Vec<DaemonMessage> {
+        let mut messages = Vec::new();
+        while let Some(message) = self.read_step(c, true).await {
+            messages.push(message);
+        }
+        messages
     }
 
     /// Closes the client's connection. Core keeps its attachments for the grace period.

@@ -262,7 +262,7 @@ pub async fn same_size_and_non_owner_resizes_change_nothing<T: Target>(t: &mut T
         })
         .collect();
     ensure!(
-        "non-owner-resize",
+        "non-owner-resize-forwarded",
         to_b.is_empty(),
         "a non-owner's resize reached the backend: {to_b:?}"
     );
@@ -273,7 +273,7 @@ pub async fn same_size_and_non_owner_resizes_change_nothing<T: Target>(t: &mut T
         "the PTY changed from {before:?} to {after:?}"
     );
     ensure!(
-        "non-owner-resize",
+        "non-owner-resized",
         view_of(&a, att_a)?.resizes().is_empty() && view_of(&b, att_b)?.resizes().is_empty(),
         "a non-owner's resize produced a Resized"
     );
