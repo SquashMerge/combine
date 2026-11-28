@@ -260,13 +260,15 @@ describe('createXtermAdapter', () => {
 
   describe('a terminal face that loads after the terminal opened', () => {
     function fakeFontSet(ready: boolean) {
-      const pending: Array<(faces: FontFace[]) => void> = [];
+      const pending: Array<{ resolve: (faces: FontFace[]) => void; reject: (error: Error) => void }> = [];
       const fonts = {
         check: vi.fn(() => ready),
-        load: vi.fn((_spec: string) => new Promise<FontFace[]>((resolve) => pending.push(resolve))),
+        load: vi.fn(
+          (_spec: string) => new Promise<FontFace[]>((resolve, reject) => pending.push({ resolve, reject })),
+        ),
       };
       Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
-      return { fonts, settle: (faces: FontFace[]) => pending.forEach((resolve) => resolve(faces)) };
+      return { fonts, pending, settle: (faces: FontFace[]) => pending.forEach((entry) => entry.resolve(faces)) };
     }
 
     function measured() {
@@ -293,6 +295,26 @@ describe('createXtermAdapter', () => {
       ]);
       expect(families).toEqual([]);
       settle([{} as FontFace]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Once per face: the bold face's set also rebuilds glyphs drawn in a fallback bold.
+      expect(families).toEqual([
+        '"JetBrains Mono", Menlo, monospace',
+        "'JetBrains Mono', Menlo, monospace",
+        '"JetBrains Mono", Menlo, monospace',
+        "'JetBrains Mono', Menlo, monospace",
+      ]);
+      expect(terminal.options.fontFamily).toBe("'JetBrains Mono', Menlo, monospace");
+      h.adapter.dispose();
+    });
+
+    it('a failed bold face does not stop a late regular face from measuring', async () => {
+      const { pending } = fakeFontSet(false);
+      const h = make();
+      const { terminal, families } = measured();
+      pending[1]?.reject(new Error('404'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(families).toEqual([]);
+      pending[0]?.resolve([{} as FontFace]);
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(families).toEqual([
         '"JetBrains Mono", Menlo, monospace',

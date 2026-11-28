@@ -93,15 +93,18 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
   let disposed = false;
   const fonts = typeof document === 'undefined' ? undefined : document.fonts;
   if (fonts && !TERMINAL_FONT_FACES.every((spec) => fonts.check(spec))) {
-    void Promise.all(TERMINAL_FONT_FACES.map((spec) => fonts.load(spec)))
-      .then((loaded) => {
-        if (disposed || !loaded.some((faces) => faces.length > 0)) return;
-        terminal.options.fontFamily = TERMINAL_FONT.family.replace(/'/g, '"');
-        terminal.options.fontFamily = TERMINAL_FONT.family;
-      })
-      .catch(() => {
-        // The face never arrives; the fallback cell stays measured.
-      });
+    // Each face that arrives measures on its own, so a bold face that fails can't stop the
+    // regular face from correcting the cell. A face that never arrives changes nothing.
+    for (const spec of TERMINAL_FONT_FACES) {
+      fonts.load(spec).then(
+        (faces) => {
+          if (disposed || faces.length === 0) return;
+          terminal.options.fontFamily = TERMINAL_FONT.family.replace(/'/g, '"');
+          terminal.options.fontFamily = TERMINAL_FONT.family;
+        },
+        () => {},
+      );
+    }
   }
 
   let lastCell: CellSize | null = null;
