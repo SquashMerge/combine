@@ -1,16 +1,16 @@
 .combine-mermaid {
-  --pele-bg: Canvas;
-  --pele-fg: CanvasText;
-  --pele-muted: GrayText;
-  --pele-line: CanvasText;
-  --pele-surface: Canvas;
-  --pele-surface-alt: ButtonFace;
-  --pele-border: CanvasText;
-  --pele-accent: Highlight;
-  --pele-error: #b42318;
-  --pele-critical: #b42318;
-  background: Canvas;
-  color: CanvasText;
+  --pele-bg: var(--surface);
+  --pele-fg: var(--text);
+  --pele-muted: var(--text-muted);
+  --pele-line: var(--text);
+  --pele-surface: var(--surface);
+  --pele-surface-alt: var(--raised);
+  --pele-border: var(--control-border);
+  --pele-accent: var(--lavender);
+  --pele-error: var(--danger);
+  --pele-critical: var(--danger);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .combine-mermaid svg {
@@ -24,6 +24,6 @@
 }
 
 .combine-mermaid [data-combine-open-url]:focus-visible {
-  outline: 2px solid Highlight;
+  outline: 2px solid var(--lavender);
   outline-offset: 2px;
 }

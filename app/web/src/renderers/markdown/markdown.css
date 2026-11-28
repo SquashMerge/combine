@@ -1,26 +1,27 @@
 .combine-markdown {
-  background: Canvas;
-  color: CanvasText;
+  background: var(--surface);
+  color: var(--text);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .combine-markdown pre {
-  background: ButtonFace;
-  color: ButtonText;
+  background: var(--ink);
+  color: var(--text);
+  border-radius: 8px;
   padding: 8px 12px;
   overflow: auto;
 }
 
 .combine-markdown code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .combine-markdown blockquote {
   margin-left: 0;
   padding-left: 12px;
-  border-left: 3px solid GrayText;
-  color: GrayText;
+  border-left: 3px solid var(--control-border);
+  color: var(--text-muted);
 }
 
 .combine-markdown table {
@@ -29,7 +30,7 @@
 
 .combine-markdown th,
 .combine-markdown td {
-  border: 1px solid GrayText;
+  border: 1px solid var(--control-border);
   padding: 4px 8px;
 }
 
@@ -38,20 +39,20 @@
 }
 
 .combine-markdown [data-combine-open-url] {
-  color: LinkText;
+  color: var(--lavender);
   text-decoration: underline;
   cursor: pointer;
 }
 
 .combine-markdown [data-combine-open-url]:focus-visible {
-  outline: 2px solid Highlight;
+  outline: 2px solid var(--lavender);
   outline-offset: 2px;
 }
 
 .combine-markdown .hljs-comment,
 .combine-markdown .hljs-quote,
 .combine-markdown .hljs-meta {
-  color: GrayText;
+  color: var(--text-muted);
   font-style: italic;
 }
 
@@ -70,11 +71,14 @@
 .combine-markdown .hljs-symbol,
 .combine-markdown .hljs-attr,
 .combine-markdown .hljs-attribute,
-.combine-markdown .hljs-title,
+.combine-markdown .hljs-title {
+  color: var(--lavender);
+}
+
 .combine-markdown .hljs-addition {
-  color: LinkText;
+  color: var(--success);
 }
 
 .combine-markdown .hljs-deletion {
-  color: #b42318;
+  color: var(--danger);
 }

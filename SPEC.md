@@ -1,4 +1,4 @@
-# Combine — Spec (rev 36)
+# Combine — Spec (rev 37)
 
 Updated 2026-11-27
 
@@ -17,6 +17,13 @@ One Tauri window shows one herdr or Rex space at a time: its agent terminals plu
 **Changes from rev 5:** checked against herdr-core's API (`hc schema`, 0.1.21): `terminal.attach` already gives an ordered first paint plus live bytes, answers terminal queries, arbitrates viewer size and has flow control, so Combine relays those instead of rebuilding them; spaces are derived from terminal `cwd` because herdr-core has no workspace object; repository layout and `.trellis/rules.toml` added.
 
 **Changes from rev 6 (review):** the backend trait is per attachment, not per terminal; each attachment's stream is relayed as opaque bytes with an `(attachment, epoch, seq)` cursor instead of a structured per-terminal snapshot; herdr-core's `inexact` screen flag passes through; other machines' terminals are filtered out; the architecture table now says what each rule is checked by, and names the gaps `rules.toml` can't cover.
+
+**Changes from rev 36 (#110, brand restyle):**
+- **Tokens.** The brand colours and font families live in two token files, `app/web/src/model/tokens.ts` and `app/web/src/shell/tokens.css`. `app/web/test/tokens.test.ts` keeps their values equal, and `app/web/test/colours.test.ts` fails on any other hard-coded colour in `app/web/src` or `index.html`.
+- **Fonts.** Manrope 700, Inter 400 and 600, and JetBrains Mono 400 and 700 are bundled from `@fontsource/*` 5.3.0 (pinned exactly, every subset, loaded lazily by `unicode-range`). Their SIL Open Font License texts are in `app/web/public/licenses/`.
+- **Bundling and CSP.** Vite's `assetsInlineLimit` is 0, so no font becomes a `data:` URL. The CSP is unchanged: the fonts are same-origin files under `default-src 'self'`.
+- **First render.** The app waits up to 3 s for the bundled faces before the first render, so no terminal measures its cell in a fallback face. If a face is missing or late, the render goes ahead and the existing re-measure corrects the cell.
+- **Terminal theme.** xterm shows text on ink, with an amber cursor, an ink cursor accent and a lavender selection, and the font is JetBrains Mono at 13. Display facts report those colours, since they report what is shown. The letterbox is surface. The ANSI palette stays at xterm's defaults.
 
 **Changes from rev 35 (#96, no compatibility shims):** the wire keeps nothing for an older peer, as "No compatibility before the first release" says.
 

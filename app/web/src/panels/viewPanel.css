@@ -14,9 +14,20 @@
   padding: 4px 8px;
 }
 
+.view-panel-status {
+  color: var(--text-muted);
+}
+
+.view-panel-error {
+  color: var(--danger);
+}
+
 .view-panel-snippet {
   margin: 4px 0 0;
   overflow-x: auto;
+  background: var(--ink);
+  border-radius: 8px;
+  font-family: var(--font-mono);
 }
 
 .view-panel-content {

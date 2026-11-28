@@ -44,9 +44,9 @@ describe('terminal geometry', () => {
 
   it('displayFrom rounds the cell size to whole pixels and uses the theme colours', () => {
     expect(displayFrom(TERMINAL_THEME, { width: 7.6, height: 16.4 })).toEqual({
-      foreground: '#d4d4d4',
-      background: '#1e1e1e',
-      cursor_color: '#d4d4d4',
+      foreground: '#f7f7fb',
+      background: '#0b0c10',
+      cursor_color: '#ffaa10',
       cell_width: 8,
       cell_height: 16,
     });
