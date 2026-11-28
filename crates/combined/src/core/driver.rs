@@ -55,6 +55,10 @@ pub struct Driver {
     attachments: BTreeMap<AttachmentId, Slot>,
     events: BTreeMap<AttachmentId, AttachEvents>,
     pending: FuturesUnordered<Opening>,
+    /// Calls in flight. At shutdown they, and whatever is queued behind them (a detach
+    /// included), are dropped with the driver without running, so their handles are dropped
+    /// rather than detached: the server's `close_all` removes each connection without draining
+    /// backend calls. A hardening note only: nothing waits on them.
     running: FuturesUnordered<BoxFuture<'static, Finished>>,
     last_polled: Option<AttachmentId>,
     journal: Option<Vec<BackendCommand>>,
@@ -96,7 +100,10 @@ impl Driver {
             .and_then(|slot| slot.held.as_deref())
     }
 
-    /// Starts or stops recording each backend command, in the order it runs.
+    /// Starts or stops recording each backend command, in the order core issues them. A command
+    /// queued behind a call in flight is recorded when it is issued, not when it runs, and one
+    /// that never runs (refused by a full queue, or a queued automatic reply dropped before it
+    /// starts) is still recorded. The two orders differ only on that slow path.
     pub fn record_commands(&mut self, on: bool) {
         match (on, self.journal.is_some()) {
             (true, false) => self.journal = Some(Vec::new()),
@@ -161,6 +168,12 @@ impl Driver {
     }
 
     /// Starts the command if the attachment is idle, and queues it otherwise.
+    ///
+    /// Idle means the handle is held and nothing is queued. A slot never holds its handle with
+    /// commands still queued: `start_queued` runs whenever a call hands the handle back
+    /// (`finish`), and stops only when the queue is empty or a call stays in flight, which takes
+    /// the handle. So a held handle alone would do; the empty-queue check keeps a command from
+    /// overtaking queued ones should that ever change.
     fn submit(&mut self, attachment: AttachmentId, command: BackendCommand, now: Millis) {
         let Some(slot) = self.attachments.get_mut(&attachment) else {
             return;
@@ -194,7 +207,7 @@ impl Driver {
 
     /// Starts the attachment's next queued calls, for as long as each completes at once. A
     /// queued automatic reply that core no longer counts as current is dropped.
-    fn pump(&mut self, attachment: AttachmentId, now: Millis) {
+    fn start_queued(&mut self, attachment: AttachmentId, now: Millis) {
         loop {
             let Some(slot) = self.attachments.get_mut(&attachment) else {
                 return;
@@ -276,7 +289,7 @@ impl Driver {
         };
         self.complete(finished, now);
         if let Some(attachment) = attachment {
-            self.pump(attachment, now);
+            self.start_queued(attachment, now);
         }
     }
 

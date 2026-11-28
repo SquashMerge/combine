@@ -8,11 +8,33 @@
 # Portability: lane_check_own_child compares `ps -o comm=` with the executable's path or its
 # base name. macOS prints the full path, so it passes there. On Linux comm is cut to 15
 # characters, the comparison fails, and nothing is signalled (it fails closed). macOS is the
-# only target; do not loosen the comparison.
+# only target; do not loosen the comparison. If the lane ever runs off macOS, also note that a
+# lane core sharing the test's process group makes check_kill_target (lane_safety.rs) refuse
+# every crash: treat that as a stop-and-report, not as a check to relax.
 
 lane_path() { printf '%s' /usr/bin:/bin:/usr/sbin:/sbin; }
 
+# This machine's default core id, hard-coded. The lane refuses it and any id in
+# COMBINE_DEFAULT_CORE_IDS (lane_check_not_default). The lane never asks a live `hc` for the
+# default core's id: asked while no default core runs, hc would start one.
 lane_default_core_id() { printf '%s' 4bcff4a58f4d97d505396e5a43a807e6; }
+
+# lane_check_not_default ID [OTHERS]: ID is set and is neither the hard-coded default core id
+# nor any id in OTHERS, a space-separated list of further default-core ids the caller supplied
+# (COMBINE_DEFAULT_CORE_IDS, validated by the caller to letters, digits, `_` and `-`).
+lane_check_not_default() {
+  [ -n "$1" ] && [ "$1" != "$(lane_default_core_id)" ] || return 1
+  # The list splits on spaces but is never expanded as a pattern.
+  set -f
+  for other in ${2:-}; do
+    if [ "$1" = "$other" ]; then
+      set +f
+      return 1
+    fi
+  done
+  set +f
+  return 0
+}
 
 # lane_check_root ROOT: /tmp/chc.XXXXXX or its /private form, six letters and digits.
 lane_check_root() {

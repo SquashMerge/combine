@@ -863,6 +863,28 @@ mod tests {
         assert!(!check("4242", exe, "", exe, "900"), "no parent");
     }
 
+    /// #27: the lane refuses a core with the hard-coded default id or with any id the caller
+    /// lists in COMBINE_DEFAULT_CORE_IDS, and refuses outright when the lane id is missing.
+    #[test]
+    fn shell_refuses_the_default_core_by_either_id() {
+        let hard = sh("lane_default_core_id", &[], &[]);
+        let hard = String::from_utf8_lossy(&hard.stdout).into_owned();
+        assert_eq!(hard.len(), 32, "{hard:?}");
+        let check =
+            |id: &str, others: &str| sh_ok("lane_check_not_default \"$1\" \"$2\"", &[id, others]);
+        assert!(check("abc", ""), "no further ids");
+        assert!(check("abc", "def ghi"));
+        assert!(!check(&hard, ""), "the hard-coded id");
+        assert!(
+            !check(&hard, "def"),
+            "the hard-coded id, with others listed"
+        );
+        assert!(!check("def", "def"), "a listed id");
+        assert!(!check("ghi", "def ghi"), "the second listed id");
+        assert!(!check("", ""), "no lane id");
+        assert!(!check("", "def"));
+    }
+
     #[test]
     fn shell_and_rust_hc_environments_match() {
         let caller = Caller {

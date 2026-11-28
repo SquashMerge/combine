@@ -578,26 +578,30 @@ fn herdr_core_backend_that_closes_before_hello_fails_to_start() {
     let socket = scratch.path().join("hc.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let accepter = std::thread::spawn(move || {
-        for _ in 0..1000 {
-            if let Ok(stream) = listener.accept() {
-                drop(stream);
-                return true;
+    // A scoped thread: a failed assertion below still joins the stand-in (within 10 s) rather
+    // than leaving it detached.
+    std::thread::scope(|scope| {
+        let accepter = scope.spawn(move || {
+            for _ in 0..1000 {
+                if let Ok(stream) = listener.accept() {
+                    drop(stream);
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        false
+            false
+        });
+        assert!(backend::HERDR_CORE.is_some());
+        let error = build_error(&herdr_core_choice(socket.clone()));
+        assert_eq!(error.exit_code(), 3);
+        let text = error.to_string();
+        let prefix = format!(
+            "cannot start the herdr-core backend on {}: ",
+            socket.display()
+        );
+        assert!(text.starts_with(&prefix), "{text}");
+        assert!(text.contains("hello"), "{text}");
+        assert!(!text.contains("no herdr-core adapter"), "{text}");
+        assert!(accepter.join().unwrap(), "nothing connected to the socket");
     });
-    assert!(backend::HERDR_CORE.is_some());
-    let error = build_error(&herdr_core_choice(socket.clone()));
-    assert_eq!(error.exit_code(), 3);
-    let text = error.to_string();
-    let prefix = format!(
-        "cannot start the herdr-core backend on {}: ",
-        socket.display()
-    );
-    assert!(text.starts_with(&prefix), "{text}");
-    assert!(text.contains("hello"), "{text}");
-    assert!(!text.contains("no herdr-core adapter"), "{text}");
-    assert!(accepter.join().unwrap(), "nothing connected to the socket");
 }
