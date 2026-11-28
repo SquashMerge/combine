@@ -36,6 +36,26 @@ const spaceButton = (host: string, name: string) =>
 const navigator = () => screen.getByRole('region', { name: 'Terminals' });
 
 describe('TerminalNavigator', () => {
+  it('leads each entry with the glyph of its state and keeps its accessible name', async () => {
+    await mount();
+    fireEvent.click(spaceButton('mac', 'alpha'));
+    const entries = [...navigator().querySelectorAll('button.terminal-entry')];
+    expect(entries.map((entry) => entry.firstElementChild?.getAttribute('data-glyph'))).toEqual([
+      'filled-dot',
+      'half-ring',
+    ]);
+    expect(entries.map((entry) => entry.getAttribute('aria-label'))).toEqual([
+      'second, cmd two, running',
+      'first, cmd one, waiting',
+    ]);
+    expect([...(entries[0]?.children ?? [])].map((child) => child.getAttribute('class'))).toEqual([
+      'state-glyph',
+      'name',
+      'command',
+      'state',
+    ]);
+  });
+
   it('prompts to select a space', async () => {
     await mount();
     expect(within(navigator()).getByText('Select a space to see its terminals.')).toBeTruthy();

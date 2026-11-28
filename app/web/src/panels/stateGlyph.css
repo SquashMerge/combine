@@ -1,0 +1,30 @@
+.state-glyph {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.state-glyph[data-glyph="filled-dot"] {
+  color: var(--amber);
+}
+
+.state-glyph[data-glyph="half-ring"] {
+  color: var(--lavender);
+}
+
+.state-glyph[data-glyph="ring"],
+.state-glyph[data-glyph="dashed-ring"] {
+  color: var(--text-muted);
+}
+
+.state-glyph[data-glyph="square"] {
+  color: var(--control-border);
+}
+
+.state-glyph[data-glyph="cross"] {
+  color: var(--danger);
+}
+
+.state-glyph[data-glyph="check"] {
+  color: var(--success);
+}

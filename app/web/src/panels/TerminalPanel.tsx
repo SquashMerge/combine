@@ -4,6 +4,7 @@ import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import { TerminalView } from '../renderers/terminal/TerminalView';
 import { createXtermAdapter } from '../renderers/terminal/xtermAdapter';
 import { MarkedTextView } from './MarkedTextView';
+import { StateGlyph, panelStatusShape, terminalStateShape } from './StateGlyph';
 import { badges, overlayText, ownershipText, panelStatusMarked } from './panelText';
 import { useTerminalPanel } from './useTerminalPanel';
 import './terminalPanel.css';
@@ -62,7 +63,10 @@ export function TerminalPanel({
       <header className="terminal-panel__header">
         <div className="terminal-panel__title">
           <span className="terminal-panel__name">{label.name}</span>
-          <span className="terminal-panel__state">{label.state}</span>
+          <span className="terminal-panel__state">
+            <StateGlyph shape={terminalStateShape(label.state)} />
+            {label.state}
+          </span>
           <span className="terminal-panel__host">{label.host}</span>
           {label.backend != null && (
             <span className="terminal-panel__backend" data-testid="terminal-backend">
@@ -104,7 +108,8 @@ export function TerminalPanel({
         {(status !== null || view.canReattach || view.canRetry || canClose) && (
           <div className="terminal-panel__status">
             {status !== null && (
-              <span data-testid="terminal-status">
+              <span data-testid="terminal-status" data-status={view.status?.kind}>
+                <StateGlyph shape={panelStatusShape(view.status?.kind)} />
                 <MarkedTextView text={status} />
               </span>
             )}

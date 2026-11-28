@@ -138,6 +138,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
     <div className="add-terminal">
       <button
         type="button"
+        className="button-primary"
         aria-haspopup="menu"
         aria-expanded={showMenu}
         disabled={disabled}
