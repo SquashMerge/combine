@@ -150,6 +150,18 @@ describe('TerminalPanel', () => {
     expect(status.textContent).toBe('lost');
   });
 
+  it('holds the status glyph and one text span in the status element', async () => {
+    const t = await mount();
+    await goLive(t);
+    await t.emit(lostEvent(cursor(7, 1, 1)));
+    const status = screen.getByTestId('terminal-status');
+    const children = Array.from(status.children);
+    expect(children.map((child) => child.tagName.toLowerCase())).toEqual(['svg', 'span']);
+    expect(children[0]?.classList.contains('state-glyph')).toBe(true);
+    expect(children[1]?.textContent).toBe('lost');
+    expect(status.textContent).toBe('lost');
+  });
+
   it('closed status offers no reattach', async () => {
     const t = await mount();
     await goLive(t);
@@ -295,6 +307,16 @@ describe('GoneTerminal', () => {
     expect(message.querySelector('code')?.textContent).toBe('term-9');
     expect(message.getAttribute('data-status')).toBe('gone');
     expect(message.querySelector('svg')?.getAttribute('data-glyph')).toBe('cross');
+  });
+
+  it('holds the glyph and one text span, with the ID inside the span', () => {
+    render(<GoneTerminal message={goneMarked('unlisted', 'term-9')} onClose={vi.fn()} />);
+    const message = screen.getByTestId('gone-terminal-message');
+    const children = Array.from(message.children);
+    expect(children.map((child) => child.tagName.toLowerCase())).toEqual(['svg', 'span']);
+    expect(children[0]?.classList.contains('state-glyph')).toBe(true);
+    expect(children[1]?.querySelector('code')?.textContent).toBe('term-9');
+    expect(message.textContent).toBe(goneText('unlisted', 'term-9'));
   });
 
   it('shows its message and a Close button, and attaches nothing', () => {

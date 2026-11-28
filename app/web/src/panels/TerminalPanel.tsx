@@ -110,7 +110,9 @@ export function TerminalPanel({
             {status !== null && (
               <span data-testid="terminal-status" data-status={view.status?.kind}>
                 <StateGlyph shape={panelStatusShape(view.status?.kind)} />
-                <MarkedTextView text={status} />
+                <span>
+                  <MarkedTextView text={status} />
+                </span>
               </span>
             )}
             {view.canReattach && (
