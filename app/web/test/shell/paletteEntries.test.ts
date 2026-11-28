@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { plainText } from '../../src/model/markedText';
 import type { PanelState, PanelSummary } from '../../src/model/panels';
 import {
   type PalettePanels,
@@ -9,6 +10,27 @@ import { HOST_A, HOST_B, host, snapshot, space, terminal } from '../support/snap
 
 const connected = { kind: 'connected' } as const;
 const failed = { kind: 'failed', message: 'boom', detail: null } as const;
+
+function samplePanels(): PalettePanels {
+  const summary: PanelSummary = {
+    id: 'notes',
+    title: 'Notes',
+    renderer: 'markdown',
+    revision: '1' as PanelSummary['revision'],
+    state: 'validated',
+    error: null,
+    createdBy: null,
+    lifetime: 'persistent',
+  };
+  return {
+    space: { hostId: HOST_A, path: '/src/alpha' },
+    hostName: 'mac',
+    panels: [summary],
+    tiles: new Map([['notes', 'tile-1']]),
+    focused: { tile: 'tile-1', panel: 'notes' },
+    editable: true,
+  };
+}
 
 function sample() {
   return snapshot([
@@ -33,6 +55,53 @@ describe('paletteEntries', () => {
       space: { hostId: HOST_B, path: '/src/mimir' },
       terminalId: 't2',
     });
+  });
+
+  it('every entry marks its detail and the marks flatten to detail', () => {
+    for (const entry of buildPaletteEntries(sample(), samplePanels())) {
+      expect(entry.detailMarked).toBeDefined();
+      expect(plainText(entry.detailMarked!)).toBe(entry.detail);
+    }
+  });
+
+  it('marks an untitled panel ID in its label and in the Close panel detail', () => {
+    const base = samplePanels();
+    const untitled = { ...base, panels: base.panels.map((panel) => ({ ...panel, title: null })) };
+    const entries = buildPaletteEntries(sample(), untitled);
+    const show = entries.find((entry) => entry.action.kind === 'show-panel');
+    expect(show?.label).toBe('notes');
+    expect(show?.labelMarked).toEqual([{ code: 'notes' }]);
+    const close = entries.find((entry) => entry.action.kind === 'close-panel');
+    expect(close?.detail).toBe('notes in alpha');
+    expect(close?.detailMarked).toEqual([{ code: 'notes' }, ' in ', { code: 'alpha' }]);
+
+    const titled = buildPaletteEntries(sample(), base);
+    expect(titled.find((entry) => entry.action.kind === 'show-panel')?.labelMarked).toBe('Notes');
+    expect(titled.find((entry) => entry.action.kind === 'close-panel')?.detailMarked).toEqual([
+      'Notes',
+      ' in ',
+      { code: 'alpha' },
+    ]);
+  });
+
+  it('marks the paths, folders and commands in each detail', () => {
+    const codes = (kind: string) =>
+      buildPaletteEntries(sample(), samplePanels())
+        .filter((entry) => entry.action.kind === kind)
+        .map((entry) =>
+          Array.isArray(entry.detailMarked)
+            ? entry.detailMarked.flatMap((part) => (typeof part === 'string' ? [] : [part.code]))
+            : [],
+        );
+    expect(codes('switch-space')).toEqual([['/src/alpha'], ['/src/mimir']]);
+    expect(codes('focus-terminal')).toEqual([
+      ['alpha', 'first'],
+      ['mimir', 'remote'],
+    ]);
+    expect(codes('show-panel')).toEqual([['alpha']]);
+    expect(codes('close-panel')).toEqual([['alpha']]);
+    expect(codes('show-active-terminal')).toEqual([['alpha']]);
+    expect(codes('retry-host')).toEqual([[]]);
   });
 
   it('retry keyed by host name for failed hosts only', () => {

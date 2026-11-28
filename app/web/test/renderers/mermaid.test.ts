@@ -115,22 +115,22 @@ describe('renderMermaid', () => {
     const css = readFileSync(cssPath, 'utf8');
     const rule = /\.combine-mermaid\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
     const mapping: Record<string, string> = {
-      '--pele-bg': 'Canvas',
-      '--pele-fg': 'CanvasText',
-      '--pele-muted': 'GrayText',
-      '--pele-line': 'CanvasText',
-      '--pele-surface': 'Canvas',
-      '--pele-surface-alt': 'ButtonFace',
-      '--pele-border': 'CanvasText',
-      '--pele-accent': 'Highlight',
-      '--pele-error': '#b42318',
-      '--pele-critical': '#b42318',
+      '--pele-bg': 'var(--surface)',
+      '--pele-fg': 'var(--text)',
+      '--pele-muted': 'var(--text-muted)',
+      '--pele-line': 'var(--text)',
+      '--pele-surface': 'var(--surface)',
+      '--pele-surface-alt': 'var(--raised)',
+      '--pele-border': 'var(--control-border)',
+      '--pele-accent': 'var(--lavender)',
+      '--pele-error': 'var(--danger)',
+      '--pele-critical': 'var(--danger)',
     };
     for (const [name, value] of Object.entries(mapping)) {
       expect(rule).toContain(`${name}: ${value};`);
     }
-    expect(rule).toContain('background: Canvas;');
-    expect(rule).toContain('color: CanvasText;');
+    expect(rule).toContain('background: var(--surface);');
+    expect(rule).toContain('color: var(--text);');
     for (const name of ['--pele-font', '--pele-font-mono', '--pele-radius', '--pele-fg-on-', '--pele-series-', '--pele-zoom-']) {
       expect(css).not.toContain(name);
     }

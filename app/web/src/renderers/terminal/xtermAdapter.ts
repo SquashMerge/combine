@@ -3,7 +3,12 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { CellSize, XtermAdapter, XtermAdapterFactory, XtermCallbacks } from './adapter';
-import { TERMINAL_FONT, TERMINAL_HISTORY_LINES, TERMINAL_THEME } from './settings';
+import {
+  TERMINAL_FONT,
+  TERMINAL_FONT_FACES,
+  TERMINAL_HISTORY_LINES,
+  TERMINAL_THEME,
+} from './settings';
 
 const encoder = new TextEncoder();
 
@@ -23,11 +28,7 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
     scrollback: TERMINAL_HISTORY_LINES,
     fontFamily: TERMINAL_FONT.family,
     fontSize: TERMINAL_FONT.size,
-    theme: {
-      foreground: TERMINAL_THEME.foreground,
-      background: TERMINAL_THEME.background,
-      cursor: TERMINAL_THEME.cursor,
-    },
+    theme: { ...TERMINAL_THEME },
     cursorBlink: false,
   });
 
@@ -85,6 +86,27 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
 
   child.addEventListener('focusin', callbacks.onFocus);
 
+  // A terminal opened before its face arrived (the first render goes ahead after 3 s) measured a
+  // fallback cell. xterm measures again only when a font option changes, so once the face loads,
+  // set an equivalent family and then the real one: each set measures, and a changed cell reaches
+  // onCellSize through the next render, which refits the owner and resends the display facts.
+  let disposed = false;
+  const fonts = typeof document === 'undefined' ? undefined : document.fonts;
+  if (fonts && !TERMINAL_FONT_FACES.every((spec) => fonts.check(spec))) {
+    // Each face that arrives measures on its own, so a bold face that fails can't stop the
+    // regular face from correcting the cell. A face that never arrives changes nothing.
+    for (const spec of TERMINAL_FONT_FACES) {
+      fonts.load(spec).then(
+        (faces) => {
+          if (disposed || faces.length === 0) return;
+          terminal.options.fontFamily = TERMINAL_FONT.family.replace(/'/g, '"');
+          terminal.options.fontFamily = TERMINAL_FONT.family;
+        },
+        () => {},
+      );
+    }
+  }
+
   let lastCell: CellSize | null = null;
   terminal.onRender(() => {
     const screen = child.querySelector('.xterm-screen');
@@ -115,6 +137,7 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
       return child.contains(document.activeElement);
     },
     dispose() {
+      disposed = true;
       child.removeEventListener('focusin', callbacks.onFocus);
       webgl?.dispose();
       webgl = null;

@@ -4,6 +4,7 @@ import type { HostId } from '../model/ids';
 import type { PanelEntry } from '../model/panels';
 import type { RenderOutcome, RendererName } from '../model/render';
 import { renderSource } from '../renderers/lazy';
+import { MarkedTextView } from './MarkedTextView';
 import { attachRenderedLinks } from './renderedLinks';
 import {
   type Effect,
@@ -12,7 +13,7 @@ import {
   decide,
   initialState,
   viewState,
-  viewText,
+  viewMarked,
 } from './viewPanelMachine';
 import './viewPanel.css';
 
@@ -116,7 +117,7 @@ export function ViewPanel({
   }, [openUrlPort]);
 
   const view = viewState(state, entry);
-  const text = viewText(state, entry, panelId);
+  const text = viewMarked(state, entry, panelId);
   return (
     <section
       className="view-panel"
@@ -126,12 +127,12 @@ export function ViewPanel({
     >
       {text.status !== null && (
         <p className="view-panel-status" role="status">
-          {text.status}
+          <MarkedTextView text={text.status} />
         </p>
       )}
       {text.error !== null && (
         <div className="view-panel-error" role="alert">
-          {text.error}
+          <MarkedTextView text={text.error} />
           {text.snippet !== null && <pre className="view-panel-snippet">{text.snippet}</pre>}
         </div>
       )}

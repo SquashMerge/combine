@@ -82,11 +82,19 @@ describe('TileTree panel tabs', () => {
   it('a_panel_without_a_title_shows_its_id', () => {
     mount(['a'], view([summary('a', null)]));
     expect(tab('a').textContent).toBe('a');
+    expect(tab('a').querySelector('code')?.textContent).toBe('a');
+    expect(screen.getByRole('tab', { name: 'a' })).toBe(tab('a'));
+  });
+
+  it('a_titled_tab_shows_no_code', () => {
+    mount(['a'], view([summary('a', 'Alpha doc')]));
+    expect(tab('a').querySelector('code')).toBeNull();
   });
 
   it('unlisted_ids_show_their_id', () => {
     mount(['ghost', 'broken'], view([summary('other', 'Other')], [{ panel: 'broken', reason: 'bad' }]));
     expect(tab('ghost').textContent).toBe('ghost');
+    expect(tab('ghost').querySelector('code')?.textContent).toBe('ghost');
     expect(tab('ghost').getAttribute('data-panel-entry')).toBe('missing');
     expect(tab('broken').textContent).toBe('broken');
     expect(tab('broken').getAttribute('data-panel-entry')).toBe('skipped');
@@ -105,11 +113,13 @@ describe('TileTree panel tabs', () => {
     expect(section().getAttribute('data-view-state')).toBe('missing');
     expect(section().getAttribute('data-panel-id')).toBe('gone');
     expect(body().textContent).toBe('Panel gone is missing');
+    expect(body().querySelector('code')?.textContent).toBe('gone');
   });
 
   it('a_removed_entry_shows_missing', () => {
     mount(['a'], view([summary('a', 'Was here', 'removed')]));
     expect(body().textContent).toBe('Panel a is missing');
+    expect(body().querySelector('code')?.textContent).toBe('a');
     expect(tab('a').textContent).toBe('a');
   });
 
@@ -117,6 +127,7 @@ describe('TileTree panel tabs', () => {
     mount(['broken'], view([], [{ panel: 'broken', reason: "panel.json can't be used" }]));
     expect(section().getAttribute('data-view-state')).toBe('skipped');
     expect(body().textContent).toBe("Panel broken isn't loaded: panel.json can't be used");
+    expect(body().querySelector('code')?.textContent).toBe('broken');
   });
 
   it('a_trimmed_panel_shows_the_trim_reason', () => {

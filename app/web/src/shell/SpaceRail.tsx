@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { type HostView, type HostsSnapshot, isConnected } from '../model/hosts';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
 import type { HostsPort } from '../ipc/port';
-import { describeConnection } from './connectionText';
+import { StateGlyph } from '../panels/StateGlyph';
+import { connectionShape, describeConnection } from './connectionText';
 import { sortSpaces } from './order';
+import logoUrl from './combine-icon-small.svg';
 
 interface SpaceRailProps {
   snapshot: HostsSnapshot;
@@ -37,7 +39,10 @@ function HostSection({ host, selected, port, readOnlySpaces, onSelect }: HostSec
   return (
     <section aria-label={host.name} data-connection={connection.kind} data-dimmed={dimmed}>
       <h2>{host.name}</h2>
-      <p role="status">{describeConnection(connection)}</p>
+      <p role="status">
+        <StateGlyph shape={connectionShape(connection.kind)} />
+        {describeConnection(connection)}
+      </p>
       {detail !== null && <p className="detail">{detail}</p>}
       {connection.kind === 'failed' && (
         <>
@@ -89,15 +94,19 @@ export function SpaceRail({
   const { config, hosts } = snapshot;
   return (
     <nav aria-label="Spaces">
+      <div className="rail-brand">
+        <img src={logoUrl} alt="" width={29} height={28} />
+        <span className="rail-brand__name">Combine</span>
+      </div>
       {config.error !== null ? (
         <>
           <p role="alert">{config.error}</p>
           <p className="config-hint">
-            Fix {config.path} and restart Combine. Combine has not changed the file.
+            Fix <code>{config.path}</code> and restart Combine. Combine has not changed the file.
           </p>
         </>
       ) : hosts.length === 0 ? (
-        <p className="config-hint">No hosts yet. Add them to {config.path}.</p>
+        <p className="config-hint">No hosts yet. Add them to <code>{config.path}</code>.</p>
       ) : (
         hosts.map((host) => (
           <HostSection

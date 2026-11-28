@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { HostsPort } from '../../src/ipc/port';
+import type { DecimalU64 } from '../../src/model/ids';
 import { CommandPalette } from '../../src/shell/CommandPalette';
 import { App } from '../../src/shell/App';
 import { MemoryHostsPort } from '../support/memoryHostsPort';
@@ -28,6 +29,9 @@ async function mount(port: HostsPort = new MemoryHostsPort(sample())) {
   await act(async () => {});
 }
 
+const codesOf = (option: HTMLElement) =>
+  Array.from(option.querySelectorAll('.detail code')).map((code) => code.textContent);
+
 const open = async () => {
   fireEvent.keyDown(window, { key: 'k', metaKey: true });
   await screen.findByRole('dialog', { name: 'Command palette' });
@@ -47,6 +51,17 @@ describe('CommandPalette', () => {
     expect(document.activeElement).toBe(search());
     fireEvent.keyDown(search(), { key: 'Escape' });
     expect(dialog()).toBeNull();
+  });
+
+  it('marks paths, folders and commands in each detail', async () => {
+    await mount();
+    await open();
+    const byLabel = (label: string) =>
+      options().find((o) => o.querySelector('.label')?.textContent === label) as HTMLElement;
+    const space = byLabel('alpha');
+    expect(space.querySelector('.detail')?.textContent).toBe('mac /src/alpha');
+    expect(codesOf(space)).toEqual(['/src/alpha']);
+    expect(codesOf(byLabel('first'))).toEqual(['alpha', 'cmd one']);
   });
 
   it('filters by fuzzy match', async () => {
@@ -176,6 +191,45 @@ describe('CommandPalette', () => {
     expect(dialog()).not.toBeNull();
     fireEvent.click(dialog()!.parentElement!);
     expect(dialog()).toBeNull();
+  });
+
+  it('shows an untitled panel ID as code in its label and its Close panel detail', async () => {
+    const space = { hostId: HOST_A, path: '/src/alpha' };
+    render(
+      <CommandPalette
+        snapshot={sample()}
+        panels={{
+          space,
+          hostName: 'mac',
+          panels: [
+            {
+              id: 'panel-7',
+              title: null,
+              renderer: 'markdown',
+              revision: '1' as DecimalU64,
+              state: 'validated',
+              error: null,
+              createdBy: null,
+              lifetime: 'persistent',
+            },
+          ],
+          tiles: new Map([['panel-7', 't']]),
+          focused: { tile: 't', panel: 'panel-7' },
+          editable: true,
+        }}
+        onSelectSpace={() => {}}
+        onSelectTerminal={() => {}}
+        onRetryHost={() => {}}
+        onShowPanel={() => {}}
+        onClosePanel={() => {}}
+      />,
+    );
+    await open();
+    fireEvent.change(search(), { target: { value: 'panel-7' } });
+    const show = options().find((option) => option.getAttribute('data-palette-entry') === 'show-panel');
+    expect(show?.querySelector('.label code')?.textContent).toBe('panel-7');
+    fireEvent.change(search(), { target: { value: 'close panel' } });
+    expect(codesOf(options()[0] as HTMLElement)).toEqual(['panel-7', 'alpha']);
   });
 
   it('lists panels and runs the panel handlers when given them', async () => {

@@ -81,9 +81,11 @@ describe('AddTerminalMenu', () => {
     const rows = items();
     expect(rows).toHaveLength(3);
     expect(rows[0]?.textContent).toContain('Shell in alpha');
+    expect(rows[0]?.querySelector('.detail code')?.textContent).toBe('alpha');
     expect(rows[1]?.textContent).toContain('Claude');
     expect(rows[1]?.querySelector('code.command')?.textContent).toBe('FOO=bar claude --resume');
     expect(rows[1]?.textContent).toContain('in "my dir"');
+    expect(rows[1]?.querySelector('.detail code')?.textContent).toBe('"my dir"');
     expect(rows[2]?.textContent).toContain('slot-name');
     expect(rows[2]?.textContent).not.toContain(' in ');
     expect(button().getAttribute('aria-expanded')).toBe('true');
@@ -116,6 +118,7 @@ describe('AddTerminalMenu', () => {
     mount(port);
     await open();
     const skipped = screen.getByRole('menuitem', { name: 'notes: not a terminal panel' });
+    expect(skipped.querySelector('code')?.textContent).toBe('notes');
     expect(skipped.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(skipped);
     expect(port.spawnCalls()).toHaveLength(0);

@@ -3,7 +3,9 @@ import type { TerminalPort } from '../ipc/terminalPort';
 import type { XtermAdapterFactory } from '../renderers/terminal/adapter';
 import { TerminalView } from '../renderers/terminal/TerminalView';
 import { createXtermAdapter } from '../renderers/terminal/xtermAdapter';
-import { badges, goneText, overlayText, ownershipText, statusText } from './panelText';
+import { MarkedTextView } from './MarkedTextView';
+import { StateGlyph, panelStatusShape, terminalStateShape } from './StateGlyph';
+import { badges, overlayText, ownershipText, panelStatusMarked } from './panelText';
 import { useTerminalPanel } from './useTerminalPanel';
 import './terminalPanel.css';
 
@@ -51,7 +53,7 @@ export function TerminalPanel({
     focused,
     createAdapter,
   });
-  const status = view.status?.kind === 'gone' ? goneText(view.status.why, termId) : statusText(view);
+  const status = panelStatusMarked(view, termId);
   const canClose =
     onClose !== undefined &&
     (label.state === 'exited' || view.status?.kind === 'exited' || view.status?.kind === 'gone');
@@ -61,7 +63,10 @@ export function TerminalPanel({
       <header className="terminal-panel__header">
         <div className="terminal-panel__title">
           <span className="terminal-panel__name">{label.name}</span>
-          <span className="terminal-panel__state">{label.state}</span>
+          <span className="terminal-panel__state">
+            <StateGlyph shape={terminalStateShape(label.state)} />
+            {label.state}
+          </span>
           <span className="terminal-panel__host">{label.host}</span>
           {label.backend != null && (
             <span className="terminal-panel__backend" data-testid="terminal-backend">
@@ -102,7 +107,14 @@ export function TerminalPanel({
         </div>
         {(status !== null || view.canReattach || view.canRetry || canClose) && (
           <div className="terminal-panel__status">
-            {status !== null && <span data-testid="terminal-status">{status}</span>}
+            {status !== null && (
+              <span data-testid="terminal-status" data-status={view.status?.kind}>
+                <StateGlyph shape={panelStatusShape(view.status?.kind)} />
+                <span>
+                  <MarkedTextView text={status} />
+                </span>
+              </span>
+            )}
             {view.canReattach && (
               <button type="button" onClick={reattach}>
                 Reattach

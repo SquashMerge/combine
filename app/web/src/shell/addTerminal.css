@@ -3,8 +3,42 @@
   display: inline-block;
 }
 
+.add-terminal .button-primary {
+  width: 100%;
+}
+
+.add-terminal [role="menu"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 4px;
+  background: var(--raised);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+}
+
+.add-terminal [role="menu"] button {
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 0;
+  text-align: left;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.add-terminal [role="menu"] button:hover:not(:disabled) {
+  background: var(--surface);
+}
+
 .add-terminal .command {
-  font-family: monospace;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { type HostView, type HostsSnapshot, type SpaceView, isConnected } from '../model/hosts';
 import type { TermId } from '../model/ids';
 import { type SpaceKey, folderName, sameSpace, spaceKeyId } from '../model/space';
+import { StateGlyph, terminalStateShape } from '../panels/StateGlyph';
 import { groupAllTerminals } from './order';
 
 export type ActiveTerminals = ReadonlyMap<string, TermId>;
@@ -42,6 +43,7 @@ function TerminalList({ host, space, active, onSelectTerminal }: TerminalListPro
               aria-label={`${terminal.name}, ${terminal.command}, ${terminal.state}`}
               onClick={() => onSelectTerminal(space.key, terminal.id)}
             >
+              <StateGlyph shape={terminalStateShape(terminal.state)} />
               <span className="name">{terminal.name}</span>
               <span className="command">{terminal.command}</span>
               <span className="state">{terminal.state}</span>

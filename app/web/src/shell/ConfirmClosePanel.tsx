@@ -55,7 +55,7 @@ export function ConfirmClosePanel({ label, onConfirm, onCancel }: ConfirmClosePa
           <button ref={cancel} type="button" onClick={onCancel}>
             Cancel
           </button>
-          <button ref={confirm} type="button" onClick={onConfirm}>
+          <button ref={confirm} type="button" className="button-danger" onClick={onConfirm}>
             Close and delete
           </button>
         </div>

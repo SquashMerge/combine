@@ -14,10 +14,15 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 12px;
+  gap: 6px 12px;
   flex: none;
-  padding: 4px 8px;
-  font-size: 0.85em;
+  min-height: 40px;
+  padding: 4px 14px;
+  font-size: 12px;
+  line-height: 18px;
+  border-bottom: 1px solid var(--raised);
+  background: var(--surface);
+  color: var(--text-muted);
 }
 
 .terminal-panel__title,
@@ -29,30 +34,70 @@
 }
 
 .terminal-panel__name {
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text);
 }
 
-.terminal-panel__state,
-.terminal-panel__host {
-  opacity: 0.7;
+.terminal-panel__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terminal-panel__status [data-status] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terminal-panel__status [data-status="gone"],
+.terminal-panel__status [data-status="lost"],
+.terminal-panel__status [data-status="error"],
+.terminal-panel__status [data-status="streamFailed"] {
+  color: var(--danger);
+}
+
+.terminal-panel__switcher {
+  appearance: none;
+  height: 28px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%) right 14px center / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%) right 9px center / 5px 5px no-repeat,
+    var(--raised);
 }
 
 .terminal-panel__badge {
   padding: 0 6px;
-  border: 1px solid currentColor;
+  border: 1px solid var(--control-border);
   border-radius: 8px;
 }
 
 .terminal-panel__body {
   flex: 1 1 auto;
   min-height: 0;
+  background: var(--ink);
 }
 
 .terminal-panel__backend {
-  opacity: 0.7;
+  padding: 3px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
 }
 
 .terminal-panel > .terminal-panel__status {
   padding: 4px 8px;
-  font-size: 0.85em;
+  font-size: 12px;
+  line-height: 18px;
 }

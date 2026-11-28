@@ -1,5 +1,6 @@
 import { type DecimalU64, type HostId, ModelError, asRecord, parseDecimalU64 } from './ids';
 import type { RendererName } from './render';
+import type { MarkedText } from './markedText';
 import type { SkippedPanel } from './spawn';
 
 export type PanelState =
@@ -263,6 +264,13 @@ export function panelEntry(list: PanelList | null, id: string): PanelEntry {
 export function tabLabel(list: PanelList | null, id: string): string {
   const entry = panelEntry(list, id);
   return entry.kind === 'listed' ? (entry.summary.title ?? id) : id;
+}
+
+/** `tabLabel`, with a bare panel ID marked as code. */
+export function tabLabelMarked(list: PanelList | null, id: string): MarkedText {
+  const entry = panelEntry(list, id);
+  const title = entry.kind === 'listed' ? entry.summary.title : null;
+  return title ?? [{ code: id }];
 }
 
 /**

@@ -1016,6 +1016,34 @@ describe('terminalController display facts', () => {
     expect(t.stream().commands('setDisplay')).toHaveLength(1);
   });
 
+  it('a late font converges the cell, display facts and owner fit with the container held fixed', async () => {
+    const t = rig();
+    await goLiveWithOwner(t, 7, 2);
+    const adapter = t.fake.instances[0];
+    t.controller.setContainerSize(800, 330);
+    adapter?.emitCellSize({ width: 8, height: 15 });
+    vi.advanceTimersByTime(250);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 22 }, ownershipGeneration: '2' },
+    ]);
+    expect(t.stream().commands('setDisplay')).toEqual([
+      { op: 'setDisplay', attachment: '7', display: cellOf(8, 15) },
+    ]);
+    expect(adapter?.resizes).toEqual([]);
+
+    adapter?.emitCellSize({ width: 8, height: 17 });
+    vi.advanceTimersByTime(250);
+    expect(t.stream().commands('resize')).toEqual([
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 22 }, ownershipGeneration: '2' },
+      { op: 'resize', attachment: '7', size: { cols: 100, rows: 19 }, ownershipGeneration: '2' },
+    ]);
+    expect(t.stream().commands('setDisplay')).toEqual([
+      { op: 'setDisplay', attachment: '7', display: cellOf(8, 15) },
+      { op: 'setDisplay', attachment: '7', display: cellOf(8, 17) },
+    ]);
+    expect(adapter?.resizes).toEqual([]);
+  });
+
   it('set_display is never sent while not attached', async () => {
     const machine = new AttachmentMachine(TERM);
     const sentDisplay = (effects: ReturnType<AttachmentMachine['handle']>): boolean =>

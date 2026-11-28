@@ -138,6 +138,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
     <div className="add-terminal">
       <button
         type="button"
+        className="button-primary"
         aria-haspopup="menu"
         aria-expanded={showMenu}
         disabled={disabled}
@@ -157,7 +158,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
             }}
           >
             <span>{itemLabel(SHELL_KEY, 'Shell')}</span>
-            <span className="detail"> Shell in {folderName(selected.path)}</span>
+            <span className="detail"> Shell in <code>{folderName(selected.path)}</code></span>
           </button>
           {listing.kind === 'loading' && <p role="status">Loading templates…</p>}
           {list?.templates.map((template) => {
@@ -175,7 +176,9 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
                 <span>{itemLabel(key, template.title ?? template.slot)}</span>
                 <code className="command">{formatCommandLine(template)}</code>
                 {template.cwd !== '' && (
-                  <span className="detail">in {quoteWord(template.cwd)}</span>
+                  <span className="detail">
+                    in <code>{quoteWord(template.cwd)}</code>
+                  </span>
                 )}
               </button>
             );
@@ -187,7 +190,7 @@ export function AddTerminalMenu({ port, snapshot, selected, onSpawned }: AddTerm
               aria-disabled="true"
               data-dimmed="true"
             >
-              {skipped.panel}: {skipped.reason}
+              <code>{skipped.panel}</code>: {skipped.reason}
             </div>
           ))}
           {list?.error != null && <p role="alert">{list.error}</p>}
