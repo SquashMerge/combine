@@ -105,11 +105,13 @@ describe('TileTree panel tabs', () => {
     expect(section().getAttribute('data-view-state')).toBe('missing');
     expect(section().getAttribute('data-panel-id')).toBe('gone');
     expect(body().textContent).toBe('Panel gone is missing');
+    expect(body().querySelector('code')?.textContent).toBe('gone');
   });
 
   it('a_removed_entry_shows_missing', () => {
     mount(['a'], view([summary('a', 'Was here', 'removed')]));
     expect(body().textContent).toBe('Panel a is missing');
+    expect(body().querySelector('code')?.textContent).toBe('a');
     expect(tab('a').textContent).toBe('a');
   });
 
@@ -117,6 +119,7 @@ describe('TileTree panel tabs', () => {
     mount(['broken'], view([], [{ panel: 'broken', reason: "panel.json can't be used" }]));
     expect(section().getAttribute('data-view-state')).toBe('skipped');
     expect(body().textContent).toBe("Panel broken isn't loaded: panel.json can't be used");
+    expect(body().querySelector('code')?.textContent).toBe('broken');
   });
 
   it('a_trimmed_panel_shows_the_trim_reason', () => {

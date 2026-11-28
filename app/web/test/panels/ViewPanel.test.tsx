@@ -199,6 +199,7 @@ describe('ViewPanel', () => {
     await act(async () => port.sends[0]?.reject(new PanelFetchError('unknown_panel', 'gone')));
     expect(panel.viewState()).toBe('fetch_failed');
     expect(panel.section().querySelector('[role="alert"]')?.textContent).toBe("Couldn't load panel p: gone");
+    expect(panel.section().querySelector('[role="alert"] code')?.textContent).toBe('p');
   });
 
   it('clears the content and shows missing when the panel is unlisted', async () => {
@@ -209,6 +210,7 @@ describe('ViewPanel', () => {
     expect(panel.viewState()).toBe('missing');
     expect(panel.content().childNodes).toHaveLength(0);
     expect(panel.section().querySelector('[role="status"]')?.textContent).toBe('Panel p is missing');
+    expect(panel.section().querySelector('[role="status"] code')?.textContent).toBe('p');
     expect(panel.section().hasAttribute('data-shown-revision')).toBe(false);
   });
 
@@ -347,6 +349,7 @@ describe('ViewPanel', () => {
     port.sends[1]?.reject(new PanelFetchError(null, 'No reply'));
     await waitFor(() => expect(panel.viewState()).toBe('fetch_failed'));
     expect(panel.section().querySelector('[role="alert"]')?.textContent).toBe("Couldn't load panel p: No reply");
+    expect(panel.section().querySelector('[role="alert"] code')?.textContent).toBe('p');
     expect(panel.content().textContent).toBe('one');
     expect(panel.section().getAttribute('data-shown-revision')).toBe('1');
 

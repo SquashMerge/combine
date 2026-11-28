@@ -1,7 +1,9 @@
+import type { MarkedText } from '../model/markedText';
+import { MarkedTextView } from './MarkedTextView';
 import './terminalPanel.css';
 
 export interface GoneTerminalProps {
-  message: string;
+  message: MarkedText;
   onClose: () => void;
   disabledTitle?: string;
 }
@@ -11,7 +13,7 @@ export function GoneTerminal({ message, onClose, disabledTitle }: GoneTerminalPr
   return (
     <section className="terminal-panel" data-testid="gone-terminal">
       <div className="terminal-panel__status">
-        <span data-testid="gone-terminal-message">{message}</span>
+        <span data-testid="gone-terminal-message"><MarkedTextView text={message} /></span>
         <button
           type="button"
           disabled={disabledTitle !== undefined}

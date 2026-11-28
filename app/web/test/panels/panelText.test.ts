@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { AttachmentMachine, type PanelView } from '../../src/panels/attachmentMachine';
 import { parseTermId } from '../../src/model/ids';
-import { badges, overlayText, ownershipText, statusText } from '../../src/panels/panelText';
+import { plainText } from '../../src/model/markedText';
+import type { GoneWhy } from '../../src/model/terminalTabs';
+import {
+  badges,
+  goneMarked,
+  goneText,
+  overlayText,
+  ownershipText,
+  panelStatusMarked,
+  statusText,
+} from '../../src/panels/panelText';
 
 const base: PanelView = new AttachmentMachine(parseTermId('t1')).view();
 
@@ -16,6 +26,25 @@ describe('panelText', () => {
     expect(statusText(view({ status: { kind: 'lost' } }))).toBe('lost');
     expect(statusText(view({ status: { kind: 'closed' } }))).toBe('closed');
     expect(statusText(view({ status: { kind: 'error', code: 'send_failed' } }))).toBe('send_failed');
+  });
+
+  it('goneMarked marks the terminal ID and flattens to goneText', () => {
+    const whys: GoneWhy[] = ['unlisted', 'other-instance', 'no-instance'];
+    for (const why of whys) {
+      const marked = goneMarked(why, 'term-9');
+      expect(Array.isArray(marked) ? marked.filter((part) => typeof part !== 'string') : []).toEqual([
+        { code: 'term-9' },
+      ]);
+      expect(plainText(marked)).toBe(goneText(why, 'term-9'));
+    }
+  });
+
+  it('panelStatusMarked marks a gone status and otherwise reads statusText', () => {
+    expect(panelStatusMarked(view({ status: { kind: 'gone', why: 'other-instance' } }), 't1')).toEqual(
+      goneMarked('other-instance', 't1'),
+    );
+    expect(panelStatusMarked(view({ status: { kind: 'lost' } }), 't1')).toBe('lost');
+    expect(panelStatusMarked(view({ status: null }), 't1')).toBeNull();
   });
 
   it('overlayText covers stale, disconnected waiting and attaching without an instance', () => {

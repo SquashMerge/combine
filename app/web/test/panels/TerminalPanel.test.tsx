@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseTermId } from '../../src/model/ids';
 import { GoneTerminal } from '../../src/panels/GoneTerminal';
-import { goneText } from '../../src/panels/panelText';
+import { goneMarked, goneText } from '../../src/panels/panelText';
 import { TerminalPanel, type TerminalPanelProps } from '../../src/panels/TerminalPanel';
 import { fakeXtermFactory } from '../support/fakeXterm';
 import {
@@ -271,6 +271,13 @@ describe('TerminalPanel', () => {
 });
 
 describe('GoneTerminal', () => {
+  it('marks the terminal ID in a marked message', () => {
+    render(<GoneTerminal message={goneMarked('unlisted', 'term-9')} onClose={vi.fn()} />);
+    const message = screen.getByTestId('gone-terminal-message');
+    expect(message.textContent).toBe(goneText('unlisted', 'term-9'));
+    expect(message.querySelector('code')?.textContent).toBe('term-9');
+  });
+
   it('shows its message and a Close button, and attaches nothing', () => {
     const onClose = vi.fn();
     const port = new MemoryTerminalPort();

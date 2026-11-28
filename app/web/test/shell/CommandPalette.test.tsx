@@ -28,6 +28,9 @@ async function mount(port: HostsPort = new MemoryHostsPort(sample())) {
   await act(async () => {});
 }
 
+const codesOf = (option: HTMLElement) =>
+  Array.from(option.querySelectorAll('.detail code')).map((code) => code.textContent);
+
 const open = async () => {
   fireEvent.keyDown(window, { key: 'k', metaKey: true });
   await screen.findByRole('dialog', { name: 'Command palette' });
@@ -47,6 +50,17 @@ describe('CommandPalette', () => {
     expect(document.activeElement).toBe(search());
     fireEvent.keyDown(search(), { key: 'Escape' });
     expect(dialog()).toBeNull();
+  });
+
+  it('marks paths, folders and commands in each detail', async () => {
+    await mount();
+    await open();
+    const byLabel = (label: string) =>
+      options().find((o) => o.querySelector('.label')?.textContent === label) as HTMLElement;
+    const space = byLabel('alpha');
+    expect(space.querySelector('.detail')?.textContent).toBe('mac /src/alpha');
+    expect(codesOf(space)).toEqual(['/src/alpha']);
+    expect(codesOf(byLabel('first'))).toEqual(['alpha', 'cmd one']);
   });
 
   it('filters by fuzzy match', async () => {
