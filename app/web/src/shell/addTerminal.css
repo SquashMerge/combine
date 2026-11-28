@@ -4,7 +4,7 @@
 }
 
 .add-terminal .command {
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

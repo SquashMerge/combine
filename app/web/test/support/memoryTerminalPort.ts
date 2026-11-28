@@ -17,6 +17,7 @@ import {
   type TerminalSize,
   type TerminalStreamEvent,
 } from '../../src/model/terminal';
+import { TERMINAL_THEME } from '../../src/renderers/terminal/settings';
 
 export type SentCommand =
   | { op: 'attach'; terminal: TermId; options: AttachRequestOptions; instance: string | null }
@@ -273,9 +274,9 @@ export function resizedEvent(at: Cursor, cols: number, rows: number): TerminalSt
 export function factsEvent(
   at: Cursor,
   display: Display = {
-    foreground: '#d4d4d4',
-    background: '#1e1e1e',
-    cursor_color: '#d4d4d4',
+    foreground: TERMINAL_THEME.foreground,
+    background: TERMINAL_THEME.background,
+    cursor_color: TERMINAL_THEME.cursor,
     cell_width: 8,
     cell_height: 17,
   },

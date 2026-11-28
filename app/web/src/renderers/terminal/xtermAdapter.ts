@@ -23,11 +23,7 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
     scrollback: TERMINAL_HISTORY_LINES,
     fontFamily: TERMINAL_FONT.family,
     fontSize: TERMINAL_FONT.size,
-    theme: {
-      foreground: TERMINAL_THEME.foreground,
-      background: TERMINAL_THEME.background,
-      cursor: TERMINAL_THEME.cursor,
-    },
+    theme: { ...TERMINAL_THEME },
     cursorBlink: false,
   });
 

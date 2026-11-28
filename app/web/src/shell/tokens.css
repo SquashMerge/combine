@@ -1,0 +1,19 @@
+:root {
+  --ink: #0b0c10;
+  --surface: #14151d;
+  --raised: #1d1e2a;
+  --purple: #7770dc;
+  --lavender: #aba5ff;
+  --amber: #ffaa10;
+  --text: #f7f7fb;
+  --text-muted: #b8bac8;
+  --control-border: #777a8e;
+  --success: #5fd6a0;
+  --danger: #ff8a80;
+  --selection: #aba5ff4d;
+  --scrim: #0b0c1099;
+  --font-display: 'Manrope', system-ui, sans-serif;
+  --font-ui: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', Menlo, monospace;
+  --disabled-opacity: 0.45;
+}
