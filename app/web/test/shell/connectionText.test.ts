@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeConnection } from '../../src/shell/connectionText';
+import { connectionShape, describeConnection } from '../../src/shell/connectionText';
 
 describe('describeConnection', () => {
   it('connecting', () => {
@@ -35,5 +35,15 @@ describe('describeConnection', () => {
 
   it('failed shows its message', () => {
     expect(describeConnection({ kind: 'failed', message: 'it broke', detail: 'why' })).toBe('it broke');
+  });
+});
+
+describe('connectionShape', () => {
+  it('draws one shape per connection kind', () => {
+    expect(connectionShape('connected')).toBe('check');
+    expect(connectionShape('connecting')).toBe('half-ring');
+    expect(connectionShape('reconnecting')).toBe('half-ring');
+    expect(connectionShape('dropped')).toBe('ring');
+    expect(connectionShape('failed')).toBe('cross');
   });
 });

@@ -18,6 +18,38 @@ async function mount(port: MemoryHostsPort) {
 const connected = { kind: 'connected' } as const;
 
 describe('SpaceRail', () => {
+  it('opens with the brand header: the logo, then the wordmark', () => {
+    const hosts = snapshot([host('a', HOST_A, connected)]);
+    const view = render(
+      <SpaceRail snapshot={hosts} selected={null} port={new MemoryHostsPort(hosts)} onSelect={() => undefined} />,
+    );
+    const brand = view.container.querySelector('nav[aria-label="Spaces"]')?.firstElementChild;
+    expect(brand?.className).toBe('rail-brand');
+    const logo = brand?.querySelector('img[alt=""]');
+    expect(logo?.getAttribute('src')).toMatch(/combine-icon-small\.svg$/);
+    expect(brand?.textContent).toBe('Combine');
+  });
+
+  it.each([
+    [{ kind: 'connected' }, 'check', 'Connected'],
+    [{ kind: 'connecting' }, 'half-ring', 'Connecting…'],
+    [{ kind: 'reconnecting', attempt: 2 }, 'half-ring', 'Reconnecting (attempt 2)…'],
+    [
+      { kind: 'dropped', reason: 'gone', detail: null, retryInMs: 1000 },
+      'ring',
+      'Dropped: gone. Retrying in 1 s.',
+    ],
+    [{ kind: 'failed', message: 'no route', detail: null }, 'cross', 'no route'],
+  ] as const)('shows a %j host with its glyph before the unchanged text', (connection, glyph, text) => {
+    const hosts = snapshot([host('a', HOST_A, connection)]);
+    const view = render(
+      <SpaceRail snapshot={hosts} selected={null} port={new MemoryHostsPort(hosts)} onSelect={() => undefined} />,
+    );
+    const status = view.container.querySelector('[role="status"]');
+    expect(status?.firstElementChild?.getAttribute('data-glyph')).toBe(glyph);
+    expect(status?.textContent).toBe(text);
+  });
+
   it('marks read-only spaces', async () => {
     const hosts = snapshot([
       host('a', HOST_A, connected, [space(HOST_A, '/src/alpha'), space(HOST_A, '/src/beta')]),

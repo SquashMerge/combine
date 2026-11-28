@@ -73,3 +73,11 @@ describe('bundled fonts', () => {
     expect(main.indexOf('renderAfterFonts(')).toBeLessThan(main.indexOf('createRoot('));
   });
 });
+
+describe('brand logo', () => {
+  it('ships the rail logo as a byte-identical copy of the brand asset', () => {
+    const shipped = readFileSync(join(srcRoot, 'shell/combine-icon-small.svg'));
+    const original = readFileSync(join(webRoot, '../../docs/brand/combine-icon-small.svg'));
+    expect(shipped.equals(original)).toBe(true);
+  });
+});

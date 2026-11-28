@@ -24,6 +24,7 @@
 
 .view-panel-snippet {
   margin: 4px 0 0;
+  padding: 8px 12px;
   overflow-x: auto;
   background: var(--ink);
   border-radius: 8px;

@@ -133,6 +133,23 @@ describe('TerminalPanel', () => {
     expect(t.stream().commands('attach')).toHaveLength(2);
   });
 
+  it('draws the state glyph before the state word in the header', async () => {
+    await mount();
+    const state = document.querySelector('.terminal-panel__state');
+    expect(state?.firstElementChild?.getAttribute('data-glyph')).toBe('filled-dot');
+    expect(state?.textContent).toBe('running');
+  });
+
+  it('marks a lost status with a cross and its status kind', async () => {
+    const t = await mount();
+    await goLive(t);
+    await t.emit(lostEvent(cursor(7, 1, 1)));
+    const status = screen.getByTestId('terminal-status');
+    expect(status.getAttribute('data-status')).toBe('lost');
+    expect(status.querySelector('svg')?.getAttribute('data-glyph')).toBe('cross');
+    expect(status.textContent).toBe('lost');
+  });
+
   it('closed status offers no reattach', async () => {
     const t = await mount();
     await goLive(t);
@@ -276,6 +293,8 @@ describe('GoneTerminal', () => {
     const message = screen.getByTestId('gone-terminal-message');
     expect(message.textContent).toBe(goneText('unlisted', 'term-9'));
     expect(message.querySelector('code')?.textContent).toBe('term-9');
+    expect(message.getAttribute('data-status')).toBe('gone');
+    expect(message.querySelector('svg')?.getAttribute('data-glyph')).toBe('cross');
   });
 
   it('shows its message and a Close button, and attaches nothing', () => {
