@@ -11,10 +11,10 @@
 # and the adapter gives up after 10 s, so the tests that restart or crash the core each get a
 # core of their own, in their own root and session; every other test shares one. Nothing here
 # ever touches the default core:
-# - Every `hc` call against the lane goes through lane_hc (one `env -i` allowlist). The one
-#   other `hc` call is a read-only `server status` in the default environment (lane_hc_default),
-#   at start, to learn the default core's live id; the lane refuses a core with that id or with
-#   the hard-coded one (lane_check_not_default).
+# - Every `hc` call goes through lane_hc (one `env -i` allowlist), against the lane only. The
+#   lane refuses a core with the hard-coded default id or any id in COMBINE_DEFAULT_CORE_IDS
+#   (lane_check_not_default); it never asks a live `hc` for the default id, since asked while no
+#   default core runs, hc would start one.
 # - Nothing connects anywhere but the lane socket, except in the daemon tests: their
 #   `combined serve` child connects only to the lane socket and listens only on its own Unix
 #   socket in the test's scratch directory, which only the test and its `combined connect`
@@ -61,23 +61,17 @@ if [ -z "$LANE_HC" ] || [ ! -x "$LANE_HC" ] || [ -z "$python" ]; then
   exit 2
 fi
 
-# The default core's live id, from one read-only `server status` in the default environment.
-# Like any `hc` call, it would start a default core if none ran; on this machine one always
-# does. The lane refuses this id and the hard-coded one, and doesn't start without it.
-default_live=$(lane_hc_default server status --json 2>/dev/null | "$python" -I -c '
-import json, re, sys
-try:
-    core_id = json.load(sys.stdin)["core"]["id"]
-except (ValueError, KeyError, TypeError):
-    sys.exit(1)
-if not isinstance(core_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", core_id):
-    sys.exit(1)
-print(core_id)
-') || default_live=
-if [ -z "$default_live" ]; then
-  echo "verify-herdr-core: cannot read the default core's id (hc server status in the default environment)" >&2
-  exit 1
-fi
+# Further default-core ids to refuse besides the hard-coded one, for a machine whose default
+# core has another id: COMBINE_DEFAULT_CORE_IDS, space-separated. A malformed entry refuses.
+default_extra=${COMBINE_DEFAULT_CORE_IDS:-}
+for id in $default_extra; do
+  case $id in
+    *[!A-Za-z0-9_-]*)
+      echo "verify-herdr-core: COMBINE_DEFAULT_CORE_IDS holds a malformed id" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # Tests that restart or crash the core. Each runs alone against a core of its own.
 restart_tests="backend_crash_starts_one_new_inexact_epoch backend_restart_starts_one_new_exact_epoch inexact_terminal_stays_inexact program_exit_is_final stale_replies_are_dropped_silently two_panels_recover_across_a_herdr_core_restart watch_reports_real_core_changes"
@@ -109,7 +103,7 @@ lane_down() {
   if [ "$started" = 1 ] && lane_check_kind "$LANE_SOCKET" socket; then
     id=$(core_id 2>/dev/null || true)
     if [ -z "$pinned" ]; then pinned=$id; fi
-    if lane_check_not_default "$id" "$default_live" && lane_check_core_id "$id" "$pinned"; then
+    if lane_check_not_default "$id" "$default_extra" && lane_check_core_id "$id" "$pinned"; then
       lane_hc_socket server stop --json >/dev/null 2>&1 || true
       # Not `server status`: asked while no core runs, hc starts a new one. The stopped core
       # removes its socket.
@@ -186,7 +180,7 @@ lane_up() {
   lane_hc server start --json >/dev/null
   lane_check_kind "$LANE_SOCKET" socket
   pinned=$(core_id)
-  if ! lane_check_not_default "$pinned" "$default_live"; then
+  if ! lane_check_not_default "$pinned" "$default_extra"; then
     echo "verify-herdr-core: the lane core's id is empty or the default core's" >&2
     exit 1
   fi

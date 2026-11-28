@@ -863,69 +863,26 @@ mod tests {
         assert!(!check("4242", exe, "", exe, "900"), "no parent");
     }
 
-    /// #27: the lane refuses a core with the hard-coded default id or with the live one the
-    /// default environment reported at start, and refuses outright when either id is missing.
+    /// #27: the lane refuses a core with the hard-coded default id or with any id the caller
+    /// lists in COMBINE_DEFAULT_CORE_IDS, and refuses outright when the lane id is missing.
     #[test]
     fn shell_refuses_the_default_core_by_either_id() {
         let hard = sh("lane_default_core_id", &[], &[]);
         let hard = String::from_utf8_lossy(&hard.stdout).into_owned();
         assert_eq!(hard.len(), 32, "{hard:?}");
         let check =
-            |id: &str, live: &str| sh_ok("lane_check_not_default \"$1\" \"$2\"", &[id, live]);
-        assert!(check("abc", "def"));
-        assert!(!check(&hard, "def"), "the hard-coded id");
-        assert!(!check("def", "def"), "the live id");
-        assert!(!check(&hard, &hard));
-        assert!(!check("", "def"), "no lane id");
-        assert!(!check("abc", ""), "no live id");
-        assert!(!check("", ""));
-    }
-
-    /// The default-environment read gets no HC_* variable and none of the lane's paths: only
-    /// what `lane_hc` passes from the caller, plus the caller's own XDG directories when set.
-    #[test]
-    fn shell_default_environment_is_the_callers_without_hc_or_lane_vars() {
-        let base = [
-            ("HOME", HOME),
-            ("USER", "me"),
-            ("LOGNAME", "me2"),
-            ("TMPDIR", "/var/folders/x/T"),
-            ("LANE_HC", "/usr/bin/env"),
-            ("LANE_ROOT", "/tmp/chc.Ab12Cd"),
-            ("LANE_SESSION", "cAb12Cd"),
-            ("LANE_SOCKET", "/tmp/chc.Ab12Cd/run/herdr-core/cAb12Cd.sock"),
-            ("HC_SESSION", "cAb12Cd"),
-            ("HC_SOCKET", "/tmp/chc.Ab12Cd/run/herdr-core/cAb12Cd.sock"),
-            ("SECRET_FROM_CALLER", "must not leak"),
-        ];
-        let lines = |extra: &[(&str, &str)]| {
-            let environment: Vec<(&str, &str)> = base.iter().chain(extra).copied().collect();
-            let output = sh("lane_hc_default", &[], &environment);
-            assert!(output.status.success(), "lane_hc_default failed");
-            let mut got: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::to_string)
-                .collect();
-            got.sort();
-            got
-        };
-        let mut want = vec![
-            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
-            format!("HOME={HOME}"),
-            "USER=me".to_string(),
-            "LOGNAME=me2".to_string(),
-            "TMPDIR=/var/folders/x/T".to_string(),
-        ];
-        want.sort();
-        assert_eq!(lines(&[]), want);
-        let xdg = [
-            ("XDG_STATE_HOME", "/Users/someone/state"),
-            ("XDG_CONFIG_HOME", "/Users/someone/config"),
-            ("XDG_RUNTIME_DIR", "/Users/someone/run"),
-        ];
-        want.extend(xdg.iter().map(|(name, value)| format!("{name}={value}")));
-        want.sort();
-        assert_eq!(lines(&xdg), want);
+            |id: &str, others: &str| sh_ok("lane_check_not_default \"$1\" \"$2\"", &[id, others]);
+        assert!(check("abc", ""), "no further ids");
+        assert!(check("abc", "def ghi"));
+        assert!(!check(&hard, ""), "the hard-coded id");
+        assert!(
+            !check(&hard, "def"),
+            "the hard-coded id, with others listed"
+        );
+        assert!(!check("def", "def"), "a listed id");
+        assert!(!check("ghi", "def ghi"), "the second listed id");
+        assert!(!check("", ""), "no lane id");
+        assert!(!check("", "def"));
     }
 
     #[test]

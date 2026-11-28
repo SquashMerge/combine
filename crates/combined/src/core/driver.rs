@@ -57,8 +57,8 @@ pub struct Driver {
     pending: FuturesUnordered<Opening>,
     /// Calls in flight. At shutdown they, and whatever is queued behind them (a detach
     /// included), are dropped with the driver without running, so their handles are dropped
-    /// rather than detached. Nor are the effects core issues when the server's `close_all`
-    /// removes each connection at shutdown. A hardening note only: nothing waits on them.
+    /// rather than detached: the server's `close_all` removes each connection without draining
+    /// backend calls. A hardening note only: nothing waits on them.
     running: FuturesUnordered<BoxFuture<'static, Finished>>,
     last_polled: Option<AttachmentId>,
     journal: Option<Vec<BackendCommand>>,

@@ -14,14 +14,20 @@
 
 lane_path() { printf '%s' /usr/bin:/bin:/usr/sbin:/sbin; }
 
-# This machine's default core id, hard-coded. The lane also reads the live one at start
-# (lane_hc_default) and refuses either (lane_check_not_default).
+# This machine's default core id, hard-coded. The lane refuses it and any id in
+# COMBINE_DEFAULT_CORE_IDS (lane_check_not_default). The lane never asks a live `hc` for the
+# default core's id: asked while no default core runs, hc would start one.
 lane_default_core_id() { printf '%s' 4bcff4a58f4d97d505396e5a43a807e6; }
 
-# lane_check_not_default ID LIVE: ID is set and is neither the hard-coded default core id nor
-# LIVE, the id the default environment's core reported at lane start, which must be set too.
+# lane_check_not_default ID [OTHERS]: ID is set and is neither the hard-coded default core id
+# nor any id in OTHERS, a space-separated list of further default-core ids the caller supplied
+# (COMBINE_DEFAULT_CORE_IDS, validated by the caller to letters, digits, `_` and `-`).
 lane_check_not_default() {
-  [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$(lane_default_core_id)" ] && [ "$1" != "$2" ]
+  [ -n "$1" ] && [ "$1" != "$(lane_default_core_id)" ] || return 1
+  for other in ${2:-}; do
+    [ "$1" != "$other" ] || return 1
+  done
+  return 0
 }
 
 # lane_check_root ROOT: /tmp/chc.XXXXXX or its /private form, six letters and digits.
@@ -97,13 +103,3 @@ lane_hc_socket() {
     HC_SOCKET="$LANE_SOCKET" "$LANE_HC" "$@"
 }
 
-# The default environment's `hc`, only for the one read-only `server status` that learns the
-# default core's live id: no HC_* variable and none of the lane's paths, only what lane_hc
-# passes from the caller plus the caller's own XDG_* directories when set, so it reaches the
-# core the caller's shell reaches.
-lane_hc_default() {
-  env -i PATH="$(lane_path)" HOME="${HOME:-}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
-    TMPDIR="${TMPDIR:-/tmp}" ${XDG_STATE_HOME:+"XDG_STATE_HOME=$XDG_STATE_HOME"} \
-    ${XDG_CONFIG_HOME:+"XDG_CONFIG_HOME=$XDG_CONFIG_HOME"} \
-    ${XDG_RUNTIME_DIR:+"XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"} "$LANE_HC" "$@"
-}
