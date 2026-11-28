@@ -105,7 +105,9 @@ function PaletteDialog({ snapshot, panels = null, onClose, ...handlers }: Palett
                 onClose();
               }}
             >
-              <span className="label">{entry.label}</span>
+              <span className="label">
+                <MarkedTextView text={entry.labelMarked ?? entry.label} />
+              </span>
               <span className="detail">
                 <MarkedTextView text={entry.detailMarked ?? entry.detail} />
               </span>

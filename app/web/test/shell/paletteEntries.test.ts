@@ -64,6 +64,26 @@ describe('paletteEntries', () => {
     }
   });
 
+  it('marks an untitled panel ID in its label and in the Close panel detail', () => {
+    const base = samplePanels();
+    const untitled = { ...base, panels: base.panels.map((panel) => ({ ...panel, title: null })) };
+    const entries = buildPaletteEntries(sample(), untitled);
+    const show = entries.find((entry) => entry.action.kind === 'show-panel');
+    expect(show?.label).toBe('notes');
+    expect(show?.labelMarked).toEqual([{ code: 'notes' }]);
+    const close = entries.find((entry) => entry.action.kind === 'close-panel');
+    expect(close?.detail).toBe('notes in alpha');
+    expect(close?.detailMarked).toEqual([{ code: 'notes' }, ' in ', { code: 'alpha' }]);
+
+    const titled = buildPaletteEntries(sample(), base);
+    expect(titled.find((entry) => entry.action.kind === 'show-panel')?.labelMarked).toBe('Notes');
+    expect(titled.find((entry) => entry.action.kind === 'close-panel')?.detailMarked).toEqual([
+      'Notes',
+      ' in ',
+      { code: 'alpha' },
+    ]);
+  });
+
   it('marks the paths, folders and commands in each detail', () => {
     const codes = (kind: string) =>
       buildPaletteEntries(sample(), samplePanels())

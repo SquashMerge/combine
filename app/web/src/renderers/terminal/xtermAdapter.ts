@@ -3,7 +3,12 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { CellSize, XtermAdapter, XtermAdapterFactory, XtermCallbacks } from './adapter';
-import { TERMINAL_FONT, TERMINAL_HISTORY_LINES, TERMINAL_THEME } from './settings';
+import {
+  TERMINAL_FONT,
+  TERMINAL_FONT_FACES,
+  TERMINAL_HISTORY_LINES,
+  TERMINAL_THEME,
+} from './settings';
 
 const encoder = new TextEncoder();
 
@@ -81,6 +86,24 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
 
   child.addEventListener('focusin', callbacks.onFocus);
 
+  // A terminal opened before its face arrived (the first render goes ahead after 3 s) measured a
+  // fallback cell. xterm measures again only when a font option changes, so once the face loads,
+  // set an equivalent family and then the real one: each set measures, and a changed cell reaches
+  // onCellSize through the next render, which refits the owner and resends the display facts.
+  let disposed = false;
+  const fonts = typeof document === 'undefined' ? undefined : document.fonts;
+  if (fonts && !TERMINAL_FONT_FACES.every((spec) => fonts.check(spec))) {
+    void Promise.all(TERMINAL_FONT_FACES.map((spec) => fonts.load(spec)))
+      .then((loaded) => {
+        if (disposed || !loaded.some((faces) => faces.length > 0)) return;
+        terminal.options.fontFamily = TERMINAL_FONT.family.replace(/'/g, '"');
+        terminal.options.fontFamily = TERMINAL_FONT.family;
+      })
+      .catch(() => {
+        // The face never arrives; the fallback cell stays measured.
+      });
+  }
+
   let lastCell: CellSize | null = null;
   terminal.onRender(() => {
     const screen = child.querySelector('.xterm-screen');
@@ -111,6 +134,7 @@ export const createXtermAdapter: XtermAdapterFactory = (host, size, callbacks) =
       return child.contains(document.activeElement);
     },
     dispose() {
+      disposed = true;
       child.removeEventListener('focusin', callbacks.onFocus);
       webgl?.dispose();
       webgl = null;

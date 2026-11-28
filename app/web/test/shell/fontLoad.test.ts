@@ -80,6 +80,20 @@ describe('fontLoad', () => {
     expect(await outcome).toBe('failed');
   });
 
+  it('waits for the terminal face even when another face rejects first', async () => {
+    const { fonts, pending } = fakeFonts();
+    let outcome: string | undefined;
+    void waitForFonts(fonts).then((result) => {
+      outcome = result;
+    });
+    pending[4]?.reject(new Error('network'));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(outcome).toBeUndefined();
+    pending.slice(0, 4).forEach((entry) => entry.resolve(face));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toBe('failed');
+  });
+
   it('times out when the loads never settle', async () => {
     const { fonts } = fakeFonts();
     const outcome = waitForFonts(fonts);

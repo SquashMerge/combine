@@ -1,13 +1,12 @@
 import { BUNDLED_FONT } from '../model/tokens';
-import { TERMINAL_FONT } from '../renderers/terminal/settings';
+import { TERMINAL_FONT_FACES } from '../renderers/terminal/settings';
 
 export type FontLoadOutcome = 'loaded' | 'missing' | 'failed' | 'timeout' | 'unsupported';
 
 export const FONT_LOAD_TIMEOUT_MS = 3000;
 
 export const FONT_LOAD_SPECS = [
-  `400 ${TERMINAL_FONT.size}px '${BUNDLED_FONT.mono}'`,
-  `700 ${TERMINAL_FONT.size}px '${BUNDLED_FONT.mono}'`,
+  ...TERMINAL_FONT_FACES,
   `400 14px '${BUNDLED_FONT.ui}'`,
   `600 14px '${BUNDLED_FONT.ui}'`,
   `700 18px '${BUNDLED_FONT.display}'`,
@@ -26,13 +25,12 @@ export async function waitForFonts(
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   const loads = (async (): Promise<FontLoadOutcome> => {
-    try {
-      const loaded = await Promise.all(FONT_LOAD_SPECS.map((spec) => fonts.load(spec)));
-      const present = loaded.every((faces) => faces.length > 0);
-      return present && FONT_LOAD_SPECS.every((spec) => fonts.check(spec)) ? 'loaded' : 'missing';
-    } catch {
-      return 'failed';
-    }
+    // Every load settles before an outcome, so one face failing early can't start the render
+    // while the terminal's face is still on its way.
+    const settled = await Promise.allSettled(FONT_LOAD_SPECS.map((spec) => fonts.load(spec)));
+    if (settled.some((result) => result.status === 'rejected')) return 'failed';
+    const present = settled.every((result) => result.status === 'fulfilled' && result.value.length > 0);
+    return present && FONT_LOAD_SPECS.every((spec) => fonts.check(spec)) ? 'loaded' : 'missing';
   })();
   try {
     return await Promise.race([loads, timeout]);

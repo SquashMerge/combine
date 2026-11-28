@@ -5,7 +5,7 @@ import { type LayoutNode, type LayoutSnapshot, type SplitDirection, layoutTiles,
 import type { OpenUrlPort, PanelPort } from '../ipc/port';
 import type { TerminalPort } from '../ipc/terminalPort';
 import { type SpaceKey } from '../model/space';
-import { type SpacePanelsView, panelEntry, tabLabel } from '../model/panels';
+import { type SpacePanelsView, panelEntry, tabLabel, tabLabelMarked } from '../model/panels';
 import {
   type TerminalTabEntry,
   type TerminalTabsContext,
@@ -17,6 +17,7 @@ import {
 } from '../model/terminalTabs';
 import { HELD_NOTICE, HELD_TITLE, type HeldReason } from './heldLayout';
 import { GoneTerminal } from '../panels/GoneTerminal';
+import { MarkedTextView } from '../panels/MarkedTextView';
 import { goneMarked } from '../panels/panelText';
 import { TerminalPanel } from '../panels/TerminalPanel';
 import { ViewPanel } from '../panels/ViewPanel';
@@ -273,6 +274,7 @@ function Node({ node, closable, openTabs, ...rest }: NodeProps) {
             }
             const tabEntry = panelEntry(list, panel);
             const label = panelPort === undefined ? panel : tabLabel(list, panel);
+            const labelMarked = panelPort === undefined ? [{ code: panel }] : tabLabelMarked(list, panel);
             const busy = busyPanels?.has(panel) ?? false;
             const loading = tabEntry.kind === 'loading';
             const blocked = held !== null || busy || loading;
@@ -287,7 +289,7 @@ function Node({ node, closable, openTabs, ...rest }: NodeProps) {
                   aria-selected={panel === active}
                   onClick={() => onSelectTab(node.id, panel)}
                 >
-                  {label}
+                  <MarkedTextView text={labelMarked} />
                 </button>
                 {panelPort !== undefined && onCloseTab !== undefined && (
                   <button

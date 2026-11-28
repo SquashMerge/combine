@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { XtermAdapter, XtermCallbacks } from '../../src/renderers/terminal/adapter';
 import { installTerminalDom } from '../support/terminalDom';
 
@@ -9,7 +9,16 @@ const webgl = vi.hoisted(() => ({
   contextLoss: [] as Array<() => void>,
 }));
 
-const terminals = vi.hoisted(() => [] as Array<{ _core: { coreService: { triggerBinaryEvent(data: string): void } } }>);
+const terminals = vi.hoisted(
+  () =>
+    [] as Array<{
+      _core: {
+        coreService: { triggerBinaryEvent(data: string): void };
+        _charSizeService: { measure(): void };
+      };
+      options: { fontFamily?: string };
+    }>,
+);
 
 vi.mock('@xterm/xterm', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@xterm/xterm')>();
@@ -247,6 +256,74 @@ describe('createXtermAdapter', () => {
     await rendered();
     expect(h.cells).toEqual([{ width: 8, height: 20 }]);
     h.adapter.dispose();
+  });
+
+  describe('a terminal face that loads after the terminal opened', () => {
+    function fakeFontSet(ready: boolean) {
+      const pending: Array<(faces: FontFace[]) => void> = [];
+      const fonts = {
+        check: vi.fn(() => ready),
+        load: vi.fn((_spec: string) => new Promise<FontFace[]>((resolve) => pending.push(resolve))),
+      };
+      Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+      return { fonts, settle: (faces: FontFace[]) => pending.forEach((resolve) => resolve(faces)) };
+    }
+
+    function measured() {
+      const terminal = terminals.at(-1);
+      if (!terminal) throw new Error('no terminal');
+      const families: string[] = [];
+      const measure = vi.spyOn(terminal._core._charSizeService, 'measure').mockImplementation(() => {
+        families.push(String(terminal.options.fontFamily));
+      });
+      return { terminal, measure, families };
+    }
+
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'fonts');
+    });
+
+    it('measures the cell again once the face arrives, and keeps the configured family', async () => {
+      const { fonts, settle } = fakeFontSet(false);
+      const h = make();
+      const { terminal, families } = measured();
+      expect(fonts.load.mock.calls.map(([spec]) => spec)).toEqual([
+        "400 13px 'JetBrains Mono'",
+        "700 13px 'JetBrains Mono'",
+      ]);
+      expect(families).toEqual([]);
+      settle([{} as FontFace]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(families).toEqual([
+        '"JetBrains Mono", Menlo, monospace',
+        "'JetBrains Mono', Menlo, monospace",
+      ]);
+      expect(terminal.options.fontFamily).toBe("'JetBrains Mono', Menlo, monospace");
+      h.adapter.dispose();
+    });
+
+    it('does nothing when the face was ready at open, missing, or arrives after dispose', async () => {
+      fakeFontSet(true);
+      const ready = make();
+      expect((document.fonts as unknown as { load: ReturnType<typeof vi.fn> }).load).not.toHaveBeenCalled();
+      ready.adapter.dispose();
+
+      const missing = fakeFontSet(false);
+      const h = make();
+      const { measure } = measured();
+      missing.settle([]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(measure).not.toHaveBeenCalled();
+      h.adapter.dispose();
+
+      const late = fakeFontSet(false);
+      const gone = make();
+      const goneMeasure = measured().measure;
+      gone.adapter.dispose();
+      late.settle([{} as FontFace]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(goneMeasure).not.toHaveBeenCalled();
+    });
   });
 
   it('calls done after the write is parsed', async () => {

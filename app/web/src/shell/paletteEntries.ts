@@ -20,6 +20,8 @@ export type PaletteAction =
 export interface PaletteEntry extends Searchable {
   id: string;
   action: PaletteAction;
+  /** `label` with a bare ID marked; `label` stays the plain text that is searched. */
+  labelMarked?: MarkedText;
   /** `detail` with its paths, IDs and commands marked. */
   detailMarked?: MarkedText;
 }
@@ -66,7 +68,8 @@ function panelActionEntries(panels: PalettePanels): PaletteEntry[] {
   const entries: PaletteEntry[] = [];
   if (focused !== null) {
     const summary = panels.panels.find((panel) => panel.id === focused.panel);
-    const detail = described([summary?.title ?? focused.label ?? focused.panel, ' in ', { code: folder }]);
+    const name = summary?.title ?? focused.label ?? { code: focused.panel };
+    const detail = described([name, ' in ', { code: folder }]);
     entries.push({
       id: `close-panel:${key}:${focused.panel}`,
       group: GROUP_PANEL_ACTION,
@@ -110,6 +113,7 @@ function panelEntries(panels: PalettePanels): PaletteEntry[] {
       id: `panel:${key}:${summary.id}`,
       group: GROUP_PANEL,
       label: summary.title ?? summary.id,
+      labelMarked: summary.title ?? [{ code: summary.id }],
       ...described([
         `${panels.hostName} `,
         { code: folderName(space.path) },
