@@ -215,6 +215,15 @@ describe('TileTree terminal tabs', () => {
     expect(port.streams).toHaveLength(0);
   });
 
+  it('an unknown tab with no terminal context shows missing with its ID as code', async () => {
+    render(
+      tree(new MemoryTerminalPort(), fakeXtermFactory(), layout(tile('t1', ['.bogus'])), {}, { ctx: null, panels: true }),
+    );
+    await flush();
+    expect(bodyOf('t1').textContent).toBe('Panel .bogus is missing');
+    expect(bodyOf('t1').querySelector('code')?.textContent).toBe('.bogus');
+  });
+
   it('an unknown terminal tab shows missing, and a listed panel cannot take a reserved ID', async () => {
     const port = new MemoryTerminalPort();
     const view = render(

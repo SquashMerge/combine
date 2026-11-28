@@ -119,7 +119,9 @@ describe('AddTerminalMenu', () => {
     await open();
     const skipped = screen
       .getAllByRole('menuitem')
-      .find((item) => item.textContent === 'notes: not a terminal panel') as HTMLElement;
+      .find((item) => item.textContent === 'notes: not a terminal panel');
+    expect(skipped).toBeDefined();
+    if (skipped === undefined) return;
     expect(skipped.querySelector('code')?.textContent).toBe('notes');
     expect(skipped.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(skipped);
