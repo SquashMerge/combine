@@ -16,7 +16,9 @@ export function GoneTerminal({ message, onClose, disabledTitle }: GoneTerminalPr
       <div className="terminal-panel__status">
         <span data-testid="gone-terminal-message" data-status="gone">
           <StateGlyph shape="cross" />
-          <MarkedTextView text={message} />
+          <span>
+            <MarkedTextView text={message} />
+          </span>
         </span>
         <button
           type="button"
